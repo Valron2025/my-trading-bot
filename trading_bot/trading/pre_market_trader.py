@@ -86,14 +86,14 @@ class PreMarketTrader:
 
         # ========== НАСТРОЙКИ (АВТОМАТИЧЕСКИ) ==========
         self.max_orders_per_day = 5  # Максимум ордеров в день
-        self.max_capital_per_order = 1000  # Будет перезаписано в _update_dynamic_params
+        # ✅ ИСПРАВЛЕНО: начальное значение (будет перезаписано в _update_dynamic_params)
+        self.max_capital_per_order = 5000  # Стартовое значение, будет пересчитано
         self.min_score_threshold = 3  # Минимальный score для входа
 
         # ========== ОТКЛЮЧАЕМ ФУНДАМЕНТАЛЬНЫЙ АНАЛИЗ ==========
-        # Нет работающих API для российских акций
-        self.use_fundamental = False  # Меняем с True на False
+        self.use_fundamental = False
         self.fundamental_enabled = False
-        self.pre_market_start_hour = 6  # Начало pre-market (МСК)
+        self.pre_market_start_hour = 6
         self.pre_market_start_minute = 50
 
         # Динамические параметры (будут рассчитаны под капитал)
@@ -111,7 +111,6 @@ class PreMarketTrader:
 
         info(f"🌅 PreMarketTrader инициализирован (ПОЛНАЯ ВЕРСИЯ)")
         info(f"   Макс. ордеров в день: {self.max_orders_per_day}")
-        info(f"   Макс. капитал на ордер: {self.max_capital_per_order}₽")
         info(f"   Мин. score для входа: {self.min_score_threshold}")
         info(f"   Фундаментальный анализ (pre-market): {'✅ ВКЛ' if self.fundamental_enabled else '❌ ВЫКЛ'}")
         info(f"   Pre-market начало: {self.pre_market_start_hour:02d}:{self.pre_market_start_minute:02d}")
@@ -230,13 +229,18 @@ class PreMarketTrader:
 
     def _update_dynamic_params(self, total_capital: float):
         """Обновление динамических параметров под капитал"""
-        # Размер позиции (от капитала)
+        # Размер позиции (от капитала) - ДИНАМИЧЕСКИЙ РАСЧЁТ
         if total_capital < 5000:
             self.max_capital_per_order = max(200, total_capital * 0.1)
         elif total_capital < 20000:
             self.max_capital_per_order = max(500, total_capital * 0.08)
+        elif total_capital < 50000:
+            self.max_capital_per_order = max(1000, total_capital * 0.06)
         else:
-            self.max_capital_per_order = max(1000, total_capital * 0.05)
+            self.max_capital_per_order = max(2000, total_capital * 0.05)
+
+        # Ограничиваем максимум 20,000₽ на один ордер
+        self.max_capital_per_order = min(self.max_capital_per_order, 20000)
 
         # Стоп-лосс и тейк-профит (чем больше капитал, тем консервативнее)
         if total_capital < 5000:
@@ -253,7 +257,8 @@ class PreMarketTrader:
             self.dynamic_trailing_stop_pct = 0.3
 
         info(f"📊 Динамические параметры: TP={self.dynamic_take_profit_pct:.1f}%, "
-             f"SL={self.dynamic_stop_loss_pct:.1f}%, TS={self.dynamic_trailing_stop_pct:.1f}%")
+             f"SL={self.dynamic_stop_loss_pct:.1f}%, TS={self.dynamic_trailing_stop_pct:.1f}%, "
+             f"MaxOrder={self.max_capital_per_order:.0f}₽")
 
     # ========== АНАЛИЗ КАНДИДАТОВ (ПОЛНАЯ ВЕРСИЯ) ==========
 
@@ -349,16 +354,19 @@ class PreMarketTrader:
                 if not current_price or current_price <= 0:
                     continue
 
-                # Расчёт количества
-                max_amount = min(self.max_capital_per_order, available * 0.15)
-                quantity = int(max_amount / current_price)
-
-                # Корректировка по лоту
+                # Получаем лот
                 lot = 1
                 for stock in all_shares:
                     if stock.get('figi') == figi:
                         lot = stock.get('lot', 1)
                         break
+
+                # ✅ ИСПРАВЛЕНО: используем dynamic params вместо position_sizer
+                # Рассчитываем количество через dynamic params
+                max_amount = min(self.max_capital_per_order, available * 0.15)
+                quantity = int(max_amount / current_price)
+
+                # Корректировка по лоту
                 if lot > 1:
                     quantity = (quantity // lot) * lot
                 if quantity < lot:
