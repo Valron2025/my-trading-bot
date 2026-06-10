@@ -1,0 +1,9 @@
+Memory Diagnosis Report
+======================
+
+Initial: 19.0 MB
+After imports: +159.0 MB
+After caches: +35.3 MB
+Final: 215.0 MB
+Limit: 512 MB
+Status: PASS

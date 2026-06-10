@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: trading-bot-web
+    runtime: python
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
+    startCommand: gunicorn web_server:app --bind 0.0.0.0:$PORT --workers 1 --threads 1 --timeout 300 --max-requests 200 --max-requests-jitter 50
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: TBANK_TOKEN
+        sync: false
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: ENABLE_OTC_TRADING
+        value: "false"
+      - key: LOG_LEVEL
+        value: "WARNING"
+      - key: PYTHONPATH
+        value: "."
+    healthCheckPath: /health
+    autoDeploy: true
+    plan: free
+    numInstances: 1

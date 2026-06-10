@@ -1,0 +1,172 @@
+# ============================================
+# PYTHON
+# ============================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.pyc
+*.pyo
+*.pyd
+
+# ============================================
+# VIRTUAL ENVIRONMENT
+# ============================================
+venv/
+.venv/
+env/
+.env
+.env.*
+ENV/
+ENV3/
+
+# ============================================
+# LOGS
+# ============================================
+logs/
+*.log
+*.log.*
+trading_bot.lock
+
+# ============================================
+# IDE
+# ============================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+*~
+.project
+.pydevproject
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/dictionaries
+.idea/libraries
+
+# ============================================
+# OS
+# ============================================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ============================================
+# TRADING BOT SPECIFIC
+# ============================================
+backtest_results/
+optimization_results/
+# *.csv  <- ЗАКОММЕНТИРОВАНО! CSV файлы теперь будут загружаться
+*.png
+*.jpg
+*.xlsx
+bot_settings.json
+optimized_params.json
+trading_bot.lock
+
+# ============================================
+# PID FILES
+# ============================================
+*.pid
+/tmp/*.pid
+.pid
+.pidfile
+
+# ============================================
+# LOCAL CONFIG
+# ============================================
+.env.local
+.env.production
+.env.*.local
+.env.development
+.env.test
+
+# ============================================
+# CACHE
+# ============================================
+.pip_cache/
+__pycache__/
+*.cache
+*.pkl
+.cache/
+.pytest_cache/
+.mypy_cache/
+
+# ============================================
+# DISTRIBUTION / PACKAGING
+# ============================================
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ============================================
+# DATA & DATABASES
+# ============================================
+*.db
+*.sqlite
+*.sqlite3
+
+# ============================================
+# SECRETS & KEYS
+# ============================================
+*.key
+*.pem
+*.crt
+*.p12
+secrets/
+.credentials/
+google-credentials.json
+
+# ============================================
+# TEMPORARY FILES
+# ============================================
+*.tmp
+*.temp
+*.bak
+*.backup
+*~
+*.swp
+*.swo
+
+# ============================================
+# PROFILING & COVERAGE
+# ============================================
+.prof
+*.prof
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# ============================================
+# JUPYTER NOTEBOOK
+# ============================================
+.ipynb_checkpoints/
+*.ipynb
+
+# ============================================
+# RENDER SPECIFIC
+# ============================================
+.pip_cache/
+.pytest_cache/
+runtime.txt

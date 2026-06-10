@@ -1,0 +1,12 @@
+{
+  "use_short": false,
+  "max_positions": 3,
+  "price_cache_ttl": 10,
+  "min_trade_amount": 200,
+  "adaptive_position_size_pct": 0.05,
+  "adaptive_timeout_minutes": 15,
+  "adaptive_cycle_seconds": 60,
+  "use_fundamental_in_trading": false,
+  "use_correlation_analysis": false,
+  "use_mtf_analysis": false
+}

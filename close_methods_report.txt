@@ -1,0 +1,43 @@
+================================================================================
+ОТЧЁТ ПО МЕТОДАМ ЗАКРЫТИЯ ПОЗИЦИЙ
+================================================================================
+
+1. close_position методы:
+   api\tbank_client.py:3311 - close_position_with_retry
+   risk\position_manager.py:1241 - _close_position
+   risk\position_manager.py:1862 - close_position
+   risk\position_manager.py:2359 - close_position_smart
+   trading\advanced_tp_sl.py:270 - _close_position
+   core\shutdown_handler.py:46 - _should_close_positions
+   core\trading_loop.py:616 - _should_close_position_smart_detailed
+   core\trading_loop.py:901 - _should_close_position_smart
+   core\trading_loop.py:2189 - _close_positions_before_clearing
+   core\trading_loop.py:2795 - _close_positions_if_needed
+   bot.py:580 - close_position_by_ticker
+   bot.py:650 - close_position
+
+2. emergency методы:
+   api\tbank_client.py:2125 - _place_market_order_emergency
+
+3. force методы:
+
+4. Приватные _close методы:
+
+5. Другие close методы:
+   api\tbank_client.py:232 - buy
+   api\tbank_client.py:323 - sell
+   api\tbank_client.py:409 - sell_short
+   api\tbank_client.py:1216 - cancel_all_duplicate_orders
+   api\tbank_client.py:1309 - cancel_order
+   api\tbank_client.py:1434 - cancel_stale_limit_orders
+   api\tbank_client.py:2091 - cancel_stop_order
+   api\tbank_client.py:2660 - cancel_all_orders_by_ticker
+   api\tbank_client.py:3471 - buy_with_fallback
+   api\tbank_client.py:3525 - sell_with_fallback
+   risk\position_manager.py:339 - cancel_iceberg
+   risk\position_manager.py:448 - cancel_trailing_stop
+   trading\order_placement.py:49 - cancel_all_orders
+   trading\smart_orders.py:251 - cancel_order
+
+
+ВСЕГО НАЙДЕНО: 56 методов
