@@ -248,14 +248,6 @@ class SmartOrderManager:
     # 3. УПРАВЛЕНИЕ ЗАЯВКАМИ
     # ========================================================================
 
-    def cancel_order(self, order_id: str) -> bool:
-        """Отмена умной заявки"""
-        if order_id in self.active_orders:
-            del self.active_orders[order_id]
-            info(f"🛑 Отменена умная заявка {order_id}")
-            return True
-        return False
-
     def get_status(self, order_id: str) -> Optional[Dict]:
         """Получение статуса заявки"""
         order = self.orders.get(order_id)

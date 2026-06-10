@@ -406,80 +406,6 @@ class TBankClient:
                 error(f"❌ Ошибка лимитной продажи {ticker}: {error_msg[:100]}")
                 return False
 
-    def sell_short(self, figi: str, quantity: int) -> bool:
-        """Открытие SHORT позиции с ПОДТВЕРЖДЕНИЕМ"""
-        self._wait_for_rate_limit()
-
-        ticker = self._get_ticker_by_figi(figi) or figi[:8]
-        validator = self._init_validator()
-
-        # ✅ ПРЕДВАРИТЕЛЬНАЯ ВАЛИДАЦИЯ
-        is_valid, reason, info = validator.validate_before_send(
-            figi=figi,
-            quantity=quantity,
-            direction="SELL",
-            is_short=True
-        )
-
-        if not is_valid:
-            error(f"❌ Валидация SHORT {ticker} не пройдена: {reason}")
-            return False
-
-        # ОКРУГЛЕНИЕ ДО ЛОТА
-        original_qty = quantity
-        lot_size = self._get_lot_size(figi)
-
-        if lot_size > 1:
-            lots = quantity // lot_size
-            if lots == 0:
-                lots = 1
-            quantity = lots * lot_size
-
-            if quantity != original_qty:
-                warning(f"🔄 SHORT {ticker}: округление {original_qty} → {quantity} (лот={lot_size})")
-
-        info(f"🔍 SHORT {ticker}: начальная проверка...")
-        info(f"   📊 Запрошено: {original_qty} шт, Исполняется: {quantity} шт, Лотность: {lot_size}")
-
-        if self.is_confirmation_required(figi):
-            error(f"❌ {ticker} в черном списке - SHORT невозможен")
-            return False
-
-        price = self.get_current_price(figi)
-        if not price:
-            error(f"❌ Не удалось получить цену для SHORT {figi}")
-            return False
-
-        info(f"🔴 SHORT: {quantity} шт {ticker} по ~{price:.2f}₽")
-
-        # ОТПРАВКА С ПОДТВЕРЖДЕНИЕМ
-        result = validator.send_order_with_confirmation(
-            figi=figi,
-            quantity=quantity,
-            direction="SELL",
-            order_type="MARKET",
-            is_short=True,
-            max_wait_seconds=10
-        )
-
-        if result.get('success') and result.get('found'):
-            success(f"✅ SHORT {ticker}: {quantity} шт ПОДТВЕРЖДЕН!")
-            info(
-                f"   Статус: {result.get('status')}, исполнено: {result.get('executed_lots')}/{result.get('requested_lots')}")
-
-            # Сохраняем позицию
-            position_entries[figi] = {
-                'entry_time': datetime.now(),
-                'entry_price': price,
-                'lowest_price': price,
-                'quantity': quantity,
-                'side': 'SHORT'
-            }
-            return True
-        else:
-            error(f"❌ SHORT {ticker} НЕ ПОДТВЕРЖДЕН: {result.get('error')}")
-            return False
-
     # ========== НОВЫЙ МЕТОД ДЛЯ ПРОВЕРКИ СТАТУСА ЗАЯВКИ ==========
     def check_order_status(self, order_id: str, figi: str = None) -> Optional[Dict[str, Any]]:
         """
@@ -2087,20 +2013,6 @@ class TBankClient:
         except Exception as e:
             debug(f"Ошибка проверки стоп-ордеров для {figi}: {e}")
             return False
-
-    def cancel_stop_order(self, stop_order_id: str) -> bool:
-        self._wait_for_rate_limit()
-
-        with Client(self.token) as client:
-            try:
-                client.stop_orders.cancel_stop_order(
-                    account_id=self.account_id,
-                    stop_order_id=stop_order_id
-                )
-                return True
-            except Exception as e:
-                warning(f"Ошибка отмены стоп-приказа: {e}")
-                return False
 
     def _get_min_price_increment(self, figi: str) -> float:
         return 0.01

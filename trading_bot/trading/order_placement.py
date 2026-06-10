@@ -46,29 +46,3 @@ class OrderPlacement:
             error(f"Ошибка размещения лимитного ордера: {e}")
             return False
 
-    def cancel_all_orders(self) -> dict:
-        """Отмена всех активных заявок"""
-        try:
-            if hasattr(_get_tbank(), 'cancel_all_orders'):
-                return _get_tbank().cancel_all_orders()
-
-            # ✅ ИСПРАВЛЕНО: импортируем Client только при необходимости
-            from t_tech.invest import Client
-            from ..config import config
-
-            with Client(config.tbank_token) as client:
-                orders = client.orders.get_orders(account_id=_get_tbank().account_id)
-                cancelled = 0
-                for order in orders.orders:
-                    try:
-                        client.orders.cancel_order(
-                            account_id=_get_tbank().account_id,
-                            order_id=order.order_id
-                        )
-                        cancelled += 1
-                    except Exception as e:
-                        warning(f"Не удалось отменить заявку: {e}")
-                return {"success": True, "cancelled": cancelled}
-        except Exception as e:
-            error(f"Ошибка отмены заявок: {e}")
-            return {"success": False, "error": str(e)}

@@ -11,8 +11,8 @@
    core\shutdown_handler.py:46 - _should_close_positions
    core\trading_loop.py:616 - _should_close_position_smart_detailed
    core\trading_loop.py:901 - _should_close_position_smart
-   core\trading_loop.py:2189 - _close_positions_before_clearing
-   core\trading_loop.py:2795 - _close_positions_if_needed
+   core\trading_loop.py:2236 - _close_positions_before_clearing
+   core\trading_loop.py:2842 - _close_positions_if_needed
    bot.py:580 - close_position_by_ticker
    bot.py:650 - close_position
 

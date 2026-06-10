@@ -19,6 +19,8 @@ from ..utils.time_utils import (
 )
 from trading_bot.models import OrderSide
 
+from trading_bot.trading.position_closer import position_closer
+
 
 def _get_tbank():
     from trading_bot.api.tbank_client import tbank
@@ -72,7 +74,6 @@ class TradingLoop:
 
         info(f"📡 Запуск WebSocket для {ticker}")
 
-        # Создаём задачу WebSocket
         task = asyncio.create_task(
             tbank.connect_websocket(ticker, self._on_websocket_price)
         )
@@ -80,7 +81,6 @@ class TradingLoop:
         self._ws_prices[ticker] = None
         self._ws_callbacks[ticker] = []
 
-        # Небольшая задержка для установки соединения
         await asyncio.sleep(0.5)
 
     async def stop_websocket_for_ticker(self, ticker: str):
@@ -318,7 +318,7 @@ class TradingLoop:
                 if long_positions:
                     worst = min(long_positions, key=lambda x: x.get('current_profit', 0))
                     info(f"   🔄 Балансировка: закрываем убыточный LONG {worst.get('ticker', '?')}")
-                    self.bot.close_position(worst.get('figi'))
+                    position_closer.close_position_smart(worst.get('figi'))
 
             elif exposure['short_pct'] > 0.8:
                 # Слишком много SHORT - закрываем самую убыточную SHORT
@@ -326,7 +326,7 @@ class TradingLoop:
                 if short_positions:
                     worst = min(short_positions, key=lambda x: x.get('current_profit', 0))
                     info(f"   🔄 Балансировка: закрываем убыточный SHORT {worst.get('ticker', '?')}")
-                    self.bot.close_position(worst.get('figi'))
+                    position_closer.close_position_smart(worst.get('figi'))
 
     # ==================== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ДЛЯ ВРЕМЕНИ ====================
 
@@ -612,435 +612,6 @@ class TradingLoop:
             return True
 
         return False
-
-    def _should_close_position_smart_detailed(self, ticker: str, figi: str, side: str,
-                                              qty: float, profit_pct: float, pnl: float,
-                                              position_value: float, current_price: float,
-                                              avg_price: float, market_conditions: Dict,
-                                              total_portfolio_pnl: float, max_overnight: float,
-                                              total_capital: float) -> Tuple[bool, str, float, List[str]]:
-        """
-        РАСШИРЕННОЕ умное решение: закрывать или оставлять позицию на выходные
-        Возвращает: (should_close, reason, confidence, details_list)
-        """
-        details = []
-        confidence = 0.5  # базовая уверенность
-        reasons = []
-
-        # ========== 0. ПОЛУЧАЕМ ТЕКУЩУЮ МАРЖУ ==========
-        from trading_bot.api.tbank_client import tbank
-        margin_info = tbank.get_margin_info()
-        margin_rate = margin_info.get('margin_rate', 0) if margin_info else 0
-
-        details.append(f"   📈 ТЕКУЩАЯ МАРЖА: {margin_rate:.1f}%")
-
-        # ========== 0.1 ЭКСТРЕННЫЙ ФАКТОР: критическая маржа > 85% ==========
-        if margin_rate > 95:
-            reasons.append(f"КРИТИЧЕСКАЯ МАРЖА {margin_rate:.1f}%")
-            confidence += 0.40
-            details.append(f"   🔥 КРИТИЧЕСКАЯ МАРЖА {margin_rate:.1f}% → +40% к закрытию")
-        elif margin_rate > 90:
-            reasons.append(f"ОПАСНАЯ МАРЖА {margin_rate:.1f}%")
-            confidence += 0.25
-            details.append(f"   ⚠️ ОПАСНАЯ МАРЖА {margin_rate:.1f}% → +25% к закрытию")
-        elif margin_rate > 85:
-            reasons.append(f"ВЫСОКАЯ МАРЖА {margin_rate:.1f}%")
-            confidence += 0.15
-            details.append(f"   📊 ВЫСОКАЯ МАРЖА {margin_rate:.1f}% → +15% к закрытию")
-        else:
-            details.append(f"   ✅ МАРЖА В НОРМЕ: {margin_rate:.1f}%")
-
-        # ========== 1. АНАЛИЗ ПРИБЫЛИ/УБЫТКА ==========
-        if profit_pct < -3.0:
-            reasons.append(f"КРИТИЧЕСКИЙ УБЫТОК {profit_pct:.1f}%")
-            details.append(f"   💸 Критический убыток: {profit_pct:.1f}% → ОБЯЗАТЕЛЬНОЕ закрытие")
-            return True, f"критический убыток {profit_pct:.1f}%", 0.95, details
-        elif profit_pct < -1.0:
-            reasons.append(f"существенный убыток {profit_pct:.1f}%")
-            confidence += 0.20
-            details.append(f"   💸 Существенный убыток: {profit_pct:.1f}% → +20% к закрытию")
-        elif profit_pct < -0.3:
-            reasons.append(f"умеренный убыток {profit_pct:.1f}%")
-            confidence += 0.10
-            details.append(f"   💸 Умеренный убыток: {profit_pct:.1f}% → +10% к закрытию")
-        elif profit_pct < 0:
-            reasons.append(f"микроубыток {profit_pct:.1f}%")
-            confidence += 0.03
-            details.append(f"   💸 Микроубыток: {profit_pct:.1f}% → +3% к закрытию")
-        elif profit_pct > 8.0:
-            reasons.append(f"ОЧЕНЬ БОЛЬШАЯ ПРИБЫЛЬ {profit_pct:.1f}%")
-            details.append(f"   💰 Очень большая прибыль: {profit_pct:.1f}% → ОБЯЗАТЕЛЬНАЯ фиксация")
-            return True, f"фиксация экстремальной прибыли {profit_pct:.1f}%", 0.95, details
-        elif profit_pct > 5.0:
-            reasons.append(f"большая прибыль {profit_pct:.1f}%")
-            confidence += 0.30
-            details.append(f"   💰 Большая прибыль: {profit_pct:.1f}% → +30% к закрытию")
-        elif profit_pct > 2.0:
-            reasons.append(f"хорошая прибыль {profit_pct:.1f}%")
-            confidence += 0.15
-            details.append(f"   💰 Хорошая прибыль: {profit_pct:.1f}% → +15% к закрытию")
-        elif profit_pct > 1.0:
-            reasons.append(f"умеренная прибыль {profit_pct:.1f}%")
-            confidence += 0.08
-            details.append(f"   💰 Умеренная прибыль: {profit_pct:.1f}% → +8% к закрытию")
-        elif profit_pct > 0:
-            reasons.append(f"малая прибыль {profit_pct:.1f}%")
-            confidence += 0.03
-            details.append(f"   💰 Малая прибыль: {profit_pct:.1f}% → +3% к закрытию")
-        else:
-            details.append(f"   ⚪ Нейтральная позиция: P&L={profit_pct:+.2f}%")
-
-        # ========== 1.1 КОРРЕКТИРОВКА ПРИ КРИТИЧЕСКОЙ МАРЖЕ ==========
-        if margin_rate > 95:
-            if profit_pct > 1.0:
-                reasons.append(f"фиксация {profit_pct:.1f}% при критической марже")
-                confidence += 0.30
-                details.append(f"   💰 Прибыль {profit_pct:.1f}% при марже {margin_rate:.1f}% → +30% к закрытию")
-            elif profit_pct > 0.5:
-                reasons.append(f"прибыль {profit_pct:.1f}% в критической марже")
-                confidence += 0.15
-                details.append(f"   💰 Прибыль {profit_pct:.1f}% при марже {margin_rate:.1f}% → +15% к закрытию")
-        elif margin_rate > 90:
-            if profit_pct > 2.0:
-                reasons.append(f"фиксация {profit_pct:.1f}% при опасной марже")
-                confidence += 0.20
-                details.append(f"   💰 Прибыль {profit_pct:.1f}% при марже {margin_rate:.1f}% → +20% к закрытию")
-
-        # ========== 2. РАЗМЕР ПОЗИЦИИ ОТНОСИТЕЛЬНО КАПИТАЛА ==========
-        position_pct_of_capital = (position_value / total_capital * 100) if total_capital > 0 else 0
-        details.append(f"   📊 Доля в портфеле: {position_pct_of_capital:.1f}%")
-
-        if position_pct_of_capital > 50:
-            reasons.append(f"ОГРОМНАЯ позиция {position_pct_of_capital:.0f}% капитала")
-            confidence += 0.15
-            details.append(f"   📊 Огромная позиция: {position_pct_of_capital:.0f}% капитала → +15% к закрытию")
-        elif position_pct_of_capital > 30:
-            reasons.append(f"крупная позиция {position_pct_of_capital:.0f}% капитала")
-            confidence += 0.10
-            details.append(f"   📊 Крупная позиция: {position_pct_of_capital:.0f}% капитала → +10% к закрытию")
-        elif position_pct_of_capital > 15:
-            reasons.append(f"средняя позиция {position_pct_of_capital:.0f}% капитала")
-            confidence += 0.05
-            details.append(f"   📊 Средняя позиция: {position_pct_of_capital:.0f}% капитала → +5% к закрытию")
-        else:
-            details.append(f"   📊 Малая позиция: {position_pct_of_capital:.0f}% капитала → нейтрально")
-
-        # ========== 3. ТЕХНИЧЕСКИЙ АНАЛИЗ ПОЗИЦИИ ==========
-        tech_analysis = self._analyze_position_technicals(ticker, figi, side, current_price, avg_price)
-        local_trend = tech_analysis.get('local_trend', 'neutral')
-        local_trend_strength = tech_analysis.get('trend_strength', 0)
-        atr_pct = tech_analysis.get('atr_pct', 1.5)
-
-        details.append(f"   📈 Локальный тренд: {local_trend} (сила {local_trend_strength:.2f})")
-        details.append(f"   📊 ATR: {atr_pct:.1f}%")
-
-        # Анализ относительно локального тренда
-        if side == "LONG" and local_trend == "bearish":
-            reasons.append(f"ПРОТИВ медвежьего тренда (сила {local_trend_strength:.2f})")
-            confidence += 0.40
-            details.append(f"   ⚠️ LONG против медвежьего тренда → +40% к закрытию")
-        elif side == "SHORT" and local_trend == "bullish":
-            reasons.append(f"ПРОТИВ бычьего тренда (сила {local_trend_strength:.2f})")
-            confidence += 0.40
-            details.append(f"   ⚠️ SHORT против бычьего тренда → +40% к закрытию")
-        elif side == "LONG" and local_trend == "bullish":
-            reasons.append(f"ПО тренду")
-            confidence -= 0.30
-            details.append(f"   ✅ LONG по бычьему тренду → -30% к закрытию")
-        elif side == "SHORT" and local_trend == "bearish":
-            reasons.append(f"ПО тренду")
-            confidence -= 0.30
-            details.append(f"   ✅ SHORT по медвежьему тренду → -30% к закрытию")
-
-        # Технические уровни
-        if tech_analysis.get('near_resistance', False) and side == "LONG":
-            reasons.append("у уровня сопротивления")
-            confidence += 0.15
-            details.append(f"   📊 У уровня сопротивления → +15% к закрытию")
-        elif tech_analysis.get('near_support', False) and side == "SHORT":
-            reasons.append("у уровня поддержки")
-            confidence += 0.15
-            details.append(f"   📊 У уровня поддержки → +15% к закрытию")
-        elif tech_analysis.get('near_support', False) and side == "LONG":
-            reasons.append("у поддержки - благоприятно")
-            confidence -= 0.15
-            details.append(f"   📊 У поддержки (благоприятно) → -15% к закрытию")
-        elif tech_analysis.get('near_resistance', False) and side == "SHORT":
-            reasons.append("у сопротивления - благоприятно")
-            confidence -= 0.15
-            details.append(f"   📊 У сопротивления (благоприятно) → -15% к закрытию")
-
-        # RSI
-        rsi = tech_analysis.get('rsi', 50)
-        if tech_analysis.get('overbought', False) and side == "LONG":
-            reasons.append(f"перекупленность (RSI={rsi:.0f})")
-            confidence += 0.15
-            details.append(f"   📈 Перекупленность RSI={rsi:.0f} → +15% к закрытию")
-        elif tech_analysis.get('oversold', False) and side == "SHORT":
-            reasons.append(f"перепроданность (RSI={rsi:.0f})")
-            confidence += 0.15
-            details.append(f"   📉 Перепроданность RSI={rsi:.0f} → +15% к закрытию")
-
-        if tech_analysis.get('trend_weakening', False):
-            reasons.append("тренд ослабевает")
-            confidence += 0.08
-            details.append(f"   📉 Тренд ослабевает → +8% к закрытию")
-
-        # ========== 4. ПОТЕНЦИАЛ ПРИБЫЛИ ДО ТЕЙК-ПРОФИТА ==========
-        from ..config import config
-        tp_pct = config.take_profit_pct
-
-        if side == "LONG":
-            remaining_to_tp = max(0, tp_pct - profit_pct)
-        else:
-            remaining_to_tp = max(0, tp_pct - profit_pct)
-
-        potential_profit_rub = (remaining_to_tp / 100) * position_value
-
-        details.append(f"   🎯 Тейк-профит: +{tp_pct}% от входа")
-        details.append(f"   💰 До TP: {remaining_to_tp:.1f}% (потенциал +{potential_profit_rub:.0f}₽)")
-
-        # Если до TP осталось мало
-        if remaining_to_tp < 1.0:
-            reasons.append(f"почти достигли TP (осталось {remaining_to_tp:.1f}%)")
-            confidence -= 0.25
-            details.append(f"   🎯 Почти у цели: осталось {remaining_to_tp:.1f}% → -25% к закрытию")
-
-        # Если потенциал больше 2x от лимита переноса
-        if max_overnight != float('inf') and potential_profit_rub > max_overnight * 2:
-            reasons.append(f"высокий потенциал ({potential_profit_rub:.0f}₽) > 2x лимита")
-            confidence -= 0.35
-            details.append(
-                f"   💎 Потенциал {potential_profit_rub:.0f}₽ > 2× лимита {max_overnight:.0f}₽ → -35% к закрытию")
-        elif max_overnight != float('inf') and potential_profit_rub > max_overnight:
-            reasons.append(f"потенциал ({potential_profit_rub:.0f}₽) превышает лимит")
-            confidence -= 0.20
-            details.append(
-                f"   💎 Потенциал {potential_profit_rub:.0f}₽ > лимита {max_overnight:.0f}₽ → -20% к закрытию")
-
-        # ========== 5. ЛИМИТ ПЕРЕНОСА (ОВЕРНАЙТ) ==========
-        if max_overnight != float('inf') and position_value > max_overnight:
-            reasons.append(f"превышение лимита переноса ({position_value:.0f}₽ > {max_overnight:.0f}₽)")
-            confidence += 0.15
-            details.append(
-                f"   🔒 Превышение лимита переноса: {position_value:.0f}₽ > {max_overnight:.0f}₽ → +15% к закрытию")
-        else:
-            details.append(f"   🔓 Лимит переноса: {position_value:.0f}₽ ≤ {max_overnight:.0f}₽ → OK")
-
-        # ========== 6. ГЛОБАЛЬНЫЕ РЫНОЧНЫЕ УСЛОВИЯ ==========
-        if market_conditions.get('volatility', 0) > 0.5:
-            reasons.append(f"высокая рыночная волатильность {market_conditions['volatility']:.0%}")
-            confidence += 0.10
-            details.append(f"   🌊 Высокая волатильность рынка → +10% к закрытию")
-
-        if market_conditions.get('news_risk') == "negative" and side == "LONG":
-            reasons.append("негативный новостной фон")
-            confidence += 0.15
-            details.append(f"   📰 Негативный новостной фон для LONG → +15% к закрытию")
-        elif market_conditions.get('news_risk') == "positive" and side == "SHORT":
-            reasons.append("позитивный новостной фон")
-            confidence += 0.15
-            details.append(f"   📰 Позитивный новостной фон для SHORT → +15% к закрытию")
-
-        # ========== 7. ВРЕМЯ УДЕРЖАНИЯ ПОЗИЦИИ ==========
-        hold_time = self._get_position_hold_time(figi)
-        if hold_time:
-            hold_hours = hold_time / 3600
-            if hold_hours > 48:
-                reasons.append(f"долгое удержание ({hold_hours:.0f}ч)")
-                confidence += 0.10
-                details.append(f"   ⏰ Долгое удержание: {hold_hours:.0f} часов → +10% к закрытию")
-
-        # ========== 8. ФИНАЛЬНОЕ РЕШЕНИЕ ==========
-        # При марже > 95% порог снижается
-        if margin_rate > 95:
-            should_close = confidence >= 0.55
-            details.append(
-                f"   🎯 ПОРОГ СНИЖЕН (маржа {margin_rate:.1f}% > 95%): {confidence:.0%} >= 55% → {'🔒 ЗАКРЫТЬ' if should_close else '⏸️ ОСТАВИТЬ'}")
-        elif margin_rate > 90:
-            should_close = confidence >= 0.60
-            details.append(
-                f"   🎯 ПОРОГ ПОВЫШЕН (маржа {margin_rate:.1f}% > 90%): {confidence:.0%} >= 60% → {'🔒 ЗАКРЫТЬ' if should_close else '⏸️ ОСТАВИТЬ'}")
-        else:
-            should_close = confidence >= 0.65
-            details.append(
-                f"   🎯 СТАНДАРТНЫЙ ПОРОГ: {confidence:.0%} >= 65% → {'🔒 ЗАКРЫТЬ' if should_close else '⏸️ ОСТАВИТЬ'}")
-
-        # Исключение: позиция по тренду с микроубытком
-        if local_trend == side.lower() and abs(profit_pct) < 1.0:
-            if margin_rate < 90:
-                should_close = False
-                reason = f"по тренду, микроубыток {profit_pct:.1f}%"
-                details.append(f"   🎯 ИСКЛЮЧЕНИЕ: позиция по тренду с микроубытком → ОСТАВЛЯЕМ")
-                return should_close, reason, 0.3, details
-            else:
-                details.append(f"   🎯 ИСКЛЮЧЕНИЕ ОТМЕНЕНО: маржа {margin_rate:.1f}% > 90%")
-
-        # Исключение: высокий потенциал прибыли
-        if remaining_to_tp < 1.0 and potential_profit_rub > 5000:
-            if margin_rate < 90:
-                should_close = False
-                reason = f"высокий потенциал {potential_profit_rub:.0f}₽ до TP"
-                details.append(f"   🎯 ИСКЛЮЧЕНИЕ: высокий потенциал прибыли → ОСТАВЛЯЕМ")
-                return should_close, reason, 0.35, details
-            else:
-                details.append(f"   🎯 ИСКЛЮЧЕНИЕ ОТМЕНЕНО: маржа {margin_rate:.1f}% > 90%")
-
-        # Формируем итоговую причину
-        reason = "; ".join(reasons[:3]) if reasons else "базовое решение"
-        final_confidence = min(confidence, 0.98)
-
-        # Итоговый лог
-        if should_close:
-            details.append(f"   🔒 ИТОГОВОЕ РЕШЕНИЕ: ЗАКРЫТЬ (уверенность {final_confidence:.0%})")
-        else:
-            details.append(f"   ⏸️ ИТОГОВОЕ РЕШЕНИЕ: ОСТАВИТЬ (уверенность {final_confidence:.0%})")
-
-        return should_close, reason, final_confidence, details
-
-    def _should_close_position_smart(self, ticker: str, figi: str, side: str, qty: float,
-                                     profit_pct: float, current_price: float,
-                                     avg_price: float, market_conditions: Dict) -> Tuple[bool, str, float]:
-        """
-        Умное решение: закрывать или оставлять позицию на выходные
-
-        Возвращает: (should_close, reason, confidence)
-        """
-        reasons = []
-        confidence = 0.5  # базовая уверенность
-
-        # ========== 1. АНАЛИЗ ПРИБЫЛИ/УБЫТКА ==========
-        if profit_pct < -3.0:
-            # Большой убыток - ОБЯЗАТЕЛЬНО закрываем
-            return True, f"критический убыток {profit_pct:.1f}%", 0.95
-        elif profit_pct < -1.0:
-            reasons.append(f"убыток {profit_pct:.1f}%")
-            confidence += 0.25
-        elif profit_pct < -0.3:
-            reasons.append(f"небольшой убыток {profit_pct:.1f}%")
-            confidence += 0.1  # УМЕНЬШИЛИ с 0.15 до 0.1 (не паникуем)
-        elif profit_pct > 8.0:
-            reasons.append(f"фиксация очень большой прибыли {profit_pct:.1f}%")
-            confidence += 0.5
-        elif profit_pct > 5.0:
-            reasons.append(f"фиксация большой прибыли {profit_pct:.1f}%")
-            confidence += 0.35
-        elif profit_pct > 2.0:
-            reasons.append(f"хорошая прибыль {profit_pct:.1f}%")
-            confidence += 0.2
-        elif profit_pct > 1.0:
-            reasons.append(f"умеренная прибыль {profit_pct:.1f}%")
-            confidence += 0.1
-        elif profit_pct < 0:
-            reasons.append(f"микроубыток {profit_pct:.1f}%")
-            confidence += 0.05  # МИНИМАЛЬНЫЙ штраф за микроубыток
-        else:
-            # Малая прибыль (0-1%)
-            reasons.append(f"малая прибыль {profit_pct:.1f}%")
-            confidence += 0.05
-
-        # ========== 2. ТЕХНИЧЕСКИЙ АНАЛИЗ КОНКРЕТНОЙ АКЦИИ ==========
-        tech_analysis = self._analyze_position_technicals(ticker, figi, side, current_price, avg_price)
-
-        # НОВОЕ: получаем локальный тренд акции
-        local_trend = tech_analysis.get('local_trend', 'neutral')
-        local_trend_strength = tech_analysis.get('trend_strength', 0)
-
-        # Анализ позиции относительно ЕЁ СОБСТВЕННОГО тренда (НЕ глобального рынка!)
-        if side == "LONG" and local_trend == "bearish":
-            reasons.append(f"против локального медвежьего тренда (сила {local_trend_strength:.1f})")
-            confidence += 0.25 if local_trend_strength > 0.3 else 0.1
-        elif side == "SHORT" and local_trend == "bullish":
-            reasons.append(f"против локального бычьего тренда (сила {local_trend_strength:.1f})")
-            confidence += 0.25 if local_trend_strength > 0.3 else 0.1
-        elif side == "LONG" and local_trend == "bullish":
-            reasons.append(f"по локальному тренду")
-            confidence -= 0.2  # меньше причин закрывать
-        elif side == "SHORT" and local_trend == "bearish":
-            reasons.append(f"по локальному тренду")
-            confidence -= 0.2
-
-        # Технические уровни
-        if tech_analysis['near_resistance'] and side == "LONG":
-            reasons.append("у сильного сопротивления")
-            confidence += 0.2
-        elif tech_analysis['near_support'] and side == "SHORT":
-            reasons.append("у сильной поддержки")
-            confidence += 0.2
-        elif tech_analysis['near_support'] and side == "LONG":
-            reasons.append("у поддержки - благоприятно")
-            confidence -= 0.15
-        elif tech_analysis['near_resistance'] and side == "SHORT":
-            reasons.append("у сопротивления - благоприятно")
-            confidence -= 0.15
-
-        if tech_analysis['overbought'] and side == "LONG":
-            reasons.append("перекупленность")
-            confidence += 0.15
-        elif tech_analysis['oversold'] and side == "SHORT":
-            reasons.append("перепроданность")
-            confidence += 0.15
-        elif tech_analysis['oversold'] and side == "LONG":
-            reasons.append("перепроданность - возможен отскок")
-            confidence -= 0.1
-        elif tech_analysis['overbought'] and side == "SHORT":
-            reasons.append("перекупленность - возможен откат")
-            confidence -= 0.1
-
-        if tech_analysis['trend_weakening']:
-            reasons.append("тренд ослабевает")
-            confidence += 0.1
-
-        if tech_analysis['volume_drop']:
-            reasons.append("объёмы падают")
-            confidence += 0.05
-
-        # ========== 3. ГЛОБАЛЬНЫЕ РЫНОЧНЫЕ УСЛОВИЯ (с меньшим весом) ==========
-        # Новостной риск (оставляем, но с меньшим весом)
-        if market_conditions['news_risk'] == "negative" and side == "LONG":
-            reasons.append("негативный новостной фон")
-            confidence += 0.15  # УМЕНЬШИЛИ с 0.25
-        elif market_conditions['news_risk'] == "positive" and side == "SHORT":
-            reasons.append("позитивный новостной фон")
-            confidence += 0.15  # УМЕНЬШИЛИ с 0.25
-
-        # Высокая волатильность (учитываем, но не критично)
-        if market_conditions['volatility'] > 0.5:
-            reasons.append(f"высокая волатильность {market_conditions['volatility']:.0%}")
-            confidence += 0.1
-
-        # ========== 4. ДОПОЛНИТЕЛЬНЫЕ ФАКТОРЫ ==========
-        # Размер позиции относительно капитала
-        position_value = abs(qty) * current_price
-        if hasattr(self, 'bot') and hasattr(self.bot, 'total_capital'):
-            position_pct = position_value / self.bot.total_capital * 100
-            if position_pct > 30:
-                reasons.append(f"крупная позиция {position_pct:.0f}% капитала")
-                confidence += 0.1
-
-        # ========== 5. ФИНАЛЬНОЕ РЕШЕНИЕ ==========
-        should_close = confidence >= 0.65  # ПОВЫСИЛИ порог с 0.6 до 0.65
-
-        # Исключения: ОБЯЗАТЕЛЬНО закрываем
-        if profit_pct < -3.0:
-            should_close = True
-            confidence = 0.95
-        elif profit_pct > 8.0:
-            should_close = True
-            confidence = 0.9
-
-        # Исключения: ОБЯЗАТЕЛЬНО ОСТАВЛЯЕМ
-        if local_trend == side.lower() and abs(profit_pct) < 1.0:
-            # По тренду и маленький убыток/прибыль - оставляем
-            should_close = False
-            reason = f"по тренду, микроубыток {profit_pct:.1f}%"
-            return should_close, reason, 0.3
-
-        reason = ", ".join(reasons[:3])  # топ-3 причины
-        if not reason:
-            reason = "базовое решение"
-
-        return should_close, reason, min(confidence, 0.98)
 
     def _get_market_conditions_for_weekend(self) -> Dict[str, Any]:
         """Получение рыночных условий для принятия решения перед выходными"""
@@ -2233,50 +1804,6 @@ class TradingLoop:
 
     # ==================== ОСТАЛЬНЫЕ МЕТОДЫ ====================
 
-    def _close_positions_before_clearing(self):
-        """Автоматическое закрытие непокрытых позиций за 15 минут до клиринга"""
-        from trading_bot.utils.time_utils import get_moscow_time
-        from datetime import time as dt_time
-        from trading_bot.risk.position_manager import position_manager
-
-        now = get_moscow_time()
-        current_time = now.time()
-        clearing_time = dt_time(18, 45)
-
-        if current_time < clearing_time:
-            minutes_left = (clearing_time.hour * 60 + clearing_time.minute) - (
-                    current_time.hour * 60 + current_time.minute)
-        else:
-            return
-
-        if 0 < minutes_left <= 15:
-            uncovered, liquid = position_manager.get_uncovered_amount()
-
-            if uncovered <= 5000:
-                return
-
-            daily_fee = position_manager.calculate_overnight_fee(uncovered, 1)
-
-            positions = _get_tbank().get_positions(force_refresh=True)
-            total_profit = 0
-            for pos in positions:
-                figi = pos['figi']
-                qty = abs(pos['quantity'])
-                avg = pos['avg_price']
-                cur = _get_tbank().get_current_price(figi)
-                if cur:
-                    if pos['quantity'] < 0:
-                        total_profit += (avg - cur) * qty
-                    else:
-                        total_profit += (cur - avg) * qty
-
-            if daily_fee > abs(total_profit) * 0.5 and total_profit > 0:
-                warning(f"🔒 Комиссия за перенос ({daily_fee:.0f}₽) > 50% от прибыли ({total_profit:.0f}₽)")
-                warning(f"   Принудительное закрытие всех позиций перед клирингом!")
-
-                closed = self.bot.position_closer.close_all_positions_forced("clearing", minutes_left)
-                info(f"   Закрыто позиций: {closed}")
-
     def _sync_positions(self):
         """Синхронизация позиций при старте"""
         try:
@@ -2372,7 +1899,7 @@ class TradingLoop:
                 info(f"   🧠 Запуск интеллектуального анализа всех позиций...")
 
                 # ✅ ИСПРАВЛЕНО: используем существующий метод
-                closed = self._close_worst_positions(max_to_close=3)
+                closed = position_closer.close_worst_positions(max_to_close=3)
 
                 if closed > 0:
                     success(f"✅ Интеллектуально закрыто {closed} позиций")
@@ -2419,7 +1946,7 @@ class TradingLoop:
                 info(f"   🧠 Запуск интеллектуального анализа убыточных позиций...")
 
                 # ✅ ИСПРАВЛЕНО: закрываем 2 худшие позиции
-                closed = self._close_worst_positions(max_to_close=2)
+                closed = position_closer.close_worst_positions(max_to_close=2)
 
                 if closed > 0:
                     success(f"✅ Интеллектуально закрыто {closed} убыточных позиций")
@@ -2446,7 +1973,7 @@ class TradingLoop:
             elif margin_rate >= 75:
                 warning(f"⚠️ ОПАСНАЯ МАРЖА: {margin_rate:.1f}%")
                 # ✅ ИСПРАВЛЕНО: закрываем 1 самую убыточную позицию
-                closed = self._close_worst_positions(max_to_close=1)
+                closed = position_closer.close_worst_positions(max_to_close=1)
                 if closed > 0:
                     success(f"✅ Закрыта {closed} самая убыточная позиция")
 

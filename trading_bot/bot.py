@@ -28,6 +28,8 @@ from .cache.price_cache import PriceCache
 from .cache.position_cache import PositionCache
 from .utils.figi_resolver import FigiResolver
 from .utils.time_utils import get_moscow_time, is_pre_market_time, is_weekend_trading_time
+from trading_bot.trading.position_closer import position_closer
+
 
 # ========== ГЛОБАЛЬНЫЕ ЭКЗЕМПЛЯРЫ ==========
 from trading_bot.cache import TTLCache
@@ -577,67 +579,6 @@ class TradingBot:
                            price: float = None, use_market: bool = True) -> bool:
         return self.position_opener.open_position_auto(ticker, quantity, side, price, use_market)
 
-    def close_position_by_ticker(self, ticker: str) -> bool:
-        """
-        Закрытие позиции по тикеру (по запросу из Telegram)
-
-        Args:
-            ticker: Тикер инструмента
-
-        Returns:
-            bool: True если позиция успешно закрыта, иначе False
-        """
-        try:
-            from trading_bot.api.tbank_client import tbank
-
-            info(f"🔍 Закрытие позиции по тикеру: {ticker}")
-
-            positions = tbank.get_positions()
-
-            if not positions:
-                warning(f"❌ Нет открытых позиций")
-                return False
-
-            # Поиск позиции
-            target_pos = next(
-                (pos for pos in positions
-                 if pos.get('ticker', '').upper() == ticker.upper()),
-                None
-            )
-
-            if not target_pos:
-                warning(f"❌ Позиция {ticker} не найдена")
-                return False
-
-            figi = target_pos.get('figi')
-            quantity = abs(target_pos.get('quantity', 0))
-
-            if quantity == 0:
-                warning(f"⚠️ Количество позиции {ticker} равно 0")
-                return False
-
-            is_short = target_pos.get('quantity', 0) < 0
-
-            if is_short:
-                info(f"🔴 Закрытие SHORT {ticker}: покупка {quantity} шт")
-                result = tbank.buy(figi, quantity, use_market=True)
-                action = "SHORT"
-            else:
-                info(f"🟢 Закрытие LONG {ticker}: продажа {quantity} шт")
-                result = tbank.sell(figi, quantity, use_market=True)
-                action = "LONG"
-
-            if result:
-                info(f"✅ {action} {ticker} успешно закрыт")
-            else:
-                error(f"❌ Ошибка закрытия {action} {ticker}")
-
-            return result
-
-        except Exception as e:
-            error(f"❌ Ошибка при закрытии позиции {ticker}: {e}")
-            return False
-
     # def emergency_close_all_positions(self) -> int:
     #     """⚠️ ВНИМАНИЕ: Этот метод устарел. Используйте _emergency_close_profitable_only"""
     #     warning("⚠️ Вызван устаревший метод emergency_close_all_positions!")
@@ -645,18 +586,7 @@ class TradingBot:
     #     return 0
 
     def emergency_close_all_shorts(self) -> int:
-        return self.position_closer.emergency_close_shorts()
-
-    def close_position(self, figi: str, quantity: int = None) -> bool:
-        """
-        Закрытие позиции по FIGI (для балансировки)
-        """
-        try:
-            from trading_bot.risk.position_manager import position_manager
-            return position_manager.close_position(figi, quantity)
-        except Exception as e:
-            error(f"❌ Ошибка закрытия позиции {figi}: {e}")
-            return False
+        return self.position_closer.close_worst_positions(max_to_close=2)
 
     def get_capital_stats(self) -> Dict:
         return self.capital_manager.get_stats() if self.capital_manager else {}

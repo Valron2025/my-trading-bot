@@ -833,6 +833,181 @@ class PositionCloser:
         """Статистика попыток закрытия"""
         return dict(self._close_attempts)
 
+    # ========== НОВЫЕ МЕТОДЫ ДЛЯ ЦЕНТРАЛИЗАЦИИ ==========
+
+    def close_position_smart(self, figi: str, ticker: str = None,
+                             max_attempts: int = 5) -> bool:
+        """
+        УМНОЕ ЗАКРЫТИЕ ПОЗИЦИИ - ОСНОВНОЙ МЕТОД!
+        Использовать везде вместо прямых вызовов sell/buy.
+
+        Args:
+            figi: FIGI инструмента
+            ticker: Тикер (опционально, для логов)
+            max_attempts: Максимум попыток
+
+        Returns:
+            bool: Успех закрытия
+        """
+        from trading_bot.api.tbank_client import tbank
+        from trading_bot.risk.position_manager import position_manager
+
+        if not ticker:
+            ticker = tbank._get_ticker_by_figi(figi) or figi[:8]
+
+        # Получаем позицию
+        position = position_manager.get_position(figi)
+        if not position:
+            warning(f"⚠️ Позиция {ticker} не найдена в менеджере")
+            return False
+
+        quantity = position.quantity
+        side = position.side.value
+
+        info(f"\n🎯 УМНОЕ ЗАКРЫТИЕ {ticker} ({side})")
+        info(f"   Количество: {quantity} шт")
+
+        # Получаем текущую цену
+        current_price = tbank.get_current_price(figi)
+        if not current_price:
+            error(f"❌ Не удалось получить цену для {ticker}")
+            return False
+
+        info(f"   Текущая цена: {current_price:.2f}₽")
+
+        # Определяем режим
+        mode = self._get_trading_mode()
+        is_otc = mode == "otc"
+
+        # Выбираем стратегию в зависимости от стороны
+        if side == "SHORT":
+            success = self._close_short_smart(figi, quantity, ticker, current_price, is_otc, max_attempts)
+        else:
+            success = self._close_long_smart(figi, quantity, ticker, current_price, is_otc, max_attempts)
+
+        if success:
+            position_manager.remove_position(figi)
+            success(f"✅ {ticker} успешно закрыт!")
+        else:
+            error(f"❌ Не удалось закрыть {ticker} после {max_attempts} попыток")
+
+        return success
+
+    def _close_short_smart(self, figi: str, quantity: int, ticker: str,
+                           current_price: float, is_otc: bool, max_attempts: int) -> bool:
+        """Умное закрытие SHORT позиции"""
+        from trading_bot.api.tbank_client import tbank
+
+        # Прогрессивное проскальзывание
+        for attempt in range(max_attempts):
+            slippage = 0.02 + (attempt * 0.03)  # 2%, 5%, 8%, 11%, 14%
+            if is_otc:
+                slippage = min(0.30, slippage * 1.5)  # до 30% для OTC
+
+            limit_price = current_price * (1 + slippage)
+            limit_price = tbank._round_to_min_increment(figi, limit_price)
+
+            info(f"   Попытка {attempt + 1}/{max_attempts}: лимитная +{slippage * 100:.0f}%")
+
+            try:
+                if tbank.place_limit_order(figi, quantity, "BUY", limit_price):
+                    success(f"   ✅ SHORT {ticker} закрыт по {limit_price:.2f}₽")
+                    return True
+            except Exception as e:
+                if "30042" in str(e):
+                    warning(f"   ⚠️ Недостаточно средств для закрытия SHORT {ticker}")
+                    info(f"   💡 Пополните счёт или закройте другие позиции")
+                    return False
+                continue
+
+            time.sleep(0.5)
+
+        # Последний шанс - рыночная (если не OTC)
+        if not is_otc:
+            info(f"   ⚡ Последний шанс: рыночная заявка")
+            try:
+                if tbank.buy(figi, quantity, use_market=True):
+                    success(f"   ✅ SHORT {ticker} закрыт рыночной заявкой!")
+                    return True
+            except Exception as e:
+                warning(f"   ❌ Рыночная заявка не удалась: {e}")
+
+        return False
+
+    def _close_long_smart(self, figi: str, quantity: int, ticker: str,
+                          current_price: float, is_otc: bool, max_attempts: int) -> bool:
+        """Умное закрытие LONG позиции"""
+        from trading_bot.api.tbank_client import tbank
+
+        for attempt in range(max_attempts):
+            slippage = 0.02 + (attempt * 0.03)
+            if is_otc:
+                slippage = min(0.30, slippage * 1.5)
+
+            limit_price = current_price * (1 - slippage)
+            limit_price = tbank._round_to_min_increment(figi, limit_price)
+
+            info(f"   Попытка {attempt + 1}/{max_attempts}: лимитная -{slippage * 100:.0f}%")
+
+            try:
+                if tbank.place_limit_order(figi, quantity, "SELL", limit_price):
+                    success(f"   ✅ LONG {ticker} закрыт по {limit_price:.2f}₽")
+                    return True
+            except Exception:
+                continue
+
+            time.sleep(0.5)
+
+        # Рыночная заявка
+        if not is_otc:
+            info(f"   ⚡ Последний шанс: рыночная заявка")
+            try:
+                if tbank.sell(figi, quantity, use_market=True):
+                    success(f"   ✅ LONG {ticker} закрыт рыночной заявкой!")
+                    return True
+            except Exception as e:
+                warning(f"   ❌ Рыночная заявка не удалась: {e}")
+
+        return False
+
+    def close_worst_positions(self, max_to_close: int = 2) -> int:
+        """Закрыть самые убыточные позиции"""
+        from trading_bot.risk.position_manager import position_manager
+        from trading_bot.api.tbank_client import tbank
+
+        positions = position_manager.get_all_positions()
+        if not positions:
+            return 0
+
+        # Собираем данные по P&L
+        positions_data = []
+        for figi, pos in positions.items():
+            current_price = tbank.get_current_price(figi)
+            if current_price:
+                profit_pct = pos.current_profit_pct(current_price)
+                positions_data.append({
+                    'figi': figi,
+                    'position': pos,
+                    'profit_pct': profit_pct,
+                    'ticker': pos.ticker or figi[:8]
+                })
+
+        # Сортируем по убытку (самые убыточные первые)
+        positions_data.sort(key=lambda x: x['profit_pct'])
+
+        closed = 0
+        for item in positions_data[:max_to_close]:
+            if item['profit_pct'] >= 0:
+                continue
+
+            ticker = item['ticker']
+            warning(f"🔄 Закрытие убыточной позиции {ticker} (P&L: {item['profit_pct']:.2f}%)")
+
+            if self.close_position_smart(item['figi'], ticker):
+                closed += 1
+
+        return closed
+
 
 # ========== ГЛОБАЛЬНЫЙ ЭКЗЕМПЛЯР ==========
 position_closer = PositionCloser(None)
