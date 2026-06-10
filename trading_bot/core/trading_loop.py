@@ -1638,51 +1638,6 @@ class TradingLoop:
                 else:
                     info(f"   📭 Нет открытых позиций")
 
-                # ========== ОБНОВЛЕНИЕ PROMETHEUS МЕТРИК ==========
-                try:
-                    from trading_bot.monitoring.prometheus_metrics import prometheus_metrics
-
-                    # Статус бота (1 = работает)
-                    prometheus_metrics.set_bot_status(1)
-
-                    # Портфель
-                    if total_capital > 0:
-                        prometheus_metrics.set_portfolio_value(float(total_capital))
-                        prometheus_metrics.set_portfolio_cash(float(available))
-                        prometheus_metrics.set_positions_count(float(current_positions))
-
-                    # PnL (рассчитываем из позиций)
-                    if current_positions > 0:
-                        total_pnl = 0.0
-                        for pos in positions:
-                            if not isinstance(pos, dict):
-                                continue
-                            figi = pos.get('figi', 'unknown')
-                            qty = pos.get('quantity', 0)
-                            avg = pos.get('avg_price', 0)
-                            cur = _get_tbank().get_current_price(figi)
-                            if cur:
-                                if qty < 0:  # SHORT
-                                    pnl = (avg - cur) * abs(qty)
-                                else:  # LONG
-                                    pnl = (cur - avg) * qty
-                                total_pnl += pnl
-                        prometheus_metrics.set_daily_pnl(float(total_pnl))
-
-                    # Маржа
-                    if margin_rate > 0:
-                        prometheus_metrics.set_margin_rate(float(margin_rate))
-
-                    # Аптайм (в секундах)
-                    import time
-                    if not hasattr(self, '_start_time'):
-                        self._start_time = time.time()
-                    uptime = time.time() - self._start_time
-                    prometheus_metrics.set_bot_uptime(uptime)
-
-                except Exception as e:
-                    debug(f"⚠️ Ошибка обновления Prometheus метрик: {e}")
-
                 # ========== 4.5 ПРОВЕРКА TP/SL (ПЕРЕД МАРЖЕЙ!) ==========
                 info("⚡ [4.6/11] БЫСТРОЕ СКАНИРОВАНИЕ...")
 
@@ -1725,6 +1680,53 @@ class TradingLoop:
                     info(f"   🔄 Ждём снижения маржи (30 сек)")
                     time.sleep(30)
                     continue
+
+                # ========== ОБНОВЛЕНИЕ PROMETHEUS МЕТРИК ==========
+                try:
+                    from trading_bot.monitoring.prometheus_metrics import prometheus_metrics
+
+                    # Статус бота (1 = работает)
+                    prometheus_metrics.set_bot_status(1)
+
+                    # Портфель
+                    if total_capital > 0:
+                        prometheus_metrics.set_portfolio_value(float(total_capital))
+                        prometheus_metrics.set_portfolio_cash(float(available))
+                        prometheus_metrics.set_positions_count(float(current_positions))
+
+                    # PnL (рассчитываем из позиций)
+                    if current_positions > 0:
+                        total_pnl = 0.0
+                        for pos in positions:
+                            if not isinstance(pos, dict):
+                                continue
+                            figi = pos.get('figi', 'unknown')
+                            qty = pos.get('quantity', 0)
+                            avg = pos.get('avg_price', 0)
+                            cur = _get_tbank().get_current_price(figi)
+                            if cur:
+                                if qty < 0:  # SHORT
+                                    pnl = (avg - cur) * abs(qty)
+                                else:  # LONG
+                                    pnl = (cur - avg) * qty
+                                total_pnl += pnl
+                        prometheus_metrics.set_daily_pnl(float(total_pnl))
+
+                    # Маржа (теперь margin_rate определена)
+                    if margin_rate > 0:
+                        prometheus_metrics.set_margin_rate(float(margin_rate))
+
+                    # Аптайм (в секундах)
+                    if not hasattr(self, '_start_time'):
+                        self._start_time = time.time()
+                    uptime = time.time() - self._start_time
+                    prometheus_metrics.set_bot_uptime(uptime)
+
+                    debug(
+                        f"   📈 Метрики обновлены: капитал={total_capital:.0f}, позиций={current_positions}, маржа={margin_rate:.1f}%")
+
+                except Exception as e:
+                    debug(f"⚠️ Ошибка обновления Prometheus метрик: {e}")
 
                 # ========== 5.1 ЛОГИРОВАНИЕ СТАТУСА ==========
                 self._log_status(total_capital, current_positions, margin_rate)
