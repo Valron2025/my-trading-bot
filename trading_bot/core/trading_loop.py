@@ -3297,6 +3297,25 @@ class TradingLoop:
         info(f"   🔻 SHORT: {'✅' if config.use_short else '❌'}")
         info(f"{'=' * 60}")
 
+        # ========== ОБНОВЛЕНИЕ ВЕБ-СТАТУСА ==========
+        try:
+            # Пытаемся импортировать функцию обновления статуса
+            import sys
+            if 'web_server' in sys.modules:
+                from web_server import update_bot_status
+                update_bot_status(
+                    running=self._running,
+                    cycle_count=self._cycle_count,
+                    positions=positions_count,
+                    capital=total_capital
+                )
+                debug(f"   🌐 Веб-статус обновлён")
+        except ImportError:
+            debug(f"   ⏭️ web_server не доступен (не на Render)")
+        except Exception as e:
+            debug(f"   ⚠️ Ошибка обновления веб-статуса: {e}")
+
+        # Существующий код с metrics
         if hasattr(self.bot, 'metrics') and self.bot.metrics:
             self.bot.metrics.update_portfolio(total_capital, total_capital, positions_count)
             self.bot.metrics.update_margin_rate(margin_rate)
