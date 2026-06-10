@@ -1420,6 +1420,7 @@ class TradingLoop:
             warning("   Переходим в режим ожидания...")
 
             while self._running and not self._is_api_available():
+                import time
                 time.sleep(300)
                 now = get_moscow_time()
                 if now.weekday() < 5 and now.hour >= 10:
