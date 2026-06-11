@@ -121,7 +121,7 @@ class PositionOpener:
     # ========== LONG ПОЗИЦИИ ==========
 
     def open_long_market(self, stock: StockCandidate, quantity: int) -> bool:
-        """Открытие LONG позиции с АВТОМАТИЧЕСКИМ ВЫБОРОМ типа заявки"""
+        """Открытие LONG позиции с АВТОМАТИЧЕСКИМ ВЫБОРОМ типа заявки и детальным логированием"""
         from trading_bot.api.tbank_client import tbank
 
         ticker = stock.ticker
@@ -136,11 +136,11 @@ class PositionOpener:
         pending_key = f"long_pending_{stock.figi}"
         if pending_key in self._long_pending:
             elapsed = (get_moscow_time() - self._long_pending[pending_key]).seconds
-            if elapsed < 30:  # Блокировка на 30 секунд
+            if elapsed < 30:
                 warning(f"⚠️ LONG заявка для {ticker} уже отправлена {elapsed} сек назад")
+                info(f"   ❌ ОТКАЗ: дублирование (pending)")
                 return False
             else:
-                # Если прошло больше 30 секунд, удаляем старую запись
                 self._long_pending.pop(pending_key, None)
 
         # ========== ПРОВЕРКА OTC ==========
@@ -148,19 +148,20 @@ class PositionOpener:
             if tbank.is_confirmation_required(stock.figi):
                 warning(f"⛔ {ticker} - OTC инструмент (требует подтверждения)")
                 self.bot._add_to_blacklist(ticker, minutes=60)
+                info(f"   ❌ ОТКАЗ: OTC инструмент")
                 return False
 
-            # Используем ленивый импорт для избежания циклической зависимости
             is_otc, otc_reason = _get_instrument_filter().is_otc_instrument(stock.figi, ticker)
             if is_otc:
                 error(f"❌ {ticker} - OTC ИНСТРУМЕНТ! НЕВОЗМОЖНО ЗАКРЫТЬ ЧЕРЕЗ API!")
                 error(f"   Причина: {otc_reason}")
-                error(f"   🔧 Добавляем {ticker} в чёрный список")
-                self.bot._add_to_blacklist(ticker, minutes=3600)  # Блокируем на час
+                self.bot._add_to_blacklist(ticker, minutes=3600)
+                info(f"   ❌ ОТКАЗ: OTC (инструмент фильтр)")
                 return False
-
         except Exception as e:
             warning(f"⚠️ Ошибка проверки OTC: {e}")
+            info(f"   ❌ ОТКАЗ: ошибка OTC проверки")
+            return False
 
         # ========== ПРОВЕРКА СПРЕДА ==========
         try:
@@ -169,10 +170,10 @@ class PositionOpener:
                 best_bid = orderbook['best_bid']
                 best_ask = orderbook['best_ask']
                 spread_pct = (best_ask - best_bid) / best_bid * 100 if best_bid > 0 else 0
-
                 MAX_SPREAD_PCT = 0.5
                 if spread_pct > MAX_SPREAD_PCT:
                     warning(f"⚠️ {ticker}: слишком большой спред {spread_pct:.2f}%")
+                    info(f"   ❌ ОТКАЗ: спред {spread_pct:.2f}% > {MAX_SPREAD_PCT}%")
                     return False
                 info(f"   ✅ Спред OK: {spread_pct:.2f}%")
         except Exception as e:
@@ -181,10 +182,12 @@ class PositionOpener:
         # ========== ПРОВЕРКА МИНИМАЛЬНОГО ЛОТА ==========
         if quantity < stock.lot:
             error(f"❌ {ticker}: {quantity} < {stock.lot}")
+            info(f"   ❌ ОТКАЗ: количество меньше лота")
             return False
 
         # ========== ПРОВЕРКА СРЕДСТВ ==========
         if not self._check_funds(stock.figi, quantity, stock.price, ticker):
+            info(f"   ❌ ОТКАЗ: недостаточно средств (check_funds)")
             return False
 
         # ========== АВТОМАТИЧЕСКИЙ ВЫБОР ТИПА ЗАЯВКИ ==========
@@ -197,11 +200,9 @@ class PositionOpener:
         # ========== ОТПРАВКА ЗАЯВКИ ==========
         try:
             info(f"📡 ОТПРАВКА заявки: BUY {quantity} {ticker}")
-
             if use_market:
                 success_flag = tbank.buy(stock.figi, quantity, use_market=True)
             else:
-                # Лимитная заявка (цена чуть выше рыночной для LONG)
                 limit_price = tbank._round_to_min_increment(stock.figi, stock.price * 1.01)
                 info(f"   📊 Лимитная цена: {limit_price:.2f}₽ (рынок: {stock.price:.2f}₽)")
                 success_flag = tbank.place_limit_order(stock.figi, quantity, "BUY", limit_price)
@@ -209,12 +210,10 @@ class PositionOpener:
             if success_flag:
                 success(f"✅ {ticker}: LONG позиция успешно открыта ({order_reason})")
                 self._add_position_to_manager(stock, quantity, stock.price, OrderSide.LONG)
-                # Очищаем запись о pending заявке
                 self._long_pending.pop(pending_key, None)
                 return True
             else:
                 error(f"❌ {ticker}: не удалось открыть LONG позицию ({order_reason})")
-
                 # Fallback: если лимитная не сработала, пробуем рыночную
                 if not use_market:
                     warning(f"   🔄 Пробуем рыночную заявку как fallback...")
@@ -227,11 +226,8 @@ class PositionOpener:
                             return True
                     except Exception as fallback_error:
                         error(f"   ❌ Fallback тоже не сработал: {fallback_error}")
-
-                # Если не удалось, удаляем запись
                 self._long_pending.pop(pending_key, None)
                 return False
-
         except Exception as e:
             error(f"❌ Ошибка: {e}")
             self._long_pending.pop(pending_key, None)
@@ -240,7 +236,7 @@ class PositionOpener:
     # ========== SHORT ПОЗИЦИИ ==========
 
     def open_short_market(self, stock: StockCandidate, quantity: int) -> bool:
-        """Открытие SHORT позиции с АВТОМАТИЧЕСКИМ ВЫБОРОМ типа заявки"""
+        """Открытие SHORT позиции с АВТОМАТИЧЕСКИМ ВЫБОРОМ типа заявки и детальным логированием"""
         from trading_bot.api.tbank_client import tbank
 
         ticker = stock.ticker
@@ -249,104 +245,138 @@ class PositionOpener:
         info(f"🔴 ОТКРЫТИЕ SHORT ПОЗИЦИИ: {ticker}")
         info(f"   Количество: {quantity} шт")
         info(f"   Цена: {stock.price:.2f}₽")
+        info(f"   FIGI: {stock.figi}")
         info(f"{'=' * 60}")
 
         # ========== ЗАЩИТА ОТ ДУБЛИРОВАНИЯ ==========
         pending_key = f"short_pending_{stock.figi}"
         if pending_key in self._short_pending:
             elapsed = (get_moscow_time() - self._short_pending[pending_key]).seconds
-            if elapsed < 30:  # Блокировка на 30 секунд
+            if elapsed < 30:
                 warning(f"⚠️ SHORT заявка для {ticker} уже отправлена {elapsed} сек назад")
+                info(f"   ❌ ОТКАЗ: дублирование (pending)")
                 return False
             else:
-                # Если прошло больше 30 секунд, удаляем старую запись
                 self._short_pending.pop(pending_key, None)
 
-        # ========== ПРОВЕРКА OTC ==========
+        # ========== 1. ПРОВЕРКА OTC ==========
         try:
             if tbank.is_confirmation_required(stock.figi):
                 warning(f"⛔ {ticker} - OTC инструмент (требует подтверждения)")
                 self.bot._add_to_blacklist(ticker, minutes=60)
+                info(f"   ❌ ОТКАЗ: OTC (confirmation_required)")
                 return False
 
-            # Используем ленивый импорт для избежания циклической зависимости
             is_otc, otc_reason = _get_instrument_filter().is_otc_instrument(stock.figi, ticker)
             if is_otc:
                 error(f"❌ {ticker} - OTC ИНСТРУМЕНТ! НЕВОЗМОЖНО ЗАКРЫТЬ ЧЕРЕЗ API!")
                 error(f"   Причина: {otc_reason}")
-                error(f"   🔧 Добавляем {ticker} в чёрный список")
-                self.bot._add_to_blacklist(ticker, minutes=3600)  # Блокируем на час
+                self.bot._add_to_blacklist(ticker, minutes=3600)
+                info(f"   ❌ ОТКАЗ: OTC (instrument_filter)")
                 return False
-
         except Exception as e:
             warning(f"⚠️ Ошибка проверки OTC: {e}")
+            info(f"   ❌ ОТКАЗ: ошибка OTC проверки")
+            return False
 
-        # ========== ПРОВЕРКА МИНИМАЛЬНОГО ЛОТА ==========
+        # ========== 2. ПРОВЕРКА МИНИМАЛЬНОГО ЛОТА ==========
         if quantity < stock.lot:
             error(f"❌ {ticker}: {quantity} < {stock.lot}")
+            info(f"   ❌ ОТКАЗ: количество меньше лота")
             return False
+        info(f"   ✅ Лот: {stock.lot}, количество {quantity} >= лота")
 
-        # ========== ПРОВЕРКА КАПИТАЛА ДЛЯ SHORT ==========
+        # ========== 3. ПРОВЕРКА КАПИТАЛА ДЛЯ SHORT ==========
         available, total_capital, _ = tbank.get_available_funds()
         min_capital_for_short = getattr(config, 'min_capital_for_short', 7000)
+        info(f"   Проверка капитала: total_capital={total_capital:.0f}₽, необходимо >= {min_capital_for_short}₽")
         if total_capital < min_capital_for_short:
-            error(f"❌ {ticker}: недостаточно капитала для SHORT (нужно {min_capital_for_short}₽, есть {total_capital:.0f}₽)")
+            error(
+                f"❌ {ticker}: недостаточно капитала для SHORT (нужно {min_capital_for_short}₽, есть {total_capital:.0f}₽)")
+            info(f"   ❌ ОТКАЗ: капитал < {min_capital_for_short}")
             return False
+        info(f"   ✅ Капитал достаточен")
 
-        # ========== ПРОВЕРКА МАРЖИ ==========
+        # ========== 4. ПРОВЕРКА МАРЖИ ==========
         from trading_bot.risk.position_manager import position_manager
         required_margin = quantity * stock.price * 0.2
         can_open, reason = position_manager.can_open_new_position(required_margin)
+        info(f"   Проверка маржи: required_margin={required_margin:.2f}₽, can_open={can_open}, reason={reason}")
         if not can_open:
             warning(f"⚠️ Нельзя открыть SHORT {ticker}: {reason}")
+            info(f"   ❌ ОТКАЗ: маржа не позволяет")
             return False
+        info(f"   ✅ Маржа в порядке")
 
-        # ========== ПРОВЕРКА ВРЕМЕНИ ДО КЛИРИНГА ==========
+        # ========== 5. ПРОВЕРКА ВРЕМЕНИ ДО КЛИРИНГА ==========
         self._check_clearing_warning(quantity, stock.price, ticker)
+        # (предупреждение не блокирует)
 
-        # ========== ПРОВЕРКА ТОРГОВОГО ВРЕМЕНИ ==========
+        # ========== 6. ПРОВЕРКА ТОРГОВОГО ВРЕМЕНИ ==========
         from trading_bot.utils.time_utils import is_trading_time
-        if not is_trading_time():
+        trading_time_ok = is_trading_time()
+        info(f"   Торговое время разрешено: {trading_time_ok}")
+        if not trading_time_ok:
             error(f"❌ {ticker}: Торги закрыты")
+            info(f"   ❌ ОТКАЗ: вне торгового времени")
             return False
+        info(f"   ✅ Торги открыты")
 
-        # ========== ПРОВЕРКА СТАТУСА ТОРГОВ ==========
+        # ========== 7. ПРОВЕРКА СТАТУСА ТОРГОВ ==========
         try:
             trading_status = tbank.get_trading_status(stock.figi)
-            if not trading_status.get('api_trade_available', False):
+            api_available = trading_status.get('api_trade_available', False)
+            info(f"   API торговля доступна: {api_available}")
+            if not api_available:
                 warning(f"⚠️ {ticker}: API торговля недоступна")
+                info(f"   ❌ ОТКАЗ: API торговля недоступна")
                 return False
         except Exception as e:
             debug(f"Ошибка проверки статуса: {e}")
-
-        # ========== ПРОВЕРКА СУЩЕСТВУЮЩЕЙ ПОЗИЦИИ ==========
-        if position_manager.get_position(stock.figi):
-            warning(f"⚠️ Уже есть позиция по {ticker}")
+            info(f"   ❌ ОТКАЗ: ошибка статуса торгов")
             return False
 
-        # ========== ПРОВЕРКА СТАТУСА БОТА ==========
+        # ========== 8. ПРОВЕРКА СУЩЕСТВУЮЩЕЙ ПОЗИЦИИ ==========
+        existing = position_manager.get_position(stock.figi)
+        info(f"   Существующая позиция: {existing is not None}")
+        if existing:
+            warning(f"⚠️ Уже есть позиция по {ticker}")
+            info(f"   ❌ ОТКАЗ: позиция уже существует")
+            return False
+
+        # ========== 9. ПРОВЕРКА СТАТУСА БОТА ==========
         if self.bot._shutting_down:
             warning(f"🛑 Бот останавливается")
+            info(f"   ❌ ОТКАЗ: бот останавливается")
             return False
+        info(f"   ✅ Бот работает")
 
-        # ========== ПРОВЕРКА ВКЛЮЧЕНИЯ SHORT ==========
-        if not config.use_short:
+        # ========== 10. ПРОВЕРКА ВКЛЮЧЕНИЯ SHORT ==========
+        use_short = config.use_short
+        info(f"   config.use_short = {use_short}")
+        if not use_short:
             error(f"🔻 SHORT отключён")
+            info(f"   ❌ ОТКАЗ: SHORT отключён в конфиге")
             return False
 
-        # ========== ПРОВЕРКА МАРЖИНАЛЬНОЙ ТОРГОВЛИ ==========
-        margin_allowed, margin_reason = _get_tbank().check_margin_trading_allowed()
+        # ========== 11. ПРОВЕРКА МАРЖИНАЛЬНОЙ ТОРГОВЛИ ==========
+        margin_allowed, margin_reason = tbank.check_margin_trading_allowed()
+        info(f"   Маржинальная торговля разрешена: {margin_allowed}, причина: {margin_reason}")
         if not margin_allowed:
             error(f"❌ Маржинальная торговля недоступна: {margin_reason}")
+            info(f"   ❌ ОТКАЗ: маржинальная торговля недоступна")
             return False
 
-        # ========== ПРОВЕРКА СРЕДСТВ ДЛЯ ЗАКРЫТИЯ ==========
+        # ========== 12. ПРОВЕРКА СРЕДСТВ ДЛЯ ЗАКРЫТИЯ ==========
         buy_back_cost = quantity * stock.price * 1.05
         available_funds, _, _ = tbank.get_available_funds()
+        info(f"   Нужно для выкупа: {buy_back_cost:.2f}₽, доступно: {available_funds:.2f}₽")
         if available_funds < buy_back_cost:
             error(f"❌ Недостаточно средств для SHORT {ticker}!")
             error(f"   Нужно для выкупа: {buy_back_cost:.0f}₽, доступно: {available_funds:.0f}₽")
+            info(f"   ❌ ОТКАЗ: недостаточно средств на выкуп")
             return False
+        info(f"   ✅ Средств на выкуп достаточно")
 
         # ========== АВТОМАТИЧЕСКИЙ ВЫБОР ТИПА ЗАЯВКИ ==========
         use_market, order_reason = self._get_order_type(stock.figi, ticker)
@@ -358,11 +388,10 @@ class PositionOpener:
         # ========== ОТПРАВКА ЗАЯВКИ ==========
         try:
             info(f"📡 ОТПРАВКА заявки: SHORT {quantity} шт {ticker}")
-
             if use_market:
-                success_flag = tbank.sell_short(stock.figi, quantity)
+                success_flag = tbank.sell(stock.figi, quantity)
+                info(f"   (рыночная заявка)")
             else:
-                # Лимитная заявка для SHORT (цена чуть ниже рыночной)
                 limit_price = tbank._round_to_min_increment(stock.figi, stock.price * 0.99)
                 info(f"   📊 Лимитная цена: {limit_price:.2f}₽ (рынок: {stock.price:.2f}₽)")
                 success_flag = tbank.place_limit_order(stock.figi, quantity, "SELL", limit_price)
@@ -378,26 +407,23 @@ class PositionOpener:
                 else:
                     warning(f"⚠️ SHORT {ticker} не подтверждён")
                     self._short_pending.pop(pending_key, None)
+                    info(f"   ❌ ОТКАЗ: не подтверждён после отправки")
                     return False
 
                 self._add_position_to_manager(stock, quantity, stock.price, OrderSide.SHORT)
-
                 try:
                     _get_telegram().send_trade_opened("SHORT", ticker, quantity, stock.price)
                 except Exception:
                     pass
-
-                # Очищаем запись о pending заявке
                 self._short_pending.pop(pending_key, None)
                 return True
 
             error(f"❌ SHORT {ticker} не открыт ({order_reason})")
-
             # Fallback: если лимитная не сработала, пробуем рыночную
             if not use_market:
                 warning(f"   🔄 Пробуем рыночную заявку как fallback...")
                 try:
-                    success_flag = tbank.sell_short(stock.figi, quantity)
+                    success_flag = tbank.sell(stock.figi, quantity)
                     if success_flag:
                         success(f"✅ {ticker}: SHORT позиция открыта (рыночная fallback)")
                         self._add_position_to_manager(stock, quantity, stock.price, OrderSide.SHORT)
@@ -405,13 +431,13 @@ class PositionOpener:
                         return True
                 except Exception as fallback_error:
                     error(f"   ❌ Fallback тоже не сработал: {fallback_error}")
-
-            # Если не удалось, удаляем запись
             self._short_pending.pop(pending_key, None)
             return False
 
         except Exception as e:
             error(f"❌ Ошибка SHORT {ticker}: {e}")
+            import traceback
+            debug(traceback.format_exc())
             self._short_pending.pop(pending_key, None)
             return False
 

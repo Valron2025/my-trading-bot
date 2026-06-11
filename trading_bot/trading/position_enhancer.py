@@ -178,7 +178,7 @@ class PositionEnhancer:
                 success_flag = tbank.buy(position.figi, add_quantity)
             else:
                 info(f"      🔴 SHORT: продажа {add_quantity} шт {ticker} по ~{current_price:.2f}₽")
-                success_flag = tbank.sell_short(position.figi, add_quantity)
+                success_flag = tbank.sell(position.figi, add_quantity)
 
             if success_flag:
                 state = self._get_enhancement_state(position.figi)

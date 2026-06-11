@@ -536,9 +536,9 @@ class PositionManager:
         try:
             if position.stop_loss_pct > 0:
                 if position.side == OrderSide.LONG:
-                    stop_side = "SHORT"
+                    stop_side = "LONG"
                 else:
-                    stop_side = "BUY"
+                    stop_side = "SHORT"
 
                 info(f"      📊 СТОП-ЛОСС: {stop_side} {quantity} шт {ticker} при {stop_price_rounded:.2f}₽")
 
@@ -558,9 +558,9 @@ class PositionManager:
         try:
             if position.take_profit_pct > 0:
                 if position.side == OrderSide.LONG:
-                    tp_side = "SHORT"
+                    tp_side = "LONG"
                 else:
-                    tp_side = "BUY"
+                    tp_side = "SHORT"
 
                 info(f"      📊 ТЕЙК-ПРОФИТ: {tp_side} {quantity} шт {ticker} при {tp_price_rounded:.2f}₽")
 

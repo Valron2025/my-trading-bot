@@ -116,11 +116,17 @@ class OrderValidator:
                     step = self._get_min_price_increment(client, figi)
                     additional_info['min_price_increment'] = step
 
-                    # Проверяем кратность шагу
-                    remainder = price % step if step > 0 else 0
-                    if remainder > 0.0001:
-                        suggested = round(price / step) * step
-                        return False, f"Цена не кратна шагу {step}, предлагается {suggested:.4f}", additional_info
+                    # ✅ ИСПРАВЛЕНО: используем Decimal для точного сравнения
+                    if step > 0:
+                        from decimal import Decimal, ROUND_HALF_UP
+                        # Округляем цену до шага с помощью Decimal
+                        price_decimal = Decimal(str(price))
+                        step_decimal = Decimal(str(step))
+                        rounded_price = float(price_decimal.quantize(step_decimal, rounding=ROUND_HALF_UP))
+            
+                        # Проверяем с погрешностью 0.0001
+                        if abs(price - rounded_price) > 0.0001:
+                            return False, f"Цена не кратна шагу {step}, предлагается {rounded_price:.4f}", additional_info
 
                 except Exception as e:
                     warning(f"⚠️ Ошибка получения шага цены: {e}")
@@ -230,9 +236,12 @@ class OrderValidator:
                 # Формируем цену для лимитной заявки
                 price_quotation = None
                 if order_type == "LIMIT" and price:
-                    # Округляем цену до шага
+                    # ✅ ИСПРАВЛЕНО: используем Decimal для точного округления
+                    from decimal import Decimal, ROUND_HALF_UP
                     step = self._get_min_price_increment(client, figi)
-                    rounded_price = round(price / step) * step
+                    price_decimal = Decimal(str(price))
+                    step_decimal = Decimal(str(step))
+                    rounded_price = float(price_decimal.quantize(step_decimal, rounding=ROUND_HALF_UP))
                     price_quotation = decimal_to_quotation(Decimal(str(rounded_price)))
                     info(f"📊 Цена для лимитной заявки: {rounded_price:.4f}₽ (шаг={step})")
 

@@ -273,6 +273,16 @@ class TBankClient:
             error(f"❌ Не удалось получить цену для покупки {figi}")
             return False
 
+        # ========== ✅ ДОБАВИТЬ ОКРУГЛЕНИЕ ЦЕНЫ ДО ШАГА ==========
+        # Получаем шаг цены и округляем цену
+        step = self._get_min_price_increment_advanced(figi)
+        if step > 0:
+            original_price = price
+            price = round(price / step) * step
+            if abs(price - original_price) > 0.001:
+                info(f"   💰 Цена скорректирована: {original_price:.4f} → {price:.4f} (шаг={step})")
+        # ========================================================
+
         total = quantity * price
         info(f"📊 BUY {ticker}: {quantity} шт по {price:.2f}₽, сумма {total:.2f}₽")
 
@@ -350,6 +360,15 @@ class TBankClient:
         if not price:
             error(f"❌ Не удалось получить цену для продажи {figi}")
             return False
+
+        # ========== ✅ ДОБАВИТЬ ОКРУГЛЕНИЕ ЦЕНЫ ДО ШАГА ==========
+        step = self._get_min_price_increment_advanced(figi)
+        if step > 0:
+            original_price = price
+            price = round(price / step) * step
+            if abs(price - original_price) > 0.001:
+                info(f"   💰 Цена скорректирована: {original_price:.4f} → {price:.4f} (шаг={step})")
+        # ========================================================
 
         total = quantity * price
         info(f"📊 SELL {ticker}: {quantity} шт по {price:.2f}₽, сумма {total:.2f}₽")
@@ -3637,6 +3656,15 @@ class TBankClient:
         except Exception as e:
             error(f"❌ WebSocket ошибка для {ticker}: {e}")
             return None
+
+    # ========== АЛИАСЫ ДЛЯ ОБРАТНОЙ СОВМЕСТИМОСТИ ==========
+    
+    def sell_short(self, figi: str, quantity: int, use_market: bool = None) -> bool:
+        """
+        Алиас для sell() - для обратной совместимости
+        Используется в некоторых частях кода для SHORT позиций
+        """
+        return self.sell(figi, quantity, use_market)
 
 
 # Глобальная переменная для позиций (если используется в коде)

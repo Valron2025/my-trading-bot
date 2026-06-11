@@ -239,8 +239,10 @@ class PreMarketTrader:
         else:
             self.max_capital_per_order = max(2000, total_capital * 0.05)
 
-        # Ограничиваем максимум 20,000₽ на один ордер
-        self.max_capital_per_order = min(self.max_capital_per_order, 20000)
+        # ✅ ДОБАВИТЬ МИНИМАЛЬНЫЙ ПОРОГ
+        self.max_capital_per_order = max(self.max_capital_per_order, 1000)  # минимум 1000₽
+        self.max_capital_per_order = min(self.max_capital_per_order, 20000)  # максимум 20000₽
+        self.max_capital_per_order = min(self.max_capital_per_order, total_capital * 0.3)  # максимум 30% капитала
 
         # Стоп-лосс и тейк-профит (чем больше капитал, тем консервативнее)
         if total_capital < 5000:
@@ -273,6 +275,11 @@ class PreMarketTrader:
 
         # Обновляем капитал
         available, total_capital, _ = tbank.get_available_funds()
+
+        # ✅ ИСПРАВЛЕНО: для pre-market используем TOTAL CAPITAL (свободные средства могут быть 0 из-за маржи)
+        available_for_planning = max(total_capital * 0.5, available) if total_capital > 0 else available
+        info(f"   💰 Капитал: {total_capital:.0f}₽ | Свободно: {available:.0f}₽ | Для планирования: {available_for_planning:.0f}₽")
+
         self._update_dynamic_params(total_capital)
         config.total_capital = total_capital
 
@@ -363,8 +370,20 @@ class PreMarketTrader:
 
                 # ✅ ИСПРАВЛЕНО: используем dynamic params вместо position_sizer
                 # Рассчитываем количество через dynamic params
-                max_amount = min(self.max_capital_per_order, available * 0.15)
+                max_amount = min(self.max_capital_per_order, available_for_planning * 0.15)  # ← ИСПРАВЛЕНО
                 quantity = int(max_amount / current_price)
+
+                # Проверка, что хватает хотя бы на 1 лот
+                if quantity < lot:
+                    # Минимальная сумма = 1 лот
+                    min_amount = current_price * lot
+                    if min_amount <= self.max_capital_per_order:
+                        quantity = lot
+                        max_amount = min_amount
+                        debug(f"   🔧 {ticker}: увеличен до минимального лота {lot} шт")
+                    else:
+                        debug(f"   ⚠️ {ticker}: даже 1 лот ({min_amount:.0f}₽) превышает лимит {self.max_capital_per_order:.0f}₽")
+                        continue
 
                 # Корректировка по лоту
                 if lot > 1:
@@ -477,8 +496,18 @@ class PreMarketTrader:
         from trading_bot.api.tbank_client import tbank
         available, total_capital, _ = tbank.get_available_funds()
 
-        if available < 500:
-            warning(f"⚠️ Недостаточно средств для pre-market: {available:.0f}₽")
+        # ✅ ИСПРАВЛЕНО: проверяем общий капитал, а не свободные средства
+        if total_capital < 500:
+            warning(f"⚠️ Недостаточно капитала для pre-market: {total_capital:.0f}₽")
+            return []
+
+        # Для планирования используем 50% капитала (или свободные средства, если они больше)
+        available_for_planning = max(total_capital * 0.5, available) if total_capital > 0 else available
+        info(f"   💰 Капитал: {total_capital:.0f}₽ | Свободно: {available:.0f}₽ | Для планирования: {available_for_planning:.0f}₽")
+
+        # ✅ ИСПРАВЛЕНО: проверяем available_for_planning вместо available
+        if available_for_planning < 500:
+            warning(f"⚠️ Недостаточно средств для pre-market: {available_for_planning:.0f}₽")
             return []
 
         # Обновляем динамические параметры
@@ -495,13 +524,20 @@ class PreMarketTrader:
         total_allocated = 0
 
         for cand in candidates:
+            # ========== ✅ ДОБАВИТЬ ПРОВЕРКУ OTC ПЕРЕД СОЗДАНИЕМ ОРДЕРА ==========
+            from trading_bot.api.tbank_client import tbank
+            if tbank.is_confirmation_required(cand['figi']):
+                debug(f"   ⏭️ {cand['ticker']}: OTC инструмент, пропускаем")
+                continue
+            # ================================================================
+        
             # Проверяем лимит ордеров
             if len(orders) >= self.max_orders_per_day:
                 info(f"⏸️ Достигнут лимит ордеров ({self.max_orders_per_day})")
                 break
 
-            # Проверяем лимит капитала
-            if total_allocated + cand['total_cost'] > available * 0.5:
+            # Проверяем лимит капитала (используем available_for_planning)
+            if total_allocated + cand['total_cost'] > available_for_planning * 0.5:  # ← ИСПРАВЛЕНО
                 info(f"⏸️ Достигнут лимит капитала ({total_allocated:.0f}₽)")
                 break
 
@@ -597,6 +633,15 @@ class PreMarketTrader:
             try:
                 info(f"\n🔄 {order.direction} {order.ticker}: "
                      f"{order.quantity}шт по {order.limit_price:.2f}₽")
+                
+                # ========== ✅ ДОБАВИТЬ ПРОВЕРКУ OTC ==========
+                # Проверяем, не требует ли инструмент подтверждения
+                if tbank.is_confirmation_required(order.figi):
+                    warning(f"⚠️ {order.ticker} требует подтверждения сделок (OTC) - пропускаем")
+                    order.status = "REJECTED"
+                    self.rejected_orders.append(order)
+                    continue
+                # ============================================
 
                 # В pre-market используем лимитные заявки
                 # В основную сессию можно использовать рыночные
