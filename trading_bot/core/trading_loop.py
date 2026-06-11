@@ -254,25 +254,42 @@ class TradingLoop:
         """
         РАСШИРЕННАЯ проверка лимитов (количество + баланс + загрузка)
         """
+        # ========== ДИАГНОСТИКА ==========
+        print(f"\n🔍🔍🔍 check_position_limits_advanced ВЫЗВАН!")
+        print(f"   side = {side}")
+        print(f"   total_cost = {total_cost:.2f}")
+        print(f"   total_capital = {total_capital:.2f}")
+        # =================================
+
         # 1. Получаем текущие позиции
         positions = _get_tbank().get_positions(force_refresh=True)
+
+        print(f"   📊 positions = {len(positions)} позиций")
+        for p in positions[:3]:
+            print(f"      {p.get('ticker', '?')}: qty={p.get('quantity', 0)}, price={p.get('current_price', 0):.2f}")
 
         # 2. Проверка по количеству (новый динамический лимит)
         max_positions = self.get_max_positions_by_capital(total_capital)
         current_count = len(positions)
+        print(f"   📊 current_count={current_count}, max_positions={max_positions}")
 
         if current_count >= max_positions:
+            print(f"   ❌ ОТКАЗ: лимит {max_positions} позиций достигнут")
             return False, f"лимит {max_positions} позиций достигнут"
 
         # 3. Проверка баланса LONG/SHORT
         exposure = self.get_market_exposure()
+        print(f"   ⚖️ exposure: LONG={exposure['long_pct'] * 100:.1f}%, SHORT={exposure['short_pct'] * 100:.1f}%")
 
         if side == "LONG":
             can_open, reason = self.should_open_long(0)
         else:
             can_open, reason = self.should_open_short(0)
 
+        print(f"   📊 can_open={can_open}, reason='{reason}'")
+
         if not can_open:
+            print(f"   ❌ ОТКАЗ: баланс - {reason}")
             return False, f"баланс: {reason}"
 
         # 4. Проверка загрузки капитала (максимум 85%)
@@ -282,18 +299,24 @@ class TradingLoop:
         )
         current_used_pct = (positions_value / total_capital * 100) if total_capital > 0 else 0
         new_used_pct = ((positions_value + total_cost) / total_capital * 100) if total_capital > 0 else 0
+        print(f"   📊 загрузка: {current_used_pct:.1f}% → {new_used_pct:.1f}%")
 
         MAX_TOTAL_PCT = 85
         if new_used_pct > MAX_TOTAL_PCT:
+            print(f"   ❌ ОТКАЗ: загрузка {new_used_pct:.1f}% > {MAX_TOTAL_PCT}%")
             return False, f"загрузка {new_used_pct:.0f}% > {MAX_TOTAL_PCT}%"
 
         # 5. Проверка размера позиции (максимум 60% капитала)
         position_pct = (total_cost / total_capital * 100) if total_capital > 0 else 0
         MAX_POSITION_PCT = 60
+        print(f"   📊 размер позиции: {position_pct:.1f}% от капитала")
+
         if position_pct > MAX_POSITION_PCT:
+            print(f"   ❌ ОТКАЗ: позиция {position_pct:.1f}% > {MAX_POSITION_PCT}%")
             return False, f"позиция {position_pct:.0f}% > {MAX_POSITION_PCT}%"
 
         # Всё хорошо
+        print(f"   ✅ ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ!")
         info(
             f"   ✅ Лимиты: {current_count + 1}/{max_positions} поз, загрузка {current_used_pct:.0f}%→{new_used_pct:.0f}%, баланс {exposure['long_pct'] * 100:.0f}/{exposure['short_pct'] * 100:.0f}")
 
