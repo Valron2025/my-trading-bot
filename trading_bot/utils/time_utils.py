@@ -5,6 +5,7 @@
 from datetime import datetime, time, timedelta, timezone
 from typing import Optional, Tuple, Dict, List, Any
 import pytz
+from ..logger import info, success, error, warning, debug
 
 # Московская временная зона (UTC+3)
 MOSCOW_TZ = timezone(timedelta(hours=3))
@@ -406,19 +407,38 @@ def get_days_until_monday() -> int:
     return days_until_monday
 
 
-def is_holiday(date: datetime = None) -> bool:
-    """Проверка праздничных дней (торги отменены)"""
-    if date is None:
-        date = get_moscow_time()
+def is_holiday(dt: datetime = None) -> bool:
+    """
+    Проверка, является ли день праздничным (торги закрыты)
+    Учитывает ДСВД/OTC торги в выходные и праздники
+    """
+    if dt is None:
+        dt = get_moscow_time()
 
-    month, day = date.month, date.day
+    # Список официальных праздников MOEX (дни, когда биржа закрыта)
+    holidays = {
+        (1, 1),  # Новый год
+        (1, 2),  # Новый год
+        (1, 7),  # Рождество
+        (2, 23),  # День защитника Отечества
+        (3, 8),  # Международный женский день
+        (5, 1),  # Праздник Весны и Труда
+        (5, 9),  # День Победы
+        (6, 12),  # День России
+        (11, 4),  # День народного единства
+    }
 
-    holidays = [
-        (1, 1), (1, 2), (1, 3), (1, 4), (1, 5), (1, 6), (1, 7), (1, 8),
-        (2, 23), (3, 8), (5, 1), (5, 9), (6, 12), (11, 4),
-    ]
+    # Проверяем, праздник ли сегодня
+    if (dt.month, dt.day) in holidays:
+        # ДАЖЕ В ПРАЗДНИК — проверяем, идут ли ДСВД/OTC торги!
+        if is_weekend_trading_time() or is_otc_trading_time():
+            # Если ДСВД/OTC активны — не считаем праздником для торговли
+            debug(f"🎉 {dt.strftime('%d.%m')} праздник, но ДСВД/OTC активны — торговля разрешена")
+            return False
+        debug(f"🎄 {dt.strftime('%d.%m')} праздник, ДСВД/OTC не активны — торговля запрещена")
+        return True
 
-    return (month, day) in holidays
+    return False
 
 
 def is_friday_evening() -> bool:
