@@ -59,7 +59,7 @@ class RenderCompatibleClient(OriginalClient):
     """Клиент, совместимый с Render (использует insecure channel)"""
 
     def __init__(self, token, *args, **kwargs):
-        # Создаём insecure channel (БЕЗ SSL!) - порт 80 для insecure
+        # ✅ ИСПРАВЛЕНО: порт 80 для insecure channel (не 443!)
         channel = grpc.insecure_channel('invest-public-api.tinkoff.ru:80')
 
         # Инициализируем через родителя, но подменяем канал
@@ -77,7 +77,7 @@ class RenderCompatibleClient(OriginalClient):
 # ПОДМЕНЯЕМ КЛАСС В МОДУЛЕ
 t_tech.invest.Client = RenderCompatibleClient
 
-print("🔓 Render: используем insecure channel (SSL отключён)")
+print("🔓 Render: используем insecure channel (SSL отключён, порт 80)")
 
 # Также подменяем импортированный Client в текущем модуле
 Client = RenderCompatibleClient
