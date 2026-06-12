@@ -17,12 +17,6 @@ MOSCOW_TZ = timezone(timedelta(hours=3))
 # ========== ПРИНУДИТЕЛЬНЫЙ ФИКС ПОРТА ==========
 os.environ['GRPC_DNS_RESOLVER'] = 'native'
 
-# Патчим соединение глобально
-_original_secure_channel = grpc.secure_channel
-grpc.secure_channel = lambda target, credentials, options=None: grpc.insecure_channel(target.replace(':443', ':80'))
-
-print("🔓 Принудительно заменяем secure_channel на insecure (порт 80)")
-
 # ========== ИМПОРТЫ ==========
 from t_tech.invest import (
     Client as OriginalClient,
