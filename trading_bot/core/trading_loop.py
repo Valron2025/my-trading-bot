@@ -2053,14 +2053,13 @@ class TradingLoop:
             warning(f"⚠️ Ошибка синхронизации позиций: {e}")
 
     def _is_trading_time(self) -> bool:
-        """Проверка, можно ли торговать сейчас"""
+        """Проверка, можно ли торговать сейчас (ПРЯМАЯ ПРОВЕРКА, без рекурсии)"""
         from ..utils.time_utils import (
             get_moscow_time,
             is_pre_market_time,
             is_main_session_time,
             is_evening_session_time,
             is_technical_break,
-            is_weekend_trading_time,
             is_dsvd_trading_time,
             is_otc_trading_time,
             is_holiday,
@@ -2071,32 +2070,26 @@ class TradingLoop:
         weekday = now.weekday()
         is_weekend = weekday >= 5
 
-        # ========== 1. СНАЧАЛА ПРОВЕРЯЕМ ДСВД/OTC (они важнее всего) ==========
-        # ДСВД/OTC могут быть активны даже в выходные и праздники
+        # ========== 1. ТЕХНИЧЕСКИЙ ПЕРЕРЫВ ==========
+        if is_technical_break():
+            debug(f"   ⏸️ Технический перерыв - торговля запрещена")
+            return False
+
+        # ========== 2. ДСВД/OTC СЕССИЯ (ПРЯМАЯ ПРОВЕРКА) ==========
+        # Проверяем напрямую, без вызова is_weekend_trading_time()
         if is_dsvd_trading_time() or is_otc_trading_time():
             config.is_weekend_session = True
             config.is_otc_mode = True
             debug(f"   📊 ДСВД/OTC СЕССИЯ АКТИВНА - торговля разрешена")
             return True
 
-        # ========== 2. ПОТОМ ПРОВЕРЯЕМ ТЕХНИЧЕСКИЙ ПЕРЕРЫВ ==========
-        if is_technical_break():
-            debug(f"   ⏸️ Технический перерыв - торговля запрещена")
-            return False
-
-        # ========== 3. ПОТОМ ПРОВЕРЯЕМ ПРАЗДНИКИ (без ДСВД/OTC) ==========
+        # ========== 3. ПРАЗДНИКИ (без ДСВД) ==========
         if is_holiday(now):
             debug(f"   🎄 Праздничный день, ДСВД не активна - торговля запрещена")
             return False
 
-        # ========== 4. ВЫХОДНЫЕ ДНИ (без ДСВД/OTC) ==========
-        if is_weekend and is_weekend_trading_time():
-            config.is_weekend_session = True
-            config.is_otc_mode = False
-            debug(f"   📊 ДОПОЛНИТЕЛЬНАЯ СЕССИЯ ВЫХОДНОГО ДНЯ: торговля разрешена")
-            return True
-
-        if is_weekend and not is_weekend_trading_time():
+        # ========== 4. ВЫХОДНЫЕ ДНИ (без ДСВД) ==========
+        if is_weekend:
             debug(f"   🌙 Выходной день, ДСВД не активна - торговля запрещена")
             config.is_weekend_session = False
             config.is_otc_mode = False
