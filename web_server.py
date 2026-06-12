@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
-"""Web сервер для Render - с поддержкой Telegram webhook и health check"""
+"""Web сервер для Render"""
 
+# ПЕРВЫЙ импорт - SSL фикс
+import ssl_fix  # Это должно быть ПЕРВЫМ!
+
+# Затем все остальные импорты
 import os
 import sys
 import logging
