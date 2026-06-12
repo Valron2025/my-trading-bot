@@ -1,6 +1,8 @@
 """Клиент для работы с T-Bank API - RENDER FIXED VERSION"""
 
 import time
+import os
+import grpc
 from functools import wraps
 from typing import List, Optional, Tuple, Dict, Any
 from datetime import datetime, timedelta, timezone
@@ -12,15 +14,59 @@ from threading import Lock
 
 MOSCOW_TZ = timezone(timedelta(hours=3))
 
-# ========== ИМПОРТЫ (без Client - он будет заменён) ==========
+# ========== СНАЧАЛА СОЗДАЁМ FIXED CLIENT ==========
+# Это ДОЛЖНО быть до любого использования Client
+
+class RenderFixedClient:
+    """Клиент для Render с insecure channel - ПОЛНОСТЬЮ СВОЯ РЕАЛИЗАЦИЯ"""
+
+    def __init__(self, token):
+        self.token = token
+        self._channel = grpc.insecure_channel('invest-public-api.tinkoff.ru:80')
+
+        # Импортируем все необходимые классы
+        from t_tech.invest import (
+            UsersServiceStub, OperationsServiceStub, OrdersServiceStub,
+            MarketDataServiceStub, InstrumentsServiceStub, StopOrdersServiceStub
+        )
+
+        # Создаём стубы (НЕ вызываем super().__init__!)
+        self.users = UsersServiceStub(self._channel)
+        self.operations = OperationsServiceStub(self._channel)
+        self.orders = OrdersServiceStub(self._channel)
+        self.market_data = MarketDataServiceStub(self._channel)
+        self.instruments = InstrumentsServiceStub(self._channel)
+        self.stop_orders = StopOrdersServiceStub(self._channel)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if hasattr(self, '_channel'):
+            self._channel.close()
+
+    def close(self):
+        if hasattr(self, '_channel'):
+            self._channel.close()
+
+# Подменяем оригинальный Client
+import t_tech.invest
+t_tech.invest.Client = RenderFixedClient
+
+# Теперь импортируем всё остальное
 from t_tech.invest import (
-    CandleInterval,   # Client НЕ импортируем здесь
+    CandleInterval,
     OrderType,
     OrderDirection
 )
 from t_tech.invest.utils import quotation_to_decimal, decimal_to_quotation
 
-# ========== ОСТАЛЬНЫЕ ИМПОРТЫ ==========
+# Получаем Client после подмены
+Client = RenderFixedClient
+
+print("🔓 RENDER FIX: Client использует insecure channel (порт 80)")
+
+# Остальные импорты
 from trading_bot.utils.figi_resolver import get_figi_resolver
 from trading_bot.order_validator import OrderValidator
 from trading_bot.risk.position_manager import position_manager
@@ -35,30 +81,6 @@ from trading_bot.cache import (
 )
 from socket import timeout as SocketTimeoutError
 from trading_bot.cache import TTLCache
-
-# ========== КРИТИЧЕСКИЙ ФИКС ДЛЯ RENDER ==========
-import os
-import grpc
-from t_tech.invest import Client as OriginalClient
-import t_tech.invest
-
-class RenderFixedClient(OriginalClient):
-    def __init__(self, token, *args, **kwargs):
-        channel = grpc.insecure_channel('invest-public-api.tinkoff.ru:80')
-        super().__init__(token, *args, **kwargs)
-        for attr in dir(self):
-            if attr.endswith('_stub') and not attr.startswith('_'):
-                stub = getattr(self, attr, None)
-                if stub and hasattr(stub, '__init__'):
-                    stub_class = stub.__class__
-                    setattr(self, attr, stub_class(channel))
-
-# Глобально заменяем Client
-t_tech.invest.Client = RenderFixedClient
-Client = RenderFixedClient
-print("🔓 RENDER FIX: Client использует insecure channel (порт 80)")
-
-# Импорты для унифицированного кэша
 from trading_bot.cache.unified_cache import USE_UNIFIED_CACHE, UnifiedCache
 
 
