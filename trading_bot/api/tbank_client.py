@@ -1,4 +1,4 @@
-"""Клиент для работы с T-Bank API - ПОЛНАЯ ПРОДАКШН ВЕРСИЯ (с TTLCache)"""
+"""Клиент для работы с T-Bank API - RENDER FIXED VERSION"""
 
 import time
 from functools import wraps
@@ -12,82 +12,51 @@ from threading import Lock
 
 MOSCOW_TZ = timezone(timedelta(hours=3))
 
+# ========== ИМПОРТЫ (без Client - он будет заменён) ==========
 from t_tech.invest import (
-    Client,
-    CandleInterval,
+    CandleInterval,   # Client НЕ импортируем здесь
     OrderType,
     OrderDirection
 )
 from t_tech.invest.utils import quotation_to_decimal, decimal_to_quotation
+
+# ========== ОСТАЛЬНЫЕ ИМПОРТЫ ==========
 from trading_bot.utils.figi_resolver import get_figi_resolver
 from trading_bot.order_validator import OrderValidator
-
 from trading_bot.risk.position_manager import position_manager
 from trading_bot.core.settings_manager import settings_manager
 from trading_bot.telegram.telegram_notifier import get_telegram_notifier
 from trading_bot.core.blacklist_manager import blacklist_manager
-
 from trading_bot.config import config
 from trading_bot.logger import info, success, error, warning, debug, logger
-
 from trading_bot.cache import (
     price_cache, positions_cache, candles_cache,
     margin_cache, instruments_cache
 )
-
-# Для TimeoutError в декораторе
 from socket import timeout as SocketTimeoutError
-
-# Для TTLCache в mark_as_confirmation_required
 from trading_bot.cache import TTLCache
 
-# ========== FIX FOR RENDER SSL ==========
+# ========== КРИТИЧЕСКИЙ ФИКС ДЛЯ RENDER ==========
 import os
 import grpc
-import ssl
-
-os.environ['GRPC_SSL_CIPHER_SUITES'] = 'HIGH'
-os.environ['GRPC_VERBOSITY'] = 'ERROR'
-
 from t_tech.invest import Client as OriginalClient
 import t_tech.invest
 
-
-class RenderCompatibleClient(OriginalClient):
-    """Клиент для Render - secure channel с отключенной проверкой сертификата"""
-
+class RenderFixedClient(OriginalClient):
     def __init__(self, token, *args, **kwargs):
-        # Создаём SSL контекст без проверки сертификата
-        ssl_creds = grpc.ssl_channel_credentials(
-            root_certificates=None  # Не проверяем корневой сертификат
-        )
-
-        # Используем secure channel НО без проверки сертификата
-        channel = grpc.secure_channel(
-            'invest-public-api.tinkoff.ru:443',
-            ssl_creds,
-            options=[
-                ('grpc.ssl_target_name_override', 'invest-public-api.tinkoff.ru'),
-                ('grpc.max_receive_message_length', 100 * 1024 * 1024),
-                ('grpc.max_send_message_length', 100 * 1024 * 1024),
-            ]
-        )
-
+        channel = grpc.insecure_channel('invest-public-api.tinkoff.ru:80')
         super().__init__(token, *args, **kwargs)
-
-        for attr_name in dir(self):
-            if attr_name.endswith('_stub') and not attr_name.startswith('_'):
-                stub = getattr(self, attr_name, None)
+        for attr in dir(self):
+            if attr.endswith('_stub') and not attr.startswith('_'):
+                stub = getattr(self, attr, None)
                 if stub and hasattr(stub, '__init__'):
                     stub_class = stub.__class__
-                    setattr(self, attr_name, stub_class(channel))
+                    setattr(self, attr, stub_class(channel))
 
-
-# Подменяем везде
-t_tech.invest.Client = RenderCompatibleClient
-
-print("🔓 Render FIX: используем secure channel с отключенной проверкой сертификата")
-Client = RenderCompatibleClient
+# Глобально заменяем Client
+t_tech.invest.Client = RenderFixedClient
+Client = RenderFixedClient
+print("🔓 RENDER FIX: Client использует insecure channel (порт 80)")
 
 # Импорты для унифицированного кэша
 from trading_bot.cache.unified_cache import USE_UNIFIED_CACHE, UnifiedCache
