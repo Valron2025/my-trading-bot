@@ -90,23 +90,25 @@ def is_trading_time() -> bool:
 
 def is_dsvd_trading_time() -> bool:
     """
-    Проверка, идёт ли сейчас ДСВД (биржевые торги в выходные)
+    Проверка ДСВД (биржевые торги в выходные/праздники)
     ДСВД проходит:
-    - Суббота и воскресенье
+    - Суббота, воскресенье И ПРАЗДНИЧНЫЕ ДНИ
     - Время: 09:50 - 18:59 МСК
-    - Только эти часы считаются ДСВД!
     """
     now = get_moscow_time()
     current_time = now.time()
     weekday = now.weekday()
+    is_holiday_today = is_holiday(now)
 
-    if weekday not in (5, 6):
-        return False
+    # В праздник торгуем по ДСВД (в часы ДСВД)
+    if is_holiday_today:
+        return DSVD_START <= current_time <= DSVD_END
 
-    if is_holiday(now):
-        return False
+    # В выходные торгуем по ДСВД (в часы ДСВД)
+    if weekday in (5, 6):  # Суббота или воскресенье
+        return DSVD_START <= current_time <= DSVD_END
 
-    return DSVD_START <= current_time <= DSVD_END
+    return False
 
 def is_weekend_evening_trading_time() -> bool:
     """
