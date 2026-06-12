@@ -4,18 +4,12 @@ setlocal enabledelayedexpansion
 
 echo.
 echo ========================================
-echo   🚀 FORCE UPDATE TO GITHUB & RENDER
+echo   🚀 UPDATE TO GITHUB
 echo ========================================
 echo.
 
-:: Переход в папку проекта
-cd /d F:\PROJECTS\my-trading-bot 2>nul
-if %errorlevel% neq 0 (
-    echo [ERROR] Project folder not found: F:\PROJECTS\my-trading-bot
-    echo.
-    pause
-    exit /b 1
-)
+:: Автоматическое определение папки проекта (где находится сам скрипт)
+cd /d "%~dp0"
 echo [OK] Project folder: %CD%
 echo.
 
@@ -37,34 +31,37 @@ if not exist ".git" (
     echo.
 )
 
-:: Добавляем ВСЕ файлы (включая новые и удалённые)
+:: Добавляем ВСЕ файлы
 echo Adding all files...
 git add -A
 echo [OK] Files added
 echo.
 
-:: Создаём коммит (всегда, даже если нет изменений)
-set "timestamp=%date% %time%"
-set "commitMsg=force-update %timestamp%"
-echo Committing: %commitMsg%
-git commit -m "%commitMsg%" --allow-empty
-echo [OK] Commit created
+:: Показываем изменения
+git status --short
 echo.
 
-:: ПРИНУДИТЕЛЬНЫЙ PUSH (полная замена на GitHub)
-echo Force pushing to GitHub...
-git push origin main --force
+:: Создаём коммит (только если есть изменения)
+git diff --cached --quiet
+if %errorlevel% equ 0 (
+    echo No changes to commit.
+) else (
+    set "timestamp=%date% %time%"
+    set "commitMsg=update %timestamp%"
+    echo Committing: %commitMsg%
+    git commit -m "%commitMsg%"
+    echo [OK] Commit created
+)
+echo.
+
+:: Push на GitHub
+echo Pushing to GitHub...
+git push origin main
 
 if %errorlevel% neq 0 (
     echo.
-    echo [ERROR] Force push failed!
-    echo Trying alternative method...
-    git push origin main --force-with-lease
-    if %errorlevel% neq 0 (
-        echo [ERROR] Push failed completely!
-        pause
-        exit /b 1
-    )
+    echo [WARNING] Push failed, trying force...
+    git push origin main --force
 )
 
 echo.

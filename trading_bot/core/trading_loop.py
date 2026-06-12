@@ -1845,6 +1845,7 @@ class TradingLoop:
             is_evening_session_time,
             is_technical_break,
             is_weekend_trading_time,
+            is_dsvd_trading_time,
             is_holiday,
         )
         from ..config import config
@@ -1854,8 +1855,13 @@ class TradingLoop:
         is_weekend = weekday >= 5
 
         if is_holiday(now):
-            debug(f"   🎄 Праздничный день - торговля запрещена")
-            return False
+            # В праздник торгуем ТОЛЬКО в часы ДСВД
+            if is_dsvd_trading_time():
+                debug(f"   🎉 Праздничный день, ДСВД активна - торговля разрешена")
+                # Не возвращаем False, продолжаем проверку
+            else:
+                debug(f"   🎄 Праздничный день, ДСВД не активна - торговля запрещена")
+                return False
 
         if is_technical_break():
             debug(f"   ⏸️ Технический перерыв - торговля запрещена")
