@@ -46,26 +46,27 @@ import os
 import grpc
 import sys
 
-# Отключаем проверку SSL
+# Устанавливаем переменные (для совместимости)
 os.environ['GRPC_SSL_CIPHER_SUITES'] = 'HIGH'
 os.environ['GRPC_VERBOSITY'] = 'ERROR'
 
-# СОЗДАЁМ НОВЫЙ КЛАСС КЛИЕНТА С INSECURE CHANNEL
+# ========== ГЛАВНЫЙ ФИКС: СОЗДАЁМ КЛИЕНТ С INSECURE CHANNEL ==========
 from t_tech.invest import Client as OriginalClient
 import t_tech.invest
 
 
 class RenderCompatibleClient(OriginalClient):
-    """Клиент, совместимый с Render (использует insecure channel)"""
+    """Клиент, совместимый с Render - использует insecure channel (без SSL)"""
 
     def __init__(self, token, *args, **kwargs):
-        # ✅ ИСПРАВЛЕНО: порт 80 для insecure channel (не 443!)
+        # КЛЮЧЕВОЙ МОМЕНТ: используем порт 80 (HTTP, без SSL)
+        # вместо 443 (HTTPS с SSL)
         channel = grpc.insecure_channel('invest-public-api.tinkoff.ru:80')
 
-        # Инициализируем через родителя, но подменяем канал
+        # Инициализируем родителя
         super().__init__(token, *args, **kwargs)
 
-        # Подменяем все сервисные стубы на наши
+        # Подменяем все стубы на наш канал
         for attr_name in dir(self):
             if attr_name.endswith('_stub') and not attr_name.startswith('_'):
                 stub = getattr(self, attr_name, None)
@@ -74,12 +75,12 @@ class RenderCompatibleClient(OriginalClient):
                     setattr(self, attr_name, stub_class(channel))
 
 
-# ПОДМЕНЯЕМ КЛАСС В МОДУЛЕ
+# Подменяем класс в модуле
 t_tech.invest.Client = RenderCompatibleClient
 
-print("🔓 Render: используем insecure channel (SSL отключён, порт 80)")
+print("🔓 Render FIX: используем insecure channel (порт 80, без SSL)")
 
-# Также подменяем импортированный Client в текущем модуле
+# Экспортируем клиент
 Client = RenderCompatibleClient
 
 # Импорты для унифицированного кэша
