@@ -1,6 +1,8 @@
 ﻿"""Модуль технического анализа - ПРОФЕССИОНАЛЬНАЯ ВЕРСИЯ"""
 
 import asyncio
+import nest_asyncio
+nest_asyncio.apply()
 from typing import List, Tuple, Dict, Any, Optional
 from datetime import datetime, time as dt_time, timedelta, timezone
 import numpy as np
@@ -447,6 +449,8 @@ class TechnicalAnalyzer:
             return signal_result
 
         import asyncio
+import nest_asyncio
+nest_asyncio.apply()
 
         # ========== 3. ВЫПОЛНЕНИЕ С ТАЙМАУТОМ ==========
         try:
@@ -761,6 +765,8 @@ class TechnicalAnalyzer:
             )
 
         import asyncio
+import nest_asyncio
+nest_asyncio.apply()
         import concurrent.futures
         import time
 
