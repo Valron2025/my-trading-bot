@@ -43,23 +43,29 @@ from trading_bot.cache import TTLCache
 
 # ========== FIX FOR RENDER SSL ==========
 import os
-import ssl
 import grpc
 
-# Отключаем проверку SSL сертификата для T-Bank API
+# Отключаем проверку SSL
 os.environ['GRPC_SSL_CIPHER_SUITES'] = 'HIGH'
 os.environ['GRPC_VERBOSITY'] = 'ERROR'
 
-# Создаём кастомные SSL credentials без проверки сертификата
-_original_ssl_creds = grpc.ssl_channel_credentials
+# ПОДМЕНЯЕМ Client на кастомный
+from t_tech.invest import Client as OriginalClient
 
-def _insecure_ssl_creds(*args, **kwargs):
-    """Создаёт SSL credentials без проверки сертификата"""
-    return _original_ssl_creds(root_certificates=None)
+class PatchedClient(OriginalClient):
+    """Патченый клиент, который использует insecure channel"""
+    def __init__(self, token, *args, **kwargs):
+        # Создаём insecure channel (без SSL!)
+        import grpc
+        self._channel = grpc.insecure_channel('invest-public-api.tinkoff.ru:443')
+        # Инициализируем остальное
+        super().__init__(token, *args, **kwargs)
 
-grpc.ssl_channel_credentials = _insecure_ssl_creds
+# Подменяем Client в модуле
+import t_tech.invest
+t_tech.invest.Client = PatchedClient
 
-print("🔓 SSL проверка ОТКЛЮЧЕНА для Render")
+print("🔓 SSL проверка ОТКЛЮЧЕНА для Render (insecure channel)")
 
 # Импорты для унифицированного кэша
 from trading_bot.cache.unified_cache import USE_UNIFIED_CACHE, UnifiedCache
