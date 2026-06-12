@@ -41,27 +41,17 @@ from socket import timeout as SocketTimeoutError
 # Для TTLCache в mark_as_confirmation_required
 from trading_bot.cache import TTLCache
 
-# ========== EMERGENCY SSL FIX ==========
+# ========== SSL FIX FOR RENDER ==========
 import os
-import ssl
-import grpc
 
-# Отключаем проверку SSL для всех HTTPS запросов
-ssl._create_default_https_context = ssl._create_unverified_context
-
-# Для gRPC - создаём кастомные credentials
-def _create_insecure_ssl_credentials():
-    return grpc.ssl_channel_credentials(root_certificates=None)
-
-# Подменяем стандартную функцию
-grpc.ssl_channel_credentials = _create_insecure_ssl_credentials
-
-# Переменные окружения
+# Только переменные окружения, без подмены функций
 os.environ['GRPC_SSL_CIPHER_SUITES'] = 'HIGH'
 os.environ['GRPC_VERBOSITY'] = 'ERROR'
 os.environ['PYTHONHTTPSVERIFY'] = '0'
+os.environ['CURL_CA_BUNDLE'] = ''
+os.environ['REQUESTS_CA_BUNDLE'] = ''
 
-print("🔓 SSL проверка ПРИНУДИТЕЛЬНО ОТКЛЮЧЕНА")
+print("🔓 SSL переменные окружения установлены для Render")
 
 # Импорты для унифицированного кэша
 from trading_bot.cache.unified_cache import USE_UNIFIED_CACHE, UnifiedCache
