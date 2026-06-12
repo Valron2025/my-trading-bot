@@ -328,26 +328,6 @@ def internal_error(error):
 
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 10000))
-
-    import signal
-
-    def signal_handler(sig, frame):
-        print("\n🛑 Получен сигнал остановки, завершаем работу...")
-        try:
-            if 'trading_bot' in globals() and trading_bot:
-                trading_bot.stop()
-        except:
-            pass
-        try:
-            from trading_bot.telegram.telegram_polling import stop_polling
-            stop_polling()
-        except:
-            pass
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-
     debug_mode = os.environ.get('DEBUG', 'false').lower() == 'true'
 
     print("\n" + "=" * 60)
