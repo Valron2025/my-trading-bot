@@ -44,23 +44,43 @@ from trading_bot.cache import TTLCache
 # ========== FIX FOR RENDER SSL ==========
 import os
 import grpc
+import sys
 
 # Отключаем проверку SSL
 os.environ['GRPC_SSL_CIPHER_SUITES'] = 'HIGH'
 os.environ['GRPC_VERBOSITY'] = 'ERROR'
 
-# МОНКИ-ПАТЧ для создания insecure channel
-_original_secure_channel = grpc.secure_channel
+# СОЗДАЁМ НОВЫЙ КЛАСС КЛИЕНТА С INSECURE CHANNEL
+from t_tech.invest import Client as OriginalClient
+import t_tech.invest
 
-def _insecure_secure_channel(target, credentials=None, options=None):
-    """Всегда создаёт insecure channel для T-Bank"""
-    if 'invest-public-api' in target:
-        return grpc.insecure_channel(target, options=options)
-    return _original_secure_channel(target, credentials, options)
 
-grpc.secure_channel = _insecure_secure_channel
+class RenderCompatibleClient(OriginalClient):
+    """Клиент, совместимый с Render (использует insecure channel)"""
 
-print("🔓 SSL проверка ОТКЛЮЧЕНА для Render")
+    def __init__(self, token, *args, **kwargs):
+        # Создаём insecure channel (БЕЗ SSL!) - порт 80 для insecure
+        channel = grpc.insecure_channel('invest-public-api.tinkoff.ru:80')
+
+        # Инициализируем через родителя, но подменяем канал
+        super().__init__(token, *args, **kwargs)
+
+        # Подменяем все сервисные стубы на наши
+        for attr_name in dir(self):
+            if attr_name.endswith('_stub') and not attr_name.startswith('_'):
+                stub = getattr(self, attr_name, None)
+                if stub and hasattr(stub, '__init__'):
+                    stub_class = stub.__class__
+                    setattr(self, attr_name, stub_class(channel))
+
+
+# ПОДМЕНЯЕМ КЛАСС В МОДУЛЕ
+t_tech.invest.Client = RenderCompatibleClient
+
+print("🔓 Render: используем insecure channel (SSL отключён)")
+
+# Также подменяем импортированный Client в текущем модуле
+Client = RenderCompatibleClient
 
 # Импорты для унифицированного кэша
 from trading_bot.cache.unified_cache import USE_UNIFIED_CACHE, UnifiedCache
