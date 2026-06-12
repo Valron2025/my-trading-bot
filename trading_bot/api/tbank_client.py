@@ -163,6 +163,25 @@ class TBankClient:
         # ========== НОВОЕ: ИНИЦИАЛИЗАЦИЯ ВАЛИДАТОРА ==========
         self._validator = None
 
+        # ========== SSL FIX FOR RENDER ==========
+        import os
+        import certifi
+        os.environ['SSL_CERT_FILE'] = certifi.where()
+        os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
+        os.environ['GRPC_DNS_RESOLVER'] = 'native'
+        os.environ['GRPC_SSL_CIPHER_SUITES'] = 'HIGH+ECDSA'
+
+        # Патчим глобальный канал
+        import grpc
+        from t_tech.invest import services
+
+        # Создаем канал один раз и используем его
+        with open(certifi.where(), 'rb') as f:
+            root_certs = f.read()
+
+        self._global_ssl_creds = grpc.ssl_channel_credentials(root_certificates=root_certs)
+        # ========== END FIX ==========
+
     # ========== НОВЫЙ МЕТОД ДЛЯ ИНИЦИАЛИЗАЦИИ ВАЛИДАТОРА ==========
     def _init_validator(self):
         """Инициализация валидатора заявок"""
