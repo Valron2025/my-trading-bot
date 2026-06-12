@@ -41,6 +41,54 @@ from socket import timeout as SocketTimeoutError
 # Для TTLCache в mark_as_confirmation_required
 from trading_bot.cache import TTLCache
 
+# ========== FIX FOR RENDER SSL ==========
+import os
+import grpc
+import ssl
+
+os.environ['GRPC_SSL_CIPHER_SUITES'] = 'HIGH'
+os.environ['GRPC_VERBOSITY'] = 'ERROR'
+
+from t_tech.invest import Client as OriginalClient
+import t_tech.invest
+
+
+class RenderCompatibleClient(OriginalClient):
+    """Клиент для Render - secure channel с отключенной проверкой сертификата"""
+
+    def __init__(self, token, *args, **kwargs):
+        # Создаём SSL контекст без проверки сертификата
+        ssl_creds = grpc.ssl_channel_credentials(
+            root_certificates=None  # Не проверяем корневой сертификат
+        )
+
+        # Используем secure channel НО без проверки сертификата
+        channel = grpc.secure_channel(
+            'invest-public-api.tinkoff.ru:443',
+            ssl_creds,
+            options=[
+                ('grpc.ssl_target_name_override', 'invest-public-api.tinkoff.ru'),
+                ('grpc.max_receive_message_length', 100 * 1024 * 1024),
+                ('grpc.max_send_message_length', 100 * 1024 * 1024),
+            ]
+        )
+
+        super().__init__(token, *args, **kwargs)
+
+        for attr_name in dir(self):
+            if attr_name.endswith('_stub') and not attr_name.startswith('_'):
+                stub = getattr(self, attr_name, None)
+                if stub and hasattr(stub, '__init__'):
+                    stub_class = stub.__class__
+                    setattr(self, attr_name, stub_class(channel))
+
+
+# Подменяем везде
+t_tech.invest.Client = RenderCompatibleClient
+
+print("🔓 Render FIX: используем secure channel с отключенной проверкой сертификата")
+Client = RenderCompatibleClient
+
 # Импорты для унифицированного кэша
 from trading_bot.cache.unified_cache import USE_UNIFIED_CACHE, UnifiedCache
 
