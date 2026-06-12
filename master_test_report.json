@@ -1,0 +1,125 @@
+{
+  "timestamp": "2026-06-12T23:18:35.889931",
+  "duration_seconds": 50.411665,
+  "real_trading_enabled": false,
+  "fix_issues_enabled": false,
+  "stats": {
+    "files_scanned": 102,
+    "total_lines": 54379,
+    "modules_tested": 0,
+    "imports_total": 28,
+    "imports_failed": 0,
+    "apis_working": 0,
+    "apis_failed": 1,
+    "methods_tested": 0,
+    "methods_passed": 0,
+    "thresholds_passed": 0,
+    "thresholds_failed": 5
+  },
+  "results": [
+    {
+      "name": "Окружение и конфигурация",
+      "passed": true,
+      "duration": 0.014001846313476562,
+      "message": "Найдено проблем: 0"
+    },
+    {
+      "name": "Все импорты модулей",
+      "passed": true,
+      "duration": 0.004017353057861328,
+      "message": "Успешно: 28/28"
+    },
+    {
+      "name": "T-Bank API (полный)",
+      "passed": false,
+      "duration": 4.015973329544067,
+      "message": "Успешно: 4/7"
+    },
+    {
+      "name": "Логгер",
+      "passed": true,
+      "duration": 0.0010030269622802734,
+      "message": ""
+    },
+    {
+      "name": "Модели данных",
+      "passed": true,
+      "duration": 0.0020024776458740234,
+      "message": ""
+    },
+    {
+      "name": "Пороги фильтрации (Thresholds)",
+      "passed": false,
+      "duration": 15.034782886505127,
+      "message": "Прошли: 0/5"
+    },
+    {
+      "name": "Фундаментальный анализ (Integration)",
+      "passed": true,
+      "duration": 12.220278978347778,
+      "message": "Метрики: ✅, Тех.анализ: ❌"
+    },
+    {
+      "name": "Strategy Engine (полный)",
+      "passed": true,
+      "duration": 0.062001943588256836,
+      "message": ""
+    },
+    {
+      "name": "Торговые методы (LONG/SHORT)",
+      "passed": false,
+      "duration": 0.0019986629486083984,
+      "message": "_insecure_secure_channel() takes from 1 to 3 positional arguments but 4 were given"
+    },
+    {
+      "name": "Technical Analyzer",
+      "passed": true,
+      "duration": 3.0056440830230713,
+      "message": "Пропущен (нет данных)"
+    },
+    {
+      "name": "Market Checker",
+      "passed": true,
+      "duration": 0.0019998550415039062,
+      "message": ""
+    },
+    {
+      "name": "Position Manager",
+      "passed": true,
+      "duration": 2.010331153869629,
+      "message": ""
+    },
+    {
+      "name": "Кэширование",
+      "passed": true,
+      "duration": 2.1180944442749023,
+      "message": ""
+    },
+    {
+      "name": "Дублирование методов и конфликты",
+      "passed": false,
+      "duration": 5.543500661849976,
+      "message": "Проблем: CRITICAL=9, HIGH=39, MEDIUM=1, LOW=1"
+    },
+    {
+      "name": "Качество кода",
+      "passed": false,
+      "duration": 1.2570340633392334,
+      "message": "Проблем: 10"
+    },
+    {
+      "name": "Trading Bot",
+      "passed": true,
+      "duration": 5.077012062072754,
+      "message": ""
+    }
+  ],
+  "issues": [],
+  "scores": {
+    "code_quality": 100,
+    "api_working": 0.0,
+    "thresholds": 0.0,
+    "tests_passed": 68.75,
+    "final": 42.1875
+  }
+}
