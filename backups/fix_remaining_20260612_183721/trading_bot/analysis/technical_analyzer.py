@@ -1,4 +1,4 @@
-﻿"""Модуль технического анализа - ПРОФЕССИОНАЛЬНАЯ ВЕРСИЯ"""
+"""Модуль технического анализа - ПРОФЕССИОНАЛЬНАЯ ВЕРСИЯ"""
 
 import asyncio
 from typing import List, Tuple, Dict, Any, Optional
@@ -1014,5 +1014,3 @@ class TechnicalAnalyzer:
 
 # ========== ГЛОБАЛЬНЫЙ ЭКЗЕМПЛЯР ==========
 analyzer = TechnicalAnalyzer()
-
-

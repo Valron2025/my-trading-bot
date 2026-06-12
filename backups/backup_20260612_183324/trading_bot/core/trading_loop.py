@@ -943,10 +943,6 @@ class TradingLoop:
         now = get_moscow_time()
         is_weekend = now.weekday() >= 5
         can_trade_weekend = is_weekend_trading_time() or is_otc_trading_time()
-        
-        # Синхронизация позиций при старте
-        self._sync_positions()
-        
     
         if is_weekend and not can_trade_weekend:
             warning("🌙 ВЫХОДНОЙ ДЕНЬ - ТОРГОВЛЯ НЕВОЗМОЖНА")

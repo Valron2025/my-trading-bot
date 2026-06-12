@@ -1467,50 +1467,40 @@ class TBankClient:
                 debug(f"Ошибка получения цены для {figi}: {e}")
             return None
 
-    def get_all_shares(self, limit: int = 1000, retry: int = 3) -> List[Dict[str, Any]]:
-        """Получение списка акций с повторными попытками при ошибках gRPC"""
-        import time
-        from grpc import RpcError, StatusCode
+    def get_all_shares(self, limit: int = 1000) -> List[Dict[str, Any]]:
+        """Получение списка акций с кэшированием"""
+        self._wait_for_rate_limit()
 
-        for attempt in range(retry):
+        cache_key = f"all_shares_{limit}"
+        cached_result = instruments_cache.get(cache_key)
+        if cached_result is not None:
+            return cached_result[:limit] if limit else cached_result
+
+        with Client(self.token) as client:
             try:
-                with Client(self.token) as client:
-                    response = client.instruments.shares()
-                    result = []
-                    for stock in response.instruments:
-                        if stock.currency == "rub":
-                            result.append({
-                                'figi': stock.figi,
-                                'ticker': stock.ticker,
-                                'name': stock.name,
-                                'lot': stock.lot,
-                                'currency': stock.currency,
-                                'api_trade_available': stock.api_trade_available_flag,
-                                'asset_uid': stock.asset_uid if hasattr(stock, 'asset_uid') else None,
-                            })
-                            if len(result) >= limit:
-                                break
+                response = client.instruments.shares()
+                result = []
+                for stock in response.instruments:
+                    if stock.currency == "rub":
+                        result.append({
+                            'figi': stock.figi,
+                            'ticker': stock.ticker,
+                            'name': stock.name,
+                            'lot': stock.lot,
+                            'currency': stock.currency,
+                            'api_trade_available': stock.api_trade_available_flag,
+                            'asset_uid': stock.asset_uid if hasattr(stock, 'asset_uid') else None,
+                        })
+                        if len(result) >= limit:
+                            break
 
-                    instruments_cache.set(cache_key, result, ttl=300)
-                    info(f"📊 Загружено {len(result)} акций")
-                    return result
-
-            except RpcError as e:
-                if e.code() == StatusCode.UNAVAILABLE:
-                    warning(f"⚠️ gRPC недоступен, попытка {attempt + 1}/{retry}")
-                    time.sleep(2 ** attempt)
-                    continue
-                error(f"❌ gRPC ошибка: {e}")
-                if attempt == retry - 1:
-                    return []
-
+                instruments_cache.set(cache_key, result, ttl=300)
+                info(f"📊 Загружено {len(result)} акций")
+                return result
             except Exception as e:
-                error(f"❌ Ошибка получения списка акций: {e}")
-                if attempt == retry - 1:
-                    return []
-                time.sleep(2 ** attempt)
+                error(f"Ошибка получения списка акций: {e}")
+                return []
 
-        return []
     def get_candles(self, figi: str, days: int = 5, interval_minutes: int = 5) -> List[Tuple[float, float]]:
         """Получение свечей с кэшированием и блокировкой для одного FIGI"""
         self._wait_for_rate_limit()

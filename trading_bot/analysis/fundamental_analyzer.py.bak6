@@ -442,7 +442,7 @@ class FundamentalAnalyzer:
     """Фундаментальный анализатор для Render"""
 
     _cache: Dict[str, Tuple[FundamentalMetrics, datetime]] = {}
-    _cache_ttl = timedelta(hours=12)
+    _cache_ttl = timedelta(hours=12)  # ✅ УВЕЛИЧЕНО: 6ч → 12ч
 
     SCORE_IMPACT = {
         'STRONG_BUY': 5,
@@ -457,6 +457,7 @@ class FundamentalAnalyzer:
         self.enabled = True
         self._cache_ttl = timedelta(hours=cache_ttl_hours)
 
+        # Настройка уровня логов
         ColorLogger.set_debug_enabled(debug_mode)
 
         if USE_UNIFIED_CACHE:
@@ -541,6 +542,7 @@ class FundamentalAnalyzer:
                 del self._cache[oldest_key]
                 debug(f"🗑️ Кэш достиг лимита {MAX_CACHE_SIZE}, удалена запись {oldest_key}")
 
+            # Сброс кэша вычислений перед сохранением
             metrics._reset_cache()
             self._cache[ticker] = (metrics, now)
             self.stats['last_update'] = now
@@ -603,6 +605,7 @@ class FundamentalAnalyzer:
         await self._fetch_dividend_data(ticker, metrics)
         metrics.fetched_at = get_moscow_time()
 
+        # Вывод мультипликаторов (только если есть данные)
         if metrics.pe_ratio > 0 or metrics.pb_ratio > 0 or metrics.roe > 0:
             info(f"   📊 МУЛЬТИПЛИКАТОРЫ {ticker_upper}:")
             if metrics.pe_ratio > 0:
@@ -631,6 +634,7 @@ class FundamentalAnalyzer:
             debug(f"      ⚠️ Yahoo Finance не доступен")
             return None
 
+        # Правильно форматируем тикер для Yahoo
         if ticker.endswith('.ME'):
             yf_ticker = ticker
         else:
@@ -644,8 +648,10 @@ class FundamentalAnalyzer:
 
         for attempt in range(max_retries):
             try:
+                # Применяем rate limiter перед запросом
                 await _yahoo_rate_limiter.acquire()
 
+                # ✅ ДОБАВЛЕН ТАЙМАУТ 45 СЕКУНД
                 async with asyncio.timeout(45):
                     debug(f"      ⏳ Попытка {attempt + 1}/{max_retries} (таймаут 45с)...")
 
@@ -654,25 +660,29 @@ class FundamentalAnalyzer:
                     asyncio.set_event_loop(loop)
                     try:
                         result = await loop.run_in_executor(None, self._get_yahoo_data, ticker)
-                        elapsed = time.time() - start_time
 
-                        if result:
-                            debug(f"      ✅ Yahoo вернул {len(result)} показателей за {elapsed:.1f}с")
-                            return result
-                        else:
-                            if attempt < max_retries - 1:
-                                delay = base_delay * (attempt + 1)
-                                debug(f"      ⚠️ Попытка {attempt + 1}/{max_retries} не удалась (нет данных), повтор через {delay:.1f}с...")
-                                await asyncio.sleep(delay)
-                            else:
-                                debug(f"      ⚠️ Yahoo не вернул мультипликаторов после {max_retries} попыток (всего {elapsed:.1f}с)")
-                                return None
+                    elapsed = time.time() - start_time
                     finally:
                         loop.close()
 
+                    if result:
+                        debug(f"      ✅ Yahoo вернул {len(result)} показателей за {elapsed:.1f}с")
+                        return result
+                    else:
+                        if attempt < max_retries - 1:
+                            delay = base_delay * (attempt + 1)
+                            debug(
+                                f"      ⚠️ Попытка {attempt + 1}/{max_retries} не удалась (нет данных), повтор через {delay:.1f}с...")
+                            await asyncio.sleep(delay)
+                        else:
+                            debug(
+                                f"      ⚠️ Yahoo не вернул мультипликаторов после {max_retries} попыток (всего {elapsed:.1f}с)")
+                            return None
+
             except asyncio.TimeoutError:
                 elapsed = time.time() - start_time
-                debug(f"      ⏰ ТАЙМАУТ Yahoo Finance для {ticker} (45с), попытка {attempt + 1}/{max_retries}, прошло {elapsed:.1f}с")
+                debug(
+                    f"      ⏰ ТАЙМАУТ Yahoo Finance для {ticker} (45с), попытка {attempt + 1}/{max_retries}, прошло {elapsed:.1f}с")
                 if attempt < max_retries - 1:
                     delay = base_delay * (attempt + 1)
                     debug(f"      🔄 Повтор через {delay:.1f}с...")
@@ -704,49 +714,52 @@ class FundamentalAnalyzer:
 
     def _get_yahoo_data(self, ticker: str) -> Optional[Dict]:
         """Синхронное получение данных из Yahoo (выполняется в потоке)"""
-        try:
+                    try:
+            # Правильно форматируем тикер для Yahoo
             if ticker.endswith('.ME'):
                 yf_ticker = ticker
             else:
                 yf_ticker = f"{ticker}.ME"
             stock = yf.Ticker(yf_ticker)
-            info_data = stock.info
-
-            if not info_data or not isinstance(info_data, dict):
+            info = stock.info
+        
+            if not info or not isinstance(info, dict):
+        
                 debug(f"⚠️ Yahoo Finance вернул пустые данные для {ticker}")
+        
                 return None
-
+        
             result = {}
 
-            pe = info_data.get('trailingPE') or info_data.get('forwardPE')
+            pe = info.get('trailingPE') or info.get('forwardPE')
             if pe and 0.1 < pe < 100:
                 result['pe'] = pe
 
-            pb = info_data.get('priceToBook')
+            pb = info.get('priceToBook')
             if pb and 0.1 < pb < 20:
                 result['pb'] = pb
 
-            roe = info_data.get('returnOnEquity')
+            roe = info.get('returnOnEquity')
             if roe:
                 roe = roe * 100
                 if 0.1 < roe < 100:
                     result['roe'] = roe
 
-            div_yield = info_data.get('dividendYield')
+            div_yield = info.get('dividendYield')
             if div_yield:
                 div_yield = div_yield * 100
                 if 0.1 < div_yield < 50:
                     result['dividend_yield'] = div_yield
 
-            market_cap = info_data.get('marketCap')
+            market_cap = info.get('marketCap')
             if market_cap:
                 result['market_cap'] = market_cap
 
-            rev_growth = info_data.get('revenueGrowth')
+            rev_growth = info.get('revenueGrowth')
             if rev_growth:
                 result['revenue_growth'] = rev_growth * 100
 
-            debt_eq = info_data.get('debtToEquity')
+            debt_eq = info.get('debtToEquity')
             if debt_eq:
                 result['debt_to_equity'] = debt_eq / 100
 
@@ -757,7 +770,7 @@ class FundamentalAnalyzer:
             return None
 
     async def _fetch_market_data(self, ticker: str, metrics: FundamentalMetrics):
-        try:
+                    try:
             url = f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/{ticker}.json"
             params = {"iss.meta": "off", "iss.only": "marketdata,securities"}
 
@@ -777,7 +790,7 @@ class FundamentalAnalyzer:
                                     val = row[i]
                                     if not val or val == 'null':
                                         continue
-                                    try:
+                    try:
                                         v = float(val)
                                         if col == 'VOLTODAY':
                                             metrics.volume_today = v
@@ -803,7 +816,7 @@ class FundamentalAnalyzer:
             debug(f"   ⚠️ Ошибка получения market data: {e}")
 
     async def _fetch_moex_statistics(self, ticker: str, metrics: FundamentalMetrics):
-        try:
+                    try:
             url = f"https://iss.moex.com/iss/statistics/engines/stock/markets/shares/securities/{ticker}.json"
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=30) as resp:
@@ -820,7 +833,7 @@ class FundamentalAnalyzer:
                                     value = row[i]
                                     if not value or value == 'null':
                                         continue
-                                    try:
+                    try:
                                         val = float(value)
                                         if col == 'PE' and val > 0 and metrics.pe_ratio == 0:
                                             metrics.pe_ratio = val
@@ -836,7 +849,7 @@ class FundamentalAnalyzer:
             debug(f"   ⚠️ Ошибка statistics: {e}")
 
     async def _fetch_moex_board_securities(self, ticker: str, metrics: FundamentalMetrics):
-        try:
+                    try:
             boards = ['TQBR', 'TQTD', 'TQTF']
             for board in boards:
                 url = f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/{board}/securities/{ticker}.json"
@@ -856,7 +869,7 @@ class FundamentalAnalyzer:
                                         value = row[i]
                                         if not value or value == 'null':
                                             continue
-                                        try:
+                    try:
                                             val = float(value)
                                             if col in ('PE', 'P/E', 'PE_RATIO') and metrics.pe_ratio == 0:
                                                 if 0.1 < val < 100:
@@ -876,7 +889,7 @@ class FundamentalAnalyzer:
             debug(f"   ⚠️ Ошибка board_securities: {e}")
 
     async def _fetch_moex_analytics(self, ticker: str, metrics: FundamentalMetrics):
-        try:
+                    try:
             url = f"https://iss.moex.com/iss/statistics/engines/stock/markets/shares/securities/{ticker}/analytics.json"
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=30) as resp:
@@ -893,7 +906,7 @@ class FundamentalAnalyzer:
                                     value = row[i]
                                     if not value or value == 'null':
                                         continue
-                                    try:
+                    try:
                                         val = float(value)
                                         if col == 'pe_ratio' and metrics.pe_ratio == 0:
                                             if 0.1 < val < 100:
@@ -910,7 +923,7 @@ class FundamentalAnalyzer:
             debug(f"   ⚠️ Ошибка analytics: {e}")
 
     async def _fetch_moex_fundamental(self, ticker: str, metrics: FundamentalMetrics):
-        try:
+                    try:
             url = f"https://iss.moex.com/iss/statistics/engines/stock/markets/shares/fundamental.json"
             params = {"securities": ticker, "iss.meta": "off", "limit": 1}
             async with aiohttp.ClientSession() as session:
@@ -928,7 +941,7 @@ class FundamentalAnalyzer:
                                     value = row[i]
                                     if not value or value == 'null':
                                         continue
-                                    try:
+                    try:
                                         val = float(value)
                                         if 'pe' in col.lower() and metrics.pe_ratio == 0:
                                             if 0.1 < val < 100:
@@ -945,7 +958,7 @@ class FundamentalAnalyzer:
             debug(f"   ⚠️ Ошибка fundamental: {e}")
 
     async def _fetch_dividend_data(self, ticker: str, metrics: FundamentalMetrics):
-        try:
+                    try:
             url = f"https://iss.moex.com/iss/statistics/engines/stock/markets/shares/dividends.json"
             params = {"security": ticker, "limit": 1, "iss.meta": "off"}
             async with aiohttp.ClientSession() as session:
@@ -963,7 +976,7 @@ class FundamentalAnalyzer:
                                     val = row[i]
                                     if not val or val == 'null':
                                         continue
-                                    try:
+                    try:
                                         v = float(val)
                                         if col == 'yield_value' and v > 0 and metrics.dividend_yield == 0:
                                             metrics.dividend_yield = v
@@ -1032,10 +1045,11 @@ class FundamentalAnalyzer:
             info(f"   🎯 Рекомендация: {action}")
         separator("-", 50)
 
-    async def analyze(self, ticker: str, technical_score: int = 0, force_refresh: bool = False) -> Optional[FundamentalSignal]:
+    async def analyze(self, ticker: str, technical_score: int = 0, force_refresh: bool = False) -> Optional[
+        FundamentalSignal]:
         if not self.enabled:
             return None
-        try:
+                    try:
             debug(f"🔬 Начало фундаментального анализа для {ticker}...")
             metrics = await self.fetch_metrics(ticker, force_refresh=force_refresh)
             if not metrics:
@@ -1117,19 +1131,24 @@ class FundamentalAnalyzer:
 
         impact = fund_signal.impact_on_score
         if impact > 0:
-            info(f"📊 Фундаментальный анализ {ticker}: {fund_signal.action} | влияние: +{impact} | {technical_score} → {new_score}")
+            info(
+                f"📊 Фундаментальный анализ {ticker}: {fund_signal.action} | влияние: +{impact} | {technical_score} → {new_score}")
         elif impact < 0:
-            info(f"📊 Фундаментальный анализ {ticker}: {fund_signal.action} | влияние: {impact} | {technical_score} → {new_score}")
+            info(
+                f"📊 Фундаментальный анализ {ticker}: {fund_signal.action} | влияние: {impact} | {technical_score} → {new_score}")
         else:
-            info(f"📊 Фундаментальный анализ {ticker}: {fund_signal.action} | влияние: нейтрально | score={technical_score}")
+            info(
+                f"📊 Фундаментальный анализ {ticker}: {fund_signal.action} | влияние: нейтрально | score={technical_score}")
 
         sign_tech = f"+{technical_score}" if technical_score > 0 else str(technical_score)
         sign_new = f"+{new_score}" if new_score > 0 else str(new_score)
 
         if fund_signal.impact_on_score > 0:
-            success(f"📊 {ticker}: {fund_signal.action} | Технический={sign_tech} → Итог={sign_new} (+{fund_signal.impact_on_score})")
+            success(
+                f"📊 {ticker}: {fund_signal.action} | Технический={sign_tech} → Итог={sign_new} (+{fund_signal.impact_on_score})")
         elif fund_signal.impact_on_score < 0:
-            warning(f"📊 {ticker}: {fund_signal.action} | Технический={sign_tech} → Итог={sign_new} ({fund_signal.impact_on_score})")
+            warning(
+                f"📊 {ticker}: {fund_signal.action} | Технический={sign_tech} → Итог={sign_new} ({fund_signal.impact_on_score})")
         else:
             info(f"📊 {ticker}: {fund_signal.action} | Технический={sign_tech} → Итог={sign_new}")
 
@@ -1178,7 +1197,7 @@ class FundamentalAnalyzer:
 
 
 # Глобальный экземпляр
-fundamental_analyzer = FundamentalAnalyzer(debug_mode=False)
+fundamental_analyzer = FundamentalAnalyzer(debug_mode=False)  # Debug отключен по умолчанию
 
 
 async def enhance_trading_decision(
@@ -1254,5 +1273,6 @@ async def test_fundamental_analyzer():
 
 
 if __name__ == "__main__":
+    # При тесте можно включить debug режим
     fundamental_analyzer = FundamentalAnalyzer(debug_mode=True)
     asyncio.run(test_fundamental_analyzer())

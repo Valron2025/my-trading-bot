@@ -832,13 +832,13 @@ class StockScanner:
         from trading_bot.api.tbank_client import tbank
 
         try:
-            debug(f"   🔍 _get_candles_15min: figi={figi[:12]}...")
+            info(f"   🔍 _get_candles_15min: figi={figi[:12]}...")
 
             candles = tbank.get_candles(figi, days=2, interval_minutes=15)
             info(f"   📊 Получено {len(candles) if candles else 0} 15min свечей")
 
             if not candles or len(candles) < 20:
-                debug(f"   ⚠️ Недостаточно 15min свечей: {len(candles) if candles else 0}/20")
+                info(f"   ⚠️ Недостаточно 15min свечей: {len(candles) if candles else 0}/20")
                 return []
 
             result = []
@@ -865,9 +865,9 @@ class StockScanner:
                     info(f"   ⚠️ Неизвестный формат 15min свечи: {type(c)}")
                     result.append(c)
 
-            debug(f"   ✅ Возвращаем {len(result)} 15min свечей")
+            info(f"   ✅ Возвращаем {len(result)} 15min свечей")
             if result:
-                debug(f"      Первая свеча: close={result[0].get('close', 'N/A')}")
+                info(f"      Первая свеча: close={result[0].get('close', 'N/A')}")
             return result
 
         except Exception as e:
@@ -880,13 +880,13 @@ class StockScanner:
         from trading_bot.api.tbank_client import tbank
 
         try:
-            debug(f"   🔍 _get_candles: figi={figi[:12]}...")
+            info(f"   🔍 _get_candles: figi={figi[:12]}...")
 
             # ✅ ПРОПУСКАЕМ CandleBuilder (он асинхронный, а этот метод синхронный)
             # Используем только TBankClient напрямую
             info(f"   🔄 Используем TBankClient.get_candles()")
             candles = tbank.get_candles(figi, days=2, interval_minutes=5)
-            debug(f"   📊 TBankClient вернул {len(candles) if candles else 0} свечей")
+            info(f"   📊 TBankClient вернул {len(candles) if candles else 0} свечей")
 
             if not candles:
                 info(f"   ❌ Нет свечей для {figi}")
@@ -907,9 +907,9 @@ class StockScanner:
                 else:
                     result.append(c)
 
-            debug(f"   ✅ Возвращаем {len(result)} свечей")
+            info(f"   ✅ Возвращаем {len(result)} свечей")
             if result:
-                debug(f"      Первая свеча: close={result[0].get('close', 'N/A')}")
+                info(f"      Первая свеча: close={result[0].get('close', 'N/A')}")
             return result
 
         except Exception as e:

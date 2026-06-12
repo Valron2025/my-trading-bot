@@ -85,6 +85,7 @@ class TechnicalAnalyzer:
         info(f"📊 TechnicalAnalyzer: min_candles_required={self.min_candles_required}")
 
     # ➕ ДОБАВЛЕНО: метод для динамического определения минимального количества свечей
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
     def _get_min_candles_for_ticker(self, ticker: str) -> int:
         """
         Динамическое определение минимального количества свечей для тикера
@@ -1016,3 +1017,6 @@ class TechnicalAnalyzer:
 analyzer = TechnicalAnalyzer()
 
 
+    def __del__(self):
+        if hasattr(self, "_executor"):
+            self._executor.shutdown(wait=False)

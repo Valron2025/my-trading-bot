@@ -20,10 +20,10 @@ from .models import (
 from .cache import TTLCache, price_cache, positions_cache, candles_cache
 
 # Настройка логгера пакета
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# logging.basicConfig(
+#     level=logging.INFO,
+#     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+# )
 logger = logging.getLogger(__name__)
 
 # Глобальный экземпляр бота (для обратной совместимости)
