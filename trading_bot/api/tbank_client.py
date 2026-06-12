@@ -1472,6 +1472,13 @@ class TBankClient:
         import time
         from grpc import RpcError, StatusCode
 
+        cache_key = f"all_shares_{limit}"
+
+        # Проверяем кэш
+        cached_result = instruments_cache.get(cache_key)
+        if cached_result is not None:
+            return cached_result[:limit] if limit else cached_result
+
         for attempt in range(retry):
             try:
                 with Client(self.token) as client:
@@ -1511,6 +1518,7 @@ class TBankClient:
                 time.sleep(2 ** attempt)
 
         return []
+
     def get_candles(self, figi: str, days: int = 5, interval_minutes: int = 5) -> List[Tuple[float, float]]:
         """Получение свечей с кэшированием и блокировкой для одного FIGI"""
         self._wait_for_rate_limit()
