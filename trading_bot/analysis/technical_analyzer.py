@@ -761,14 +761,39 @@ class TechnicalAnalyzer:
             )
 
         import asyncio
+        import concurrent.futures
+        import time
+
+        # Создаём новый event loop для этого вызова
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
         try:
-            loop = asyncio.get_running_loop()
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(asyncio.run, self.analyze_stock(figi, name, ticker, is_backtest))
-                return future.result()
-        except RuntimeError:
-            return asyncio.run(self.analyze_stock(figi, name, ticker, is_backtest))
+            # Запускаем асинхронную функцию в этом loop
+            result = loop.run_until_complete(
+                self.analyze_stock(figi, name, ticker, is_backtest)
+            )
+            return result
+        except Exception as e:
+            from trading_bot.logger import error
+            error(f"Ошибка в analyze_stock_sync для {name}: {e}")
+            return StockAnalysis(
+                figi=figi,
+                name=name,
+                score=0,
+                buy_signal=False,
+                sell_signal=False,
+                recommendation="HOLD (ошибка анализа)",
+                signals=[f"❌ Ошибка: {str(e)[:50]}"]
+            )
+        finally:
+            # Закрываем все задачи и loop
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.close()
 
     def analyze_with_candles(self, ticker: str, candles: List, current_price: float) -> Dict[str, Any]:
         """

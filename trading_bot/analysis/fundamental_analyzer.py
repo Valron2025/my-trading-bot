@@ -625,6 +625,7 @@ class FundamentalAnalyzer:
             debug(f"      P/E={metrics.pe_ratio}, P/B={metrics.pb_ratio}, ROE={metrics.roe}")
             return None
 
+    
     async def _fetch_from_yahoo(self, ticker: str) -> Optional[Dict]:
         """Получение фундаментальных данных из Yahoo Finance с повторными попытками"""
         if not YFINANCE_AVAILABLE:
