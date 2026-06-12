@@ -10,6 +10,7 @@ News Sentiment Analyzer - Анализ новостного фона
 import re
 import json
 import asyncio
+import time
 import aiohttp
 import socket
 from typing import Dict, List, Optional, Tuple, Any
@@ -216,13 +217,12 @@ class NewsSentimentAnalyzer:
     async def fetch_news(self, ticker: str, hours_back: int = 24) -> List[NewsItem]:
         """
         Сбор новостей для тикера из российских и международных источников
-        Источники: РБК, Интерфакс, ТАСС, Коммерсантъ, Финам, Московская биржа,
-                   Google News (RU/EN), Яндекс.Новости
         """
         import aiohttp
         import asyncio
 
         if not self.enabled or not self._api_available:
+            debug(f"📰 Новостной анализ отключён для {ticker}")
             return []
 
         # Проверка кэша
@@ -230,10 +230,12 @@ class NewsSentimentAnalyzer:
         if ticker in self.last_update:
             if now - self.last_update[ticker] < self.cache_ttl:
                 self.stats['cache_hits'] += 1
+                debug(f"📦 Кэш новостей для {ticker} (возраст: {(now - self.last_update[ticker]).seconds // 60} мин)")
                 return list(self.news_cache.get(ticker, []))
 
         self.stats['total_requests'] += 1
         info(f"🔍 Сбор новостей для {ticker}...")
+        start_time = time.time()
 
         news_items = []
 
@@ -241,52 +243,27 @@ class NewsSentimentAnalyzer:
         # 1. РОССИЙСКИЕ RSS-ИСТОЧНИКИ (финансовые новости)
         # ========================================================================
         russian_sources = [
-            {
-                "name": "rbc",
-                "url": "https://rssexport.rbc.ru/rbcnews/news/30/full.rss",
-                "need_filter": True
-            },
-            {
-                "name": "interfax",
-                "url": "https://www.interfax.ru/rss.asp",
-                "need_filter": True
-            },
-            {
-                "name": "tass",
-                "url": "https://tass.ru/rss/v2/economy.rss",
-                "need_filter": True
-            },
-            {
-                "name": "kommersant",
-                "url": "https://www.kommersant.ru/RSS/news.xml",
-                "need_filter": True
-            },
-            {
-                "name": "finam",
-                "url": "https://www.finam.ru/analysis/conews/rsspoint",
-                "need_filter": True
-            },
-            {
-                "name": "moex",
-                "url": "https://www.moex.com/export/rss/news/",
-                "need_filter": True
-            },
-            {
-                "name": "smartlab",
-                "url": "https://smart-lab.ru/rss/news/",
-                "need_filter": True
-            }
+            {"name": "rbc", "url": "https://rssexport.rbc.ru/rbcnews/news/30/full.rss", "need_filter": True},
+            {"name": "interfax", "url": "https://www.interfax.ru/rss.asp", "need_filter": True},
+            {"name": "tass", "url": "https://tass.ru/rss/v2/economy.rss", "need_filter": True},
+            {"name": "kommersant", "url": "https://www.kommersant.ru/RSS/news.xml", "need_filter": True},
+            {"name": "finam", "url": "https://www.finam.ru/analysis/conews/rsspoint", "need_filter": True},
+            {"name": "moex", "url": "https://www.moex.com/export/rss/news/", "need_filter": True},
+            {"name": "smartlab", "url": "https://smart-lab.ru/rss/news/", "need_filter": True}
         ]
 
+        source_count = 0
         for source in russian_sources:
             try:
-                async with asyncio.timeout(8.0):  # ✅ УВЕЛИЧЕНО: 5.0 → 8.0
+                # ✅ УВЕЛИЧЕН ТАЙМАУТ ДО 15 СЕКУНД
+                async with asyncio.timeout(15.0):
+                    source_start = time.time()
                     async with aiohttp.ClientSession() as session:
-                        async with session.get(source["url"],
-                                               timeout=aiohttp.ClientTimeout(total=8)) as resp:  # ✅ 5 → 8
+                        async with session.get(source["url"], timeout=aiohttp.ClientTimeout(total=15)) as resp:
                             if resp.status == 200:
                                 text = await resp.text()
                                 items = self._parse_rss(text, ticker, source["name"])
+                                source_elapsed = time.time() - source_start
 
                                 # Фильтруем новости, содержащие тикер
                                 if source["need_filter"] and items:
@@ -296,12 +273,16 @@ class NewsSentimentAnalyzer:
                                             ticker.lower() in i.title.lower())
                                     ]
                                     news_items.extend(filtered[:5])
+                                    debug(
+                                        f"   ✅ {source['name']}: {len(items)} новостей, релевантных {len(filtered)} ({source_elapsed:.1f}с)")
                                 else:
                                     news_items.extend(items[:5])
-                                debug(
-                                    f"   ✅ {source['name']}: {len(items)} новостей, релевантных {len(filtered) if source['need_filter'] else len(items[:5])}")
+                                    debug(f"   ✅ {source['name']}: {len(items[:5])} новостей ({source_elapsed:.1f}с)")
+                                source_count += 1
+                            else:
+                                debug(f"   ⚠️ {source['name']}: HTTP {resp.status}")
             except asyncio.TimeoutError:
-                debug(f"   ⏰ Таймаут {source['name']}")
+                debug(f"   ⏰ Таймаут {source['name']} (>15с)")
             except Exception as e:
                 debug(f"   ❌ Ошибка {source['name']}: {e}")
 
@@ -309,38 +290,35 @@ class NewsSentimentAnalyzer:
         # 2. ПОИСК ПО ТИКЕРУ В НОВОСТЯХ
         # ========================================================================
         search_sources = [
-            {
-                "name": "google_ru",
-                "url": f"https://news.google.com/rss/search?q={ticker}+акции&hl=ru&ceid=RU:ru",
-                "need_filter": False
-            },
-            {
-                "name": "google_en",
-                "url": f"https://news.google.com/rss/search?q={ticker}+stock&hl=en&ceid=US:en",
-                "need_filter": False
-            },
-            {
-                "name": "yandex_news",
-                "url": f"https://news.yandex.ru/quotes/{ticker}.rss",
-                "need_filter": False
-            }
+            {"name": "google_ru", "url": f"https://news.google.com/rss/search?q={ticker}+акции&hl=ru&ceid=RU:ru",
+             "need_filter": False},
+            {"name": "google_en", "url": f"https://news.google.com/rss/search?q={ticker}+stock&hl=en&ceid=US:en",
+             "need_filter": False},
+            {"name": "yandex_news", "url": f"https://news.yandex.ru/quotes/{ticker}.rss", "need_filter": False}
         ]
 
         for source in search_sources:
             try:
-                async with asyncio.timeout(8.0):  # ✅ УВЕЛИЧЕНО: 5.0 → 8.0
+                # ✅ УВЕЛИЧЕН ТАЙМАУТ ДО 15 СЕКУНД
+                async with asyncio.timeout(15.0):
+                    source_start = time.time()
                     async with aiohttp.ClientSession() as session:
-                        async with session.get(source["url"],
-                                               timeout=aiohttp.ClientTimeout(total=8)) as resp:  # ✅ 5 → 8
+                        async with session.get(source["url"], timeout=aiohttp.ClientTimeout(total=15)) as resp:
                             if resp.status == 200:
                                 text = await resp.text()
                                 items = self._parse_rss(text, ticker, source["name"])
+                                source_elapsed = time.time() - source_start
                                 news_items.extend(items[:10])
-                                debug(f"   ✅ {source['name']}: {len(items)} новостей")
+                                debug(f"   ✅ {source['name']}: {len(items[:10])} новостей ({source_elapsed:.1f}с)")
+                                source_count += 1
+                            else:
+                                debug(f"   ⚠️ {source['name']}: HTTP {resp.status}")
             except asyncio.TimeoutError:
-                debug(f"   ⏰ Таймаут {source['name']}")
+                debug(f"   ⏰ Таймаут {source['name']} (>15с)")
             except Exception as e:
                 debug(f"   ❌ Ошибка {source['name']}: {e}")
+
+        total_elapsed = time.time() - start_time
 
         # ========================================================================
         # 3. УДАЛЕНИЕ ДУБЛИКАТОВ И СОРТИРОВКА
@@ -371,7 +349,11 @@ class NewsSentimentAnalyzer:
         self.last_update[ticker] = now
 
         info(
-            f"📰 Для {ticker} собрано {len(unique_items)} уникальных новостей из {len(russian_sources) + len(search_sources)} источников")
+            f"📰 Для {ticker} собрано {len(unique_items)} уникальных новостей из {source_count} источников за {total_elapsed:.1f}с")
+
+        if len(unique_items) == 0:
+            debug(f"   ⚠️ Не найдено новостей для {ticker}")
+
         return unique_items
 
     def analyze_sentiment(self, text: str) -> Tuple[float, float]:

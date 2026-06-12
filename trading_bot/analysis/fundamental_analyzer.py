@@ -631,6 +631,7 @@ class FundamentalAnalyzer:
     async def _fetch_from_yahoo(self, ticker: str) -> Optional[Dict]:
         """Получение фундаментальных данных из Yahoo Finance с повторными попытками"""
         if not YFINANCE_AVAILABLE:
+            debug(f"      ⚠️ Yahoo Finance не доступен")
             return None
 
         # Правильно форматируем тикер для Yahoo
@@ -638,7 +639,9 @@ class FundamentalAnalyzer:
             yf_ticker = ticker
         else:
             yf_ticker = f"{ticker}.ME"
-        debug(f"      Запрос к Yahoo: {yf_ticker}")
+
+        debug(f"      📡 Запрос к Yahoo: {yf_ticker}")
+        start_time = time.time()
 
         max_retries = 3
         base_delay = 2.0
@@ -648,34 +651,56 @@ class FundamentalAnalyzer:
                 # Применяем rate limiter перед запросом
                 await _yahoo_rate_limiter.acquire()
 
-                # Запускаем синхронный yfinance в отдельном потоке
-                loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(None, self._get_yahoo_data, ticker)
+                # ✅ ДОБАВЛЕН ТАЙМАУТ 45 СЕКУНД
+                async with asyncio.timeout(45):
+                    debug(f"      ⏳ Попытка {attempt + 1}/{max_retries} (таймаут 45с)...")
 
-                if result:
-                    debug(f"      ✅ Yahoo вернул {len(result)} показателей")
-                    return result
-                else:
-                    if attempt < max_retries - 1:
-                        delay = base_delay * (attempt + 1)
-                        debug(f"      ⚠️ Попытка {attempt + 1}/{max_retries} не удалась, повтор через {delay:.1f}с...")
-                        await asyncio.sleep(delay)
+                    # Запускаем синхронный yfinance в отдельном потоке
+                    loop = asyncio.get_event_loop()
+                    result = await loop.run_in_executor(None, self._get_yahoo_data, ticker)
+
+                    elapsed = time.time() - start_time
+
+                    if result:
+                        debug(f"      ✅ Yahoo вернул {len(result)} показателей за {elapsed:.1f}с")
+                        return result
                     else:
-                        debug(f"      ⚠️ Yahoo не вернул мультипликаторов после {max_retries} попыток")
-                        return None
+                        if attempt < max_retries - 1:
+                            delay = base_delay * (attempt + 1)
+                            debug(
+                                f"      ⚠️ Попытка {attempt + 1}/{max_retries} не удалась (нет данных), повтор через {delay:.1f}с...")
+                            await asyncio.sleep(delay)
+                        else:
+                            debug(
+                                f"      ⚠️ Yahoo не вернул мультипликаторов после {max_retries} попыток (всего {elapsed:.1f}с)")
+                            return None
+
+            except asyncio.TimeoutError:
+                elapsed = time.time() - start_time
+                debug(
+                    f"      ⏰ ТАЙМАУТ Yahoo Finance для {ticker} (45с), попытка {attempt + 1}/{max_retries}, прошло {elapsed:.1f}с")
+                if attempt < max_retries - 1:
+                    delay = base_delay * (attempt + 1)
+                    debug(f"      🔄 Повтор через {delay:.1f}с...")
+                    await asyncio.sleep(delay)
+                else:
+                    debug(f"      ❌ Yahoo Finance не ответил после {max_retries} попыток")
+                    return None
 
             except Exception as e:
                 error_msg = str(e)
+                elapsed = time.time() - start_time
                 if "Rate limited" in error_msg or "Too Many Requests" in error_msg:
+                    debug(f"      ⏰ Rate limit Yahoo, попытка {attempt + 1}/{max_retries}, прошло {elapsed:.1f}с")
                     if attempt < max_retries - 1:
                         delay = base_delay * (attempt + 1) * 2
-                        debug(f"      ⏰ Rate limit, ждём {delay:.1f}с перед повтором...")
+                        debug(f"      🔄 Повтор через {delay:.1f}с...")
                         await asyncio.sleep(delay)
                     else:
                         debug(f"      ❌ Yahoo Finance rate limit после {max_retries} попыток")
                         return None
                 else:
-                    debug(f"      ❌ Yahoo Finance ошибка: {error_msg[:100]}")
+                    debug(f"      ❌ Yahoo Finance ошибка: {error_msg[:100]}, попытка {attempt + 1}/{max_retries}")
                     if attempt < max_retries - 1:
                         await asyncio.sleep(base_delay)
                     else:
