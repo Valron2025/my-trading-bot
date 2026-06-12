@@ -130,7 +130,7 @@ class TradingLoop:
             return self._ws_prices[ticker]
 
         # 2. Из кэша
-        figi = self.bot._get_figi_by_ticker(ticker)
+        figi = self.bot.get_figi_by_ticker(ticker)
         if figi and hasattr(self.bot, '_price_cache'):
             cached = self.bot._price_cache.get(figi)
             if cached is not None:
@@ -1239,7 +1239,7 @@ class TradingLoop:
                 quick_candidates = []
                 for ticker in top_tickers:
                     try:
-                        figi = self.bot._get_figi_by_ticker(ticker)
+                        figi = self.bot.get_figi_by_ticker(ticker)
                         if not figi:
                             continue
 
