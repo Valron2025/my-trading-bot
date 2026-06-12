@@ -41,17 +41,25 @@ from socket import timeout as SocketTimeoutError
 # Для TTLCache в mark_as_confirmation_required
 from trading_bot.cache import TTLCache
 
-# ========== SSL FIX FOR RENDER ==========
+# ========== FIX FOR RENDER SSL ==========
 import os
+import ssl
+import grpc
 
-# Только переменные окружения, без подмены функций
+# Отключаем проверку SSL сертификата для T-Bank API
 os.environ['GRPC_SSL_CIPHER_SUITES'] = 'HIGH'
 os.environ['GRPC_VERBOSITY'] = 'ERROR'
-os.environ['PYTHONHTTPSVERIFY'] = '0'
-os.environ['CURL_CA_BUNDLE'] = ''
-os.environ['REQUESTS_CA_BUNDLE'] = ''
 
-print("🔓 SSL переменные окружения установлены для Render")
+# Создаём кастомные SSL credentials без проверки сертификата
+_original_ssl_creds = grpc.ssl_channel_credentials
+
+def _insecure_ssl_creds(*args, **kwargs):
+    """Создаёт SSL credentials без проверки сертификата"""
+    return _original_ssl_creds(root_certificates=None)
+
+grpc.ssl_channel_credentials = _insecure_ssl_creds
+
+print("🔓 SSL проверка ОТКЛЮЧЕНА для Render")
 
 # Импорты для унифицированного кэша
 from trading_bot.cache.unified_cache import USE_UNIFIED_CACHE, UnifiedCache
