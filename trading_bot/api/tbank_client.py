@@ -2294,7 +2294,8 @@ class TBankClient:
         try:
             with Client(self.token) as client:
                 try:
-                    instrument = client.instruments.share_by(figi=figi)
+                    # ✅ ИСПРАВЛЕНО: убран keyword argument 'figi'
+                    instrument = client.instruments.share_by(figi)
                     if hasattr(instrument.instrument, 'min_price_increment'):
                         step = float(instrument.instrument.min_price_increment)
                         if step > 0:
@@ -2303,7 +2304,8 @@ class TBankClient:
                     debug(f"Не удалось получить шаг цены акции: {e}")
 
                 try:
-                    instrument = client.instruments.bond_by(figi=figi)
+                    # ✅ ИСПРАВЛЕНО: убран keyword argument 'figi'
+                    instrument = client.instruments.bond_by(figi)
                     if hasattr(instrument.instrument, 'min_price_increment'):
                         step = float(instrument.instrument.min_price_increment)
                         if step > 0:
@@ -2495,19 +2497,18 @@ class TBankClient:
 
                 # ✅ ИСПРАВЛЕНО: проверка реалистичности тейк-профита
                 if current_price:
-                    min_distance = step * 2
+                    min_distance = step * 5  # ← УВЕЛИЧИТЬ С 2 ДО 5
                     if side == "LONG":
                         # Тейк-профит должен быть ВЫШЕ текущей цены
                         if take_profit_price <= current_price + min_distance:
-                            new_price = current_price + min_distance * 3  # Увеличен отступ
+                            new_price = current_price + min_distance * 4  # ← УВЕЛИЧИТЬ ОТСТУП
                             take_profit_price = self._round_to_min_increment_advanced(figi, new_price)
-                            warning(f"   ⚠️ Тейк-профит скорректирован до {take_profit_price:.2f}₽ (мин. отступ)")
+                            warning(f"   ⚠️ Тейк-профит скорректирован до {take_profit_price:.2f}₽")
                     else:  # SHORT
-                        # Тейк-профит должен быть НИЖЕ текущей цены
                         if take_profit_price >= current_price - min_distance:
-                            new_price = current_price - min_distance * 3
+                            new_price = current_price - min_distance * 4
                             take_profit_price = self._round_to_min_increment_advanced(figi, max(new_price, 0.01))
-                            warning(f"   ⚠️ Тейк-профит скорректирован до {take_profit_price:.2f}₽ (мин. отступ)")
+                            warning(f"   ⚠️ Тейк-профит скорректирован до {take_profit_price:.2f}₽")
 
                 if take_profit_price <= 0:
                     error(f"❌ Некорректная цена тейк-профита: {take_profit_price}")

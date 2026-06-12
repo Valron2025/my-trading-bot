@@ -392,27 +392,27 @@ def cached(ttl: int = 60, key_prefix: str = ""):
     return decorator
 
 
-# # ============================================================================
-# # ГЛОБАЛЬНЫЕ ЭКЗЕМПЛЯРЫ КЭША
-# # ============================================================================
-#
-# # Кэш для цен (5 секунд)
-# price_cache = TTLCache(default_ttl=5, max_size=500, name="price_cache")
-#
-# # Кэш для позиций (5 секунд)
-# positions_cache = TTLCache(default_ttl=5, max_size=100, name="positions_cache")
-#
-# # Кэш для свечей (30 секунд)
-# candles_cache = TTLCache(default_ttl=30, max_size=200, name="candles_cache")
-#
-# # Кэш для маржи (10 секунд)
-# margin_cache = TTLCache(default_ttl=10, max_size=10, name="margin_cache")
-#
-# # Кэш для инструментов (5 минут)
-# instruments_cache = TTLCache(default_ttl=300, max_size=100, name="instruments_cache")
-#
-# # Кэш для аналитики (1 час)
-# analysis_cache = TTLCache(default_ttl=3600, max_size=100, name="analysis_cache")
+# ============================================================================
+# ГЛОБАЛЬНЫЕ ЭКЗЕМПЛЯРЫ КЭША
+# ============================================================================
+
+# Кэш для цен (5 секунд)
+price_cache = TTLCache(default_ttl=5, max_size=500, name="price_cache")
+
+# Кэш для позиций (5 секунд)
+positions_cache = TTLCache(default_ttl=5, max_size=100, name="positions_cache")
+
+# Кэш для свечей (30 секунд)
+candles_cache = TTLCache(default_ttl=30, max_size=200, name="candles_cache")
+
+# Кэш для маржи (10 секунд)
+margin_cache = TTLCache(default_ttl=10, max_size=10, name="margin_cache")
+
+# Кэш для инструментов (5 минут)
+instruments_cache = TTLCache(default_ttl=300, max_size=100, name="instruments_cache")
+
+# Кэш для аналитики (1 час)
+analysis_cache = TTLCache(default_ttl=3600, max_size=100, name="analysis_cache")
 
 
 # ============================================================================
