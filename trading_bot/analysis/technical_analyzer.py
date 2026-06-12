@@ -424,19 +424,15 @@ class TechnicalAnalyzer:
 
         # ========== 1. ПРОВЕРКА НАСТРОЕК ==========
         try:
-            # ✅ ИСПРАВЛЕНО: правильный импорт
             from trading_bot.core.settings_manager import settings_manager
 
-            # Проверяем, включён ли фундаментальный анализ в настройках
             fundamental_enabled = settings_manager.get('fundamental_enabled', False)
             use_fundamental_in_trading = settings_manager.get('use_fundamental_in_trading', False)
 
             if not fundamental_enabled or not use_fundamental_in_trading:
-                # Фундаментальный анализ отключён в настройках
                 debug(f"📊 Фундаментальный анализ отключён для {ticker}")
                 return signal_result
         except ImportError:
-            # Если settings_manager не найден, используем значения по умолчанию
             debug(f"⚠️ settings_manager не найден, фундаментальный анализ пропущен для {ticker}")
             return signal_result
         except Exception as e:
@@ -448,13 +444,13 @@ class TechnicalAnalyzer:
             debug(f"📊 Фундаментальный анализатор недоступен для {ticker}")
             return signal_result
 
+        # ✅ ИСПРАВЛЕНО: правильные отступы
         import asyncio
-import nest_asyncio
-nest_asyncio.apply()
+        import nest_asyncio
+        nest_asyncio.apply()
 
         # ========== 3. ВЫПОЛНЕНИЕ С ТАЙМАУТОМ ==========
         try:
-            # Таймаут 2 секунды, чтобы не тормозить торговлю
             enhanced_score, enhanced_signals, fund_data = await asyncio.wait_for(
                 enhance_trading_decision(
                     ticker=ticker,
@@ -764,9 +760,10 @@ nest_asyncio.apply()
                 signals=["⚙️ Технический анализ отключён в настройках"]
             )
 
+        # ✅ ИСПРАВЛЕНО: правильные отступы
         import asyncio
-import nest_asyncio
-nest_asyncio.apply()
+        import nest_asyncio
+        nest_asyncio.apply()
         import concurrent.futures
         import time
 
@@ -775,7 +772,6 @@ nest_asyncio.apply()
         asyncio.set_event_loop(loop)
 
         try:
-            # Запускаем асинхронную функцию в этом loop
             result = loop.run_until_complete(
                 self.analyze_stock(figi, name, ticker, is_backtest)
             )
@@ -793,7 +789,6 @@ nest_asyncio.apply()
                 signals=[f"❌ Ошибка: {str(e)[:50]}"]
             )
         finally:
-            # Закрываем все задачи и loop
             pending = asyncio.all_tasks(loop)
             for task in pending:
                 task.cancel()
