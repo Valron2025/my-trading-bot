@@ -92,14 +92,15 @@ def is_trading_time() -> bool:
 def is_dsvd_trading_time() -> bool:
     """
     Проверка ДСВД (биржевые торги в выходные/праздники)
-    ДСВД проходит:
-    - Суббота, воскресенье И ПРАЗДНИЧНЫЕ ДНИ
-    - Время: 09:50 - 18:59 МСК
+    ✅ ИСПРАВЛЕНО: УБРАН ВЫЗОВ is_holiday() (теперь проверяем напрямую)
     """
     now = get_moscow_time()
     current_time = now.time()
     weekday = now.weekday()
-    is_holiday_today = is_holiday(now)
+
+    # Праздничные дни (прямая проверка, без вызова is_holiday)
+    holidays = {(1, 1), (1, 2), (1, 7), (2, 23), (3, 8), (5, 1), (5, 9), (6, 12), (11, 4)}
+    is_holiday_today = (now.month, now.day) in holidays
 
     # В праздник торгуем по ДСВД (в часы ДСВД)
     if is_holiday_today:
@@ -134,13 +135,8 @@ def is_weekend_evening_trading_time() -> bool:
 
 def is_otc_trading_time() -> bool:
     """
-    Проверка, идёт ли сейчас OTC (внебиржевые торги в выходные)
-    OTC проходит:
-    - Суббота и воскресенье
-    - Время: 02:00 - 23:50 МСК
-    - ТОЛЬКО лимитные заявки!
-
-    ВНИМАНИЕ: OTC считается отдельным режимом, НЕ ДСВД!
+    Проверка OTC (внебиржевые торги в выходные)
+    ✅ ИСПРАВЛЕНО: УБРАН ВЫЗОВ is_holiday()
     """
     now = get_moscow_time()
     current_time = now.time()
@@ -149,11 +145,12 @@ def is_otc_trading_time() -> bool:
     if weekday not in (5, 6):
         return False
 
-    if is_holiday(now):
+    # Праздничные дни (прямая проверка)
+    holidays = {(1, 1), (1, 2), (1, 7), (2, 23), (3, 8), (5, 1), (5, 9), (6, 12), (11, 4)}
+    if (now.month, now.day) in holidays:
         return False
 
     # Исключаем часы ДСВД (09:50-18:59) из OTC
-    # В эти часы идут БИРЖЕВЫЕ торги, а не OTC
     if DSVD_START <= current_time <= DSVD_END:
         return False
 
@@ -163,15 +160,7 @@ def is_otc_trading_time() -> bool:
 def is_weekend_trading_time() -> bool:
     """
     Проверка, идёт ли сейчас любая торговля в выходные
-
-    ВНИМАНИЕ: Эта функция возвращает True ТОЛЬКО в часы, когда
-    реально можно торговать через API:
-
-    - ДСВД (биржевые): 09:50 - 18:59
-    - Вечерняя сессия выходного (если будет): 19:00 - 23:49
-    - OTC (внебиржевые): 02:00 - 09:49 и 19:00 - 23:50
-
-    Используется в trading_loop.py для определения режима торговли
+    ✅ ИСПРАВЛЕНО: НИЧЕГО НЕ ВЫЗЫВАЕТ, просто комбинирует результаты
     """
     return is_dsvd_trading_time() or is_weekend_evening_trading_time() or is_otc_trading_time()
 
@@ -410,35 +399,21 @@ def get_days_until_monday() -> int:
 def is_holiday(dt: datetime = None) -> bool:
     """
     Проверка, является ли день праздничным (торги закрыты)
-    Учитывает ДСВД/OTC торги в выходные и праздники
+    ✅ ИСПРАВЛЕНО: УБРАН ВЫЗОВ is_weekend_trading_time() и is_otc_trading_time()
     """
     if dt is None:
         dt = get_moscow_time()
 
-    # Список официальных праздников MOEX (дни, когда биржа закрыта)
+    # Список официальных праздников MOEX
     holidays = {
-        (1, 1),  # Новый год
-        (1, 2),  # Новый год
-        (1, 7),  # Рождество
-        (2, 23),  # День защитника Отечества
-        (3, 8),  # Международный женский день
-        (5, 1),  # Праздник Весны и Труда
-        (5, 9),  # День Победы
-        (6, 12),  # День России
-        (11, 4),  # День народного единства
+        (1, 1), (1, 2), (1, 7),
+        (2, 23), (3, 8),
+        (5, 1), (5, 9),
+        (6, 12), (11, 4),
     }
 
-    # Проверяем, праздник ли сегодня
-    if (dt.month, dt.day) in holidays:
-        # ДАЖЕ В ПРАЗДНИК — проверяем, идут ли ДСВД/OTC торги!
-        if is_weekend_trading_time() or is_otc_trading_time():
-            # Если ДСВД/OTC активны — не считаем праздником для торговли
-            debug(f"🎉 {dt.strftime('%d.%m')} праздник, но ДСВД/OTC активны — торговля разрешена")
-            return False
-        debug(f"🎄 {dt.strftime('%d.%m')} праздник, ДСВД/OTC не активны — торговля запрещена")
-        return True
-
-    return False
+    # Просто проверяем, праздник ли сегодня (без вызовов других функций)
+    return (dt.month, dt.day) in holidays
 
 
 def is_friday_evening() -> bool:
