@@ -41,48 +41,6 @@ from socket import timeout as SocketTimeoutError
 # Для TTLCache в mark_as_confirmation_required
 from trading_bot.cache import TTLCache
 
-# ========== FIX FOR RENDER SSL ==========
-import os
-import grpc
-import sys
-
-# Устанавливаем переменные (для совместимости)
-os.environ['GRPC_SSL_CIPHER_SUITES'] = 'HIGH'
-os.environ['GRPC_VERBOSITY'] = 'ERROR'
-
-# ========== ГЛАВНЫЙ ФИКС: СОЗДАЁМ КЛИЕНТ С INSECURE CHANNEL ==========
-from t_tech.invest import Client as OriginalClient
-import t_tech.invest
-
-
-class RenderCompatibleClient(OriginalClient):
-    """Клиент, совместимый с Render - использует insecure channel (без SSL)"""
-
-    def __init__(self, token, *args, **kwargs):
-        # КЛЮЧЕВОЙ МОМЕНТ: используем порт 80 (HTTP, без SSL)
-        # вместо 443 (HTTPS с SSL)
-        channel = grpc.insecure_channel('invest-public-api.tinkoff.ru:80')
-
-        # Инициализируем родителя
-        super().__init__(token, *args, **kwargs)
-
-        # Подменяем все стубы на наш канал
-        for attr_name in dir(self):
-            if attr_name.endswith('_stub') and not attr_name.startswith('_'):
-                stub = getattr(self, attr_name, None)
-                if stub and hasattr(stub, '__init__'):
-                    stub_class = stub.__class__
-                    setattr(self, attr_name, stub_class(channel))
-
-
-# Подменяем класс в модуле
-t_tech.invest.Client = RenderCompatibleClient
-
-print("🔓 Render FIX: используем insecure channel (порт 80, без SSL)")
-
-# Экспортируем клиент
-Client = RenderCompatibleClient
-
 # Импорты для унифицированного кэша
 from trading_bot.cache.unified_cache import USE_UNIFIED_CACHE, UnifiedCache
 

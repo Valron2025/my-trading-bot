@@ -11,31 +11,11 @@ echo "User: $(whoami)"
 echo "PWD: $(pwd)"
 echo "=========================================="
 
-# ========== SSL FIX FOR T-BANK API ==========
-# Отключаем проверку SSL сертификатов для gRPC
-export GRPC_SSL_CIPHER_SUITES=HIGH
-export GRPC_VERBOSITY=ERROR
-export GRPC_TRACE=
-
-# Отключаем проверку для HTTPS запросов
-export CURL_CA_BUNDLE=""
-export REQUESTS_CA_BUNDLE=""
-export SSL_CERT_FILE=""
-export NODE_TLS_REJECT_UNAUTHORIZED=0
-
-# Для Python urllib3
-export PYTHONHTTPSVERIFY=0
-
-echo "🔓 SSL проверка ОТКЛЮЧЕНА для Render (T-Bank API fix)"
-
-# ========== ПОДАВЛЕНИЕ ПРЕДУПРЕЖДЕНИЙ ==========
-export PYTHONWARNINGS="ignore:Unverified HTTPS request"
-
-# ========== НАСТРОЙКА PYTHONPATH ==========
+# Настройка PYTHONPATH
 export PYTHONPATH="/opt/render/project/src:$PYTHONPATH"
 echo "📁 PYTHONPATH: $PYTHONPATH"
 
-# ========== ПРОВЕРКА ПЕРЕМЕННЫХ ==========
+# Проверка переменных окружения
 echo ""
 echo "📋 Checking environment variables..."
 
@@ -60,7 +40,7 @@ echo "=========================================="
 echo "🚀 STARTING WEB SERVER (GUNICORN)"
 echo "=========================================="
 
-# Запуск Gunicorn с web_server
+# Запуск Gunicorn с web_server (только один worker)
 gunicorn web_server:app \
     --bind 0.0.0.0:$PORT \
     --workers 1 \
@@ -69,3 +49,7 @@ gunicorn web_server:app \
     --access-logfile - \
     --error-logfile - \
     --log-level info
+
+# ========== ВАЖНО: worker.py НЕ ЗАПУСКАЕТСЯ ОТДЕЛЬНО ==========
+# Бот уже запущен внутри web_server.py через блокировку
+# Telegram polling также запущен внутри web_server.py
