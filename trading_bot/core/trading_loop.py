@@ -587,8 +587,8 @@ class TradingLoop:
                 return minutes
 
         # ДСВД/OTC сессия в выходные до 19:00
-        from trading_bot.utils.time_utils import is_weekend_trading_time, is_otc_trading_time
-        if is_weekend_trading_time() or is_otc_trading_time():
+        from trading_bot.utils.time_utils import is_dsvd_trading_time, is_otc_trading_time
+        if is_dsvd_trading_time() or is_otc_trading_time():
             close_time = dt_time(19, 0)
             if current_time < close_time:
                 minutes = (close_time.hour * 60 + close_time.minute) - (current_time.hour * 60 + current_time.minute)
@@ -1117,8 +1117,8 @@ class TradingLoop:
         except Exception as e:
             debug(f"Ошибка проверки API: {e}")
             try:
-                from trading_bot.utils.time_utils import is_weekend_trading_time, is_otc_trading_time
-                return is_weekend_trading_time() or is_otc_trading_time()
+                from trading_bot.utils.time_utils import is_dsvd_trading_time, is_otc_trading_time
+                can_trade_weekend = is_dsvd_trading_time() or is_otc_trading_time()
             except:
                 return False
 
@@ -1128,11 +1128,11 @@ class TradingLoop:
             warning("⚠️ TradingLoop уже запущен")
             return
     
-        from trading_bot.utils.time_utils import get_moscow_time, is_weekend_trading_time, is_otc_trading_time
+        from trading_bot.utils.time_utils import get_moscow_time, is_dsvd_trading_time, is_otc_trading_time
     
         now = get_moscow_time()
         is_weekend = now.weekday() >= 5
-        can_trade_weekend = is_weekend_trading_time() or is_otc_trading_time()
+        can_trade_weekend = is_dsvd_trading_time() or is_otc_trading_time()
         
         # Синхронизация позиций при старте
         self._sync_positions()
@@ -1160,7 +1160,7 @@ class TradingLoop:
 
     def _weekend_wait_loop(self):
         """Цикл ожидания в выходные дни"""
-        from trading_bot.utils.time_utils import get_moscow_time, is_weekend_trading_time, is_otc_trading_time
+        from trading_bot.utils.time_utils import get_moscow_time, is_dsvd_trading_time, is_otc_trading_time
 
         info("🌙 Режим ожидания выходного дня активирован")
 
@@ -1168,7 +1168,7 @@ class TradingLoop:
             now = get_moscow_time()
             is_weekend = now.weekday() >= 5
 
-            can_trade_weekend = is_weekend_trading_time() or is_otc_trading_time()
+            can_trade_weekend = is_dsvd_trading_time() or is_otc_trading_time()
 
             if not is_weekend or can_trade_weekend:
                 info("🏛️ Торговля возобновляется! Запускаем основной цикл...")
@@ -1219,8 +1219,8 @@ class TradingLoop:
         now = get_moscow_time()
         is_weekend = now.weekday() >= 5
 
-        from trading_bot.utils.time_utils import is_weekend_trading_time, is_otc_trading_time
-        can_trade_weekend = is_weekend_trading_time() or is_otc_trading_time()
+        from trading_bot.utils.time_utils import is_dsvd_trading_time, is_otc_trading_time
+        can_trade_weekend = is_dsvd_trading_time() or is_otc_trading_time()
 
         if is_weekend and not can_trade_weekend:
             info("🌙 ВЫХОДНОЙ ДЕНЬ - ТОРГОВЛЯ НЕВОЗМОЖНА")
@@ -1290,8 +1290,8 @@ class TradingLoop:
                 now = get_moscow_time()
                 is_weekend = now.weekday() >= 5
 
-                from trading_bot.utils.time_utils import is_weekend_trading_time, is_otc_trading_time
-                can_trade_weekend = is_weekend_trading_time() or is_otc_trading_time()
+                from trading_bot.utils.time_utils import is_dsvd_trading_time, is_otc_trading_time
+                can_trade_weekend = is_dsvd_trading_time() or is_otc_trading_time()
 
                 if is_weekend and not can_trade_weekend and not weekend_mode:
                     weekend_mode = True
