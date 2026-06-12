@@ -399,7 +399,7 @@ def get_days_until_monday() -> int:
 def is_holiday(dt: datetime = None) -> bool:
     """
     Проверка, является ли день праздничным (торги закрыты)
-    ✅ ИСПРАВЛЕНО: УБРАН ВЫЗОВ is_weekend_trading_time() и is_otc_trading_time()
+    ✅ ИСПРАВЛЕНО: Учитывает OTC/ДСВД активность
     """
     if dt is None:
         dt = get_moscow_time()
@@ -412,8 +412,33 @@ def is_holiday(dt: datetime = None) -> bool:
         (6, 12), (11, 4),
     }
 
-    # Просто проверяем, праздник ли сегодня (без вызовов других функций)
-    return (dt.month, dt.day) in holidays
+    # Если не праздник — сразу False
+    if (dt.month, dt.day) not in holidays:
+        return False
+
+    # ПРАЗДНИК! Но проверяем OTC/ДСВД
+    current_time = dt.time()
+
+    # ДСВД часы (биржевые торги в выходные/праздники)
+    DSVD_START = time(9, 50)
+    DSVD_END = time(18, 59)
+
+    # OTC часы (внебиржевые торги в выходные)
+    OTC_START = time(2, 0)
+    OTC_END = time(23, 50)
+
+    # В праздник торгуем в часы ДСВД
+    if DSVD_START <= current_time <= DSVD_END:
+        debug(f"🎉 Праздник, но ДСВД активна — можно торговать")
+        return False
+
+    # В праздник торгуем и в OTC часы
+    if OTC_START <= current_time <= OTC_END:
+        debug(f"🎉 Праздник, но OTC активен — можно торговать")
+        return False
+
+    debug(f"🎄 Праздник {dt.strftime('%d.%m')}, активных торгов нет")
+    return True
 
 
 def is_friday_evening() -> bool:
