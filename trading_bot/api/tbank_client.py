@@ -49,23 +49,18 @@ import grpc
 os.environ['GRPC_SSL_CIPHER_SUITES'] = 'HIGH'
 os.environ['GRPC_VERBOSITY'] = 'ERROR'
 
-# ПОДМЕНЯЕМ Client на кастомный
-from t_tech.invest import Client as OriginalClient
+# МОНКИ-ПАТЧ для создания insecure channel
+_original_secure_channel = grpc.secure_channel
 
-class PatchedClient(OriginalClient):
-    """Патченый клиент, который использует insecure channel"""
-    def __init__(self, token, *args, **kwargs):
-        # Создаём insecure channel (без SSL!)
-        import grpc
-        self._channel = grpc.insecure_channel('invest-public-api.tinkoff.ru:443')
-        # Инициализируем остальное
-        super().__init__(token, *args, **kwargs)
+def _insecure_secure_channel(target, credentials=None, options=None):
+    """Всегда создаёт insecure channel для T-Bank"""
+    if 'invest-public-api' in target:
+        return grpc.insecure_channel(target, options=options)
+    return _original_secure_channel(target, credentials, options)
 
-# Подменяем Client в модуле
-import t_tech.invest
-t_tech.invest.Client = PatchedClient
+grpc.secure_channel = _insecure_secure_channel
 
-print("🔓 SSL проверка ОТКЛЮЧЕНА для Render (insecure channel)")
+print("🔓 SSL проверка ОТКЛЮЧЕНА для Render")
 
 # Импорты для унифицированного кэша
 from trading_bot.cache.unified_cache import USE_UNIFIED_CACHE, UnifiedCache
