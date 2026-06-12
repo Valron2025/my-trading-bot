@@ -1825,7 +1825,7 @@ class TBankClient:
 
                 # 2. Получаем информацию об инструменте
                 try:
-                    instrument = client.instruments.share_by(figi=figi)
+                    instrument = client.instruments.share_by(figi)
                     if hasattr(instrument, 'instrument'):
                         inst = instrument.instrument
                         result['exchange'] = getattr(inst, 'exchange', 'UNKNOWN')
