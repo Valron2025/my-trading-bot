@@ -41,20 +41,27 @@ from socket import timeout as SocketTimeoutError
 # Для TTLCache в mark_as_confirmation_required
 from trading_bot.cache import TTLCache
 
-# ========== FIX FOR RENDER SSL CERTIFICATE ISSUE ==========
-import ssl
+# ========== EMERGENCY SSL FIX ==========
 import os
+import ssl
+import grpc
 
-# Отключаем проверку SSL сертификата для T-Bank API
-# Это решает проблему с самоподписанным сертификатом на Render
-if os.environ.get('RENDER') or os.environ.get('RENDER_SERVICE_ID'):
-    # noinspection PyProtectedMember
-    ssl._create_default_https_context = ssl._create_unverified_context
+# Отключаем проверку SSL для всех HTTPS запросов
+ssl._create_default_https_context = ssl._create_unverified_context
 
-    import warnings
+# Для gRPC - создаём кастомные credentials
+def _create_insecure_ssl_credentials():
+    return grpc.ssl_channel_credentials(root_certificates=None)
 
-    warnings.filterwarnings('ignore', message='Unverified HTTPS request')
-    print("🔓 SSL проверка ОТКЛЮЧЕНА для Render")
+# Подменяем стандартную функцию
+grpc.ssl_channel_credentials = _create_insecure_ssl_credentials
+
+# Переменные окружения
+os.environ['GRPC_SSL_CIPHER_SUITES'] = 'HIGH'
+os.environ['GRPC_VERBOSITY'] = 'ERROR'
+os.environ['PYTHONHTTPSVERIFY'] = '0'
+
+print("🔓 SSL проверка ПРИНУДИТЕЛЬНО ОТКЛЮЧЕНА")
 
 # Импорты для унифицированного кэша
 from trading_bot.cache.unified_cache import USE_UNIFIED_CACHE, UnifiedCache
