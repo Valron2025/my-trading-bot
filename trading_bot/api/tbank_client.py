@@ -1,36 +1,7 @@
 """Клиент для работы с T-Bank API - ПОЛНАЯ ПРОДАКШН ВЕРСИЯ (с TTLCache)"""
 
 import os
-import grpc
-
-# Форсируем insecure channel для Render
-os.environ['GRPC_DNS_RESOLVER'] = 'native'
-
-# Патчим создание клиента
-_original_init = None
-
-
-def patch_client_for_render():
-    """Временный патч для Render"""
-    from t_tech.invest import Client
-
-    global _original_init
-    if _original_init is None:
-        _original_init = Client.__init__
-
-        def patched_init(self, token, app_name=None, channel=None):
-            if channel is None:
-                # Используем insecure channel для Render
-                channel = grpc.insecure_channel('invest-public-api.tbank.ru:443')
-            _original_init(self, token, app_name, channel)
-
-        Client.__init__ = patched_init
-        print("✅ Render patch applied (insecure channel)")
-
-
-# Применяем патч
-patch_client_for_render()
-
+import sys
 import time
 from functools import wraps
 from typing import List, Optional, Tuple, Dict, Any
@@ -40,6 +11,25 @@ from decimal import Decimal
 import signal
 from contextlib import contextmanager
 from threading import Lock
+from socket import timeout as SocketTimeoutError
+
+# ========== RENDER SSL FIX ==========
+import grpc
+from t_tech.invest import Client
+
+# Сохраняем оригинальный метод
+_original_client_init = Client.__init__
+
+def _patched_client_init(self, token, channel=None):
+    """Патченный инициализатор с insecure channel для Render"""
+    if channel is None:
+        channel = grpc.insecure_channel('invest-public-api.tbank.ru:443')
+        print(f"🔓 Render fix: using insecure channel for {token[:10]}...")
+    _original_client_init(self, token, channel=channel)
+
+Client.__init__ = _patched_client_init
+print("✅ RENDER FIX ACTIVE: Using insecure channel for T-Bank API")
+# ========== END FIX ==========
 
 MOSCOW_TZ = timezone(timedelta(hours=3))
 
@@ -65,9 +55,6 @@ from trading_bot.cache import (
     price_cache, positions_cache, candles_cache,
     margin_cache, instruments_cache
 )
-
-# Для TimeoutError в декораторе
-from socket import timeout as SocketTimeoutError
 
 # Для TTLCache в mark_as_confirmation_required
 from trading_bot.cache import TTLCache
