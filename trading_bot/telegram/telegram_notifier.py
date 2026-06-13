@@ -1,13 +1,17 @@
-# telegram_notifier.py
+# telegram_notifier.py - ИСПРАВЛЕННАЯ ВЕРСИЯ
 """Модуль уведомлений в Telegram - ОПТИМИЗИРОВАННАЯ ВЕРСИЯ"""
 
 import requests
 import threading
 import time
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from queue import Queue, Empty
+from datetime import datetime, timedelta, timezone
+
 from trading_bot.config import config
 from ..logger import debug, info, error
+
+MOSCOW_TZ = timezone(timedelta(hours=3))
 
 # Глобальный экземпляр
 _telegram_instance = None
@@ -161,6 +165,34 @@ class TelegramNotifier:
         if ticker:
             msg += f" {ticker}"
         msg += f": {reason} | {profit_pct:+.1f}% ({profit_amount:+.2f}₽)"
+        self.send_message(msg)
+
+    # ========== НОВЫЕ МЕТОДЫ ДЛЯ ОТЧЁТОВ ==========
+
+    def send_daily_report(self, stats: Dict[str, Any]):
+        """Отправка ежедневного отчёта"""
+        now = datetime.now(MOSCOW_TZ)
+        report = (
+            f"📊 <b>ЕЖЕДНЕВНЫЙ ОТЧЁТ</b>\n"
+            f"📅 {now.strftime('%d.%m.%Y')}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💰 Капитал: {stats.get('capital', 0):,.2f}₽\n"
+            f"📈 Позиций: {stats.get('positions', 0)}\n"
+            f"💵 P&L: {stats.get('pnl', 0):+,.2f}₽\n"
+            f"🎯 Win Rate: {stats.get('win_rate', 0):.1f}%\n"
+            f"🔄 Сделок: {stats.get('trades', 0)}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ Бот работает стабильно"
+        )
+        self.send_message(report)
+
+    def send_pnl_alert(self, ticker: str, profit_pct: float, profit_amount: float, is_tp: bool = True):
+        """Отправка alert о сработавшем TP/SL"""
+        if is_tp:
+            msg = f"🎯 <b>ТЕЙК-ПРОФИТ СРАБОТАЛ!</b>\n"
+        else:
+            msg = f"🛑 <b>СТОП-ЛОСС СРАБОТАЛ!</b>\n"
+        msg += f"📊 {ticker}: {profit_pct:+.1f}% ({profit_amount:+.2f}₽)"
         self.send_message(msg)
 
     def stop_notifier(self):
