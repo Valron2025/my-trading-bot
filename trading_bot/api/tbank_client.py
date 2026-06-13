@@ -15,20 +15,22 @@ from socket import timeout as SocketTimeoutError
 
 # ========== RENDER SSL FIX ==========
 import grpc
-from t_tech.invest import Client
 
-# Сохраняем оригинальный метод
-_original_client_init = Client.__init__
+def patch_grpc_for_render():
+    """Патчим gRPC channel creation для Render"""
+    original_secure_channel = grpc.secure_channel
 
-def _patched_client_init(self, token, channel=None):
-    """Патченный инициализатор с insecure channel для Render"""
-    if channel is None:
-        channel = grpc.insecure_channel('invest-public-api.tbank.ru:443')
-        print(f"🔓 Render fix: using insecure channel for {token[:10]}...")
-    _original_client_init(self, token, channel=channel)
+    def patched_secure_channel(target, credentials, options=None):
+        """Заменяем secure_channel на insecure_channel"""
+        print(f"🔓 Render fix: using insecure channel for {target}")
+        return grpc.insecure_channel(target)
 
-Client.__init__ = _patched_client_init
-print("✅ RENDER FIX ACTIVE: Using insecure channel for T-Bank API")
+    # Заменяем функцию
+    grpc.secure_channel = patched_secure_channel
+    print("✅ RENDER FIX ACTIVE: gRPC secure_channel -> insecure_channel")
+
+# Применяем патч ДО импорта Client
+patch_grpc_for_render()
 # ========== END FIX ==========
 
 MOSCOW_TZ = timezone(timedelta(hours=3))
@@ -61,6 +63,7 @@ from trading_bot.cache import TTLCache
 
 # Импорты для унифицированного кэша
 from trading_bot.cache.unified_cache import USE_UNIFIED_CACHE, UnifiedCache
+
 
 def retry_on_error(max_retries=3, delay=1, backoff=2, timeout_seconds=2.0):
     """Декоратор для повторных попыток при ошибках API с таймаутом"""
