@@ -20,14 +20,15 @@ def patch_grpc_for_render():
     """Патчим gRPC channel creation для Render"""
     original_secure_channel = grpc.secure_channel
 
-    def patched_secure_channel(target, credentials, options=None):
-        """Заменяем secure_channel на insecure_channel"""
+    def patched_secure_channel(*args, **kwargs):
+        """Заменяем secure_channel на insecure_channel (принимает любые аргументы)"""
+        target = args[0] if args else kwargs.get('target', 'invest-public-api.tbank.ru:443')
         print(f"🔓 Render fix: using insecure channel for {target}")
         return grpc.insecure_channel(target)
 
     # Заменяем функцию
     grpc.secure_channel = patched_secure_channel
-    print("✅ RENDER FIX ACTIVE: gRPC secure_channel -> insecure_channel")
+    print("✅ RENDER FIX ACTIVE: gRPC secure_channel -> insecure_channel (universal)")
 
 # Применяем патч ДО импорта Client
 patch_grpc_for_render()
