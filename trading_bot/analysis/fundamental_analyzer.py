@@ -625,7 +625,6 @@ class FundamentalAnalyzer:
             debug(f"      P/E={metrics.pe_ratio}, P/B={metrics.pb_ratio}, ROE={metrics.roe}")
             return None
 
-    
     async def _fetch_from_yahoo(self, ticker: str) -> Optional[Dict]:
         """Получение фундаментальных данных из Yahoo Finance с повторными попытками"""
         if not YFINANCE_AVAILABLE:
@@ -650,30 +649,30 @@ class FundamentalAnalyzer:
                 async with asyncio.timeout(45):
                     debug(f"      ⏳ Попытка {attempt + 1}/{max_retries} (таймаут 45с)...")
 
-                    # Запускаем синхронный yfinance в отдельном потоке
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        result = await loop.run_in_executor(None, self._get_yahoo_data, ticker)
-                        elapsed = time.time() - start_time
+                    # ✅ ИСПРАВЛЕНО ДЛЯ PYTHON 3.11:
+                    # asyncio.to_thread() автоматически управляет event loop
+                    result = await asyncio.to_thread(self._get_yahoo_data, ticker)
 
-                        if result:
-                            debug(f"      ✅ Yahoo вернул {len(result)} показателей за {elapsed:.1f}с")
-                            return result
+                    elapsed = time.time() - start_time
+
+                    if result:
+                        debug(f"      ✅ Yahoo вернул {len(result)} показателей за {elapsed:.1f}с")
+                        return result
+                    else:
+                        if attempt < max_retries - 1:
+                            delay = base_delay * (attempt + 1)
+                            debug(
+                                f"      ⚠️ Попытка {attempt + 1}/{max_retries} не удалась (нет данных), повтор через {delay:.1f}с...")
+                            await asyncio.sleep(delay)
                         else:
-                            if attempt < max_retries - 1:
-                                delay = base_delay * (attempt + 1)
-                                debug(f"      ⚠️ Попытка {attempt + 1}/{max_retries} не удалась (нет данных), повтор через {delay:.1f}с...")
-                                await asyncio.sleep(delay)
-                            else:
-                                debug(f"      ⚠️ Yahoo не вернул мультипликаторов после {max_retries} попыток (всего {elapsed:.1f}с)")
-                                return None
-                    finally:
-                        loop.close()
+                            debug(
+                                f"      ⚠️ Yahoo не вернул мультипликаторов после {max_retries} попыток (всего {elapsed:.1f}с)")
+                            return None
 
             except asyncio.TimeoutError:
                 elapsed = time.time() - start_time
-                debug(f"      ⏰ ТАЙМАУТ Yahoo Finance для {ticker} (45с), попытка {attempt + 1}/{max_retries}, прошло {elapsed:.1f}с")
+                debug(
+                    f"      ⏰ ТАЙМАУТ Yahoo Finance для {ticker} (45с), попытка {attempt + 1}/{max_retries}, прошло {elapsed:.1f}с")
                 if attempt < max_retries - 1:
                     delay = base_delay * (attempt + 1)
                     debug(f"      🔄 Повтор через {delay:.1f}с...")
