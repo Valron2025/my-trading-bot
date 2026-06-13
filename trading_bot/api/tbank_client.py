@@ -1,5 +1,36 @@
 """Клиент для работы с T-Bank API - ПОЛНАЯ ПРОДАКШН ВЕРСИЯ (с TTLCache)"""
 
+import os
+import grpc
+
+# Форсируем insecure channel для Render
+os.environ['GRPC_DNS_RESOLVER'] = 'native'
+
+# Патчим создание клиента
+_original_init = None
+
+
+def patch_client_for_render():
+    """Временный патч для Render"""
+    from t_tech.invest import Client
+
+    global _original_init
+    if _original_init is None:
+        _original_init = Client.__init__
+
+        def patched_init(self, token, app_name=None, channel=None):
+            if channel is None:
+                # Используем insecure channel для Render
+                channel = grpc.insecure_channel('invest-public-api.tbank.ru:443')
+            _original_init(self, token, app_name, channel)
+
+        Client.__init__ = patched_init
+        print("✅ Render patch applied (insecure channel)")
+
+
+# Применяем патч
+patch_client_for_render()
+
 import time
 from functools import wraps
 from typing import List, Optional, Tuple, Dict, Any
