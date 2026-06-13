@@ -3,19 +3,9 @@ services:
     name: trading-bot-web
     runtime: python
     buildCommand: |
-      # Обновление pip и установка системных зависимостей
-      apt-get update && apt-get install -y ca-certificates
-      update-ca-certificates
       pip install --upgrade pip
       pip install -r requirements.txt
-      # Установка certifi если его нет в requirements
-      pip install certifi
-    startCommand: |
-      # Установка переменных для SSL сертификатов
-      export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
-      export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
-      export GRPC_DNS_RESOLVER=native
-      gunicorn web_server:app --bind 0.0.0.0:$PORT --workers 1 --threads 1 --timeout 300 --max-requests 200 --max-requests-jitter 50
+    startCommand: gunicorn web_server:app --bind 0.0.0.0:$PORT --workers 1 --threads 1 --timeout 300 --max-requests 200 --max-requests-jitter 50
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
@@ -31,14 +21,6 @@ services:
         value: "WARNING"
       - key: PYTHONPATH
         value: "."
-      - key: SSL_CERT_FILE
-        value: "/etc/ssl/certs/ca-certificates.crt"
-      - key: REQUESTS_CA_BUNDLE
-        value: "/etc/ssl/certs/ca-certificates.crt"
-      - key: GRPC_SSL_CIPHER_SUITES
-        value: "HIGH+ECDSA+HIGH"
-      - key: GRPC_DNS_RESOLVER
-        value: "native"
     healthCheckPath: /health
     autoDeploy: true
     plan: free
