@@ -3,380 +3,235 @@
 """
 fundamental_analyzer.py - ПРОДАКШЕН ВЕРСИЯ ДЛЯ RENDER
 Фундаментальный анализ для торгового бота
-БЕЗ TensorFlow/PyTorch - только легковесные библиотеки
-ИСТОЧНИКИ ДАННЫХ:
-1. MOEX ISS API (бесплатно, без ключей) - рыночные данные
-2. Yahoo Finance (бесплатно) - МУЛЬТИПЛИКАТОРЫ P/E, P/B, ROE
 """
 
 import os
-import json
 import time
 import asyncio
 import aiohttp
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass, field
-from collections import defaultdict
-from dotenv import load_dotenv
-from datetime import datetime, timezone, timedelta
-from trading_bot.utils.time_utils import get_moscow_time
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from trading_bot.cache.unified_cache import UnifiedCache, USE_UNIFIED_CACHE
+import logging
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+# Фикс для event loop
+try:
+    import nest_asyncio
+
+    nest_asyncio.apply()
+except ImportError:
+    pass
 
 
-# ========== RATE LIMITER ДЛЯ YAHOO FINANCE ==========
-class YahooRateLimiter:
-    """Управление частотой запросов к Yahoo Finance"""
-    _instance = None
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
-
-    def __init__(self):
-        if self._initialized:
-            return
-        self._initialized = True
-        self.requests_per_minute = 15
-        self.interval = 60.0 / self.requests_per_minute
-        self.last_request_time = datetime.now()
-        self._lock = asyncio.Lock()
-
-    async def acquire(self):
-        """Ожидание перед следующим запросом (rate limit)"""
-        async with self._lock:
-            now = datetime.now()
-            elapsed = (now - self.last_request_time).total_seconds()
-            if elapsed < self.interval:
-                wait_time = self.interval - elapsed
-                if wait_time > 0:
-                    await asyncio.sleep(wait_time)
-            self.last_request_time = datetime.now()
+def get_moscow_time() -> datetime:
+    """Получение московского времени"""
+    return datetime.now(ZoneInfo("Europe/Moscow"))
 
 
-# Глобальный экземпляр rate limiter
-_yahoo_rate_limiter = YahooRateLimiter()
-
-
-# ========== ЦВЕТНЫЕ ЛОГИ ==========
-class ColorLogger:
-    """Красивые цветные логи для терминала Render"""
-    GREEN = '\033[92m'
-    RED = '\033[91m'
-    YELLOW = '\033[93m'
-    BLUE = '\033[94m'
-    CYAN = '\033[96m'
-    MAGENTA = '\033[95m'
-    WHITE = '\033[97m'
-    BOLD = '\033[1m'
-    DIM = '\033[2m'
-    RESET = '\033[0m'
-
-    # Флаг для подавления дублирования debug логов
-    _debug_enabled = True
-    _last_debug_messages = {}
-    _debug_cooldown = 2.0  # секунды
-
-    @staticmethod
-    def _should_log(message: str, level: str) -> bool:
-        """Проверка, нужно ли логировать сообщение (для предотвращения дублирования)"""
-        if level != "DEBUG":
-            return True
-
-        if not ColorLogger._debug_enabled:
-            return False
-
-        import time
-        now = time.time()
-        key = f"{level}:{message[:100]}"
-
-        if key in ColorLogger._last_debug_messages:
-            if now - ColorLogger._last_debug_messages[key] < ColorLogger._debug_cooldown:
-                return False
-
-        ColorLogger._last_debug_messages[key] = now
-
-        # Очистка старых записей
-        if len(ColorLogger._last_debug_messages) > 100:
-            old_keys = [k for k, t in ColorLogger._last_debug_messages.items()
-                        if now - t > 10]
-            for k in old_keys:
-                del ColorLogger._last_debug_messages[k]
-
-        return True
-
-    @staticmethod
-    def info(msg: str):
-        msk = get_moscow_time()
-        print(f"{ColorLogger.CYAN}ℹ️ {msk.strftime('%H:%M:%S')} | {ColorLogger.RESET}{msg}")
-
-    @staticmethod
-    def success(msg: str):
-        msk = get_moscow_time()
-        print(f"{ColorLogger.GREEN}✅ {msk.strftime('%H:%M:%S')} | {ColorLogger.RESET}{msg}")
-
-    @staticmethod
-    def error(msg: str):
-        msk = get_moscow_time()
-        print(f"{ColorLogger.RED}❌ {msk.strftime('%H:%M:%S')} | {ColorLogger.RESET}{msg}")
-
-    @staticmethod
-    def warning(msg: str):
-        msk = get_moscow_time()
-        print(f"{ColorLogger.YELLOW}⚠️ {msk.strftime('%H:%M:%S')} | {ColorLogger.RESET}{msg}")
-
-    @staticmethod
-    def debug(msg: str):
-        if ColorLogger._should_log(msg, "DEBUG"):
-            msk = get_moscow_time()
-            print(f"{ColorLogger.DIM}🔍 {msk.strftime('%H:%M:%S')} | {ColorLogger.RESET}{msg}")
-
-    @staticmethod
-    def data(msg: str):
-        msk = get_moscow_time()
-        print(f"{ColorLogger.MAGENTA}📊 {msk.strftime('%H:%M:%S')} | {ColorLogger.RESET}{msg}")
-
-    @staticmethod
-    def money(msg: str):
-        msk = get_moscow_time()
-        print(f"{ColorLogger.GREEN}💰 {msk.strftime('%H:%M:%S')} | {ColorLogger.RESET}{msg}")
-
-    @staticmethod
-    def chart(msg: str):
-        msk = get_moscow_time()
-        print(f"{ColorLogger.BLUE}📈 {msk.strftime('%H:%M:%S')} | {ColorLogger.RESET}{msg}")
-
-    @staticmethod
-    def separator(char: str = "=", length: int = 70):
-        print(f"{ColorLogger.DIM}{char * length}{ColorLogger.RESET}")
-
-    @staticmethod
-    def set_debug_enabled(enabled: bool):
-        """Включение/выключение debug логов"""
-        ColorLogger._debug_enabled = enabled
-        if not enabled:
-            ColorLogger._last_debug_messages.clear()
-
-
-# Используем цветной логгер
-info = ColorLogger.info
-success = ColorLogger.success
-error = ColorLogger.error
-warning = ColorLogger.warning
-debug = ColorLogger.debug
-data = ColorLogger.data
-money = ColorLogger.money
-chart = ColorLogger.chart
-separator = ColorLogger.separator
+# Загрузка переменных окружения
+from dotenv import load_dotenv
 
 load_dotenv()
 
-# Попытка импорта Yahoo Finance
+# Импорт Yahoo Finance
+YFINANCE_AVAILABLE = False
 try:
     import yfinance as yf
 
     YFINANCE_AVAILABLE = True
-    success("✅ Yahoo Finance модуль загружен")
+    logger.info("✅ Yahoo Finance module loaded")
 except ImportError:
-    YFINANCE_AVAILABLE = False
-    warning("⚠️ yfinance не установлен. Установите: pip install yfinance")
-    warning("   Фундаментальный анализ будет ограничен данными MOEX")
-
-MOSCOW_TZ = timezone(timedelta(hours=3))
+    logger.warning("⚠️ yfinance not installed. Install: pip install yfinance")
 
 
 @dataclass
 class FundamentalMetrics:
     """Фундаментальные метрики компании"""
     ticker: str
-    name: str
+    name: str = ""
 
     # Мультипликаторы
     pe_ratio: float = 0.0
-    ps_ratio: float = 0.0
     pb_ratio: float = 0.0
-    ev_ebitda: float = 0.0
-
-    # Рентабельность
     roe: float = 0.0
-    roa: float = 0.0
-    gross_margin: float = 0.0
-    net_margin: float = 0.0
-
-    # Рост
-    revenue_growth: float = 0.0
-    earnings_growth: float = 0.0
-    eps_growth: float = 0.0
-
-    # Долг и ликвидность
-    debt_to_equity: float = 0.0
-    current_ratio: float = 0.0
-    quick_ratio: float = 0.0
 
     # Дивиденды
     dividend_yield: float = 0.0
-    payout_ratio: float = 0.0
 
-    # Прочее
+    # Размер и ликвидность
     market_cap: float = 0.0
-    free_float: float = 0.0
-    beta: float = 1.0
     volume_today: float = 0.0
     value_today_rub: float = 0.0
 
+    # Долг
+    debt_to_equity: float = 0.0
+
+    # Рост
+    revenue_growth: float = 0.0
+
     # Источник данных
     data_source: str = "unknown"
-
     fetched_at: Optional[datetime] = None
-    is_stale: bool = False
 
-    # Кэшированные значения для предотвращения повторных вычислений
-    _cached_value_score: Optional[float] = None
-    _cached_quality_score: Optional[float] = None
-    _cached_safety_score: Optional[float] = None
-    _cached_liquidity_score: Optional[float] = None
-    _cached_overall_score: Optional[float] = None
+    # Кэш для вычислений
+    _scores_cache: Dict[str, float] = field(default_factory=dict)
 
-    def _reset_cache(self):
-        """Сброс кэша вычислений"""
-        self._cached_value_score = None
-        self._cached_quality_score = None
-        self._cached_safety_score = None
-        self._cached_liquidity_score = None
-        self._cached_overall_score = None
+    def _get_cached_score(self, name: str, calculator) -> float:
+        """Получение закэшированной оценки"""
+        if name in self._scores_cache:
+            return self._scores_cache[name]
+        score = calculator()
+        self._scores_cache[name] = score
+        return score
 
     @property
     def has_valid_data(self) -> bool:
-        has_pe = 0.1 < self.pe_ratio < 100
-        has_pb = 0.1 < self.pb_ratio < 20
-        has_roe = 0.1 < self.roe < 100
-        has_liquidity = self.value_today_rub > 1_000_000
-        has_cap = self.market_cap > 100_000_000
-        return has_pe or has_pb or has_roe or has_liquidity or has_cap
+        """Проверка наличия валидных данных"""
+        return (
+                (0.1 < self.pe_ratio < 100) or
+                (0.1 < self.pb_ratio < 20) or
+                (0.1 < self.roe < 100) or
+                self.value_today_rub > 1_000_000 or
+                self.market_cap > 100_000_000
+        )
 
     @property
     def value_score(self) -> float:
-        """Оценка стоимости (P/E, P/B) - с кэшированием"""
-        if self._cached_value_score is not None:
-            return self._cached_value_score
+        """Оценка стоимости на основе P/E и P/B"""
 
-        if self.pe_ratio == 0 and self.pb_ratio == 0:
-            self._cached_value_score = 50.0
-            return 50.0
+        def calculate():
+            if self.pe_ratio == 0 and self.pb_ratio == 0:
+                return 50.0
 
-        score = 50.0
-        if self.pe_ratio > 0:
-            if 0 < self.pe_ratio < 10:
-                score += 20
-            elif 10 <= self.pe_ratio < 15:
-                score += 10
-            elif 15 <= self.pe_ratio < 20:
-                score -= 5
-            elif self.pe_ratio >= 20:
-                score -= 15
-        if self.pb_ratio > 0:
-            if 0 < self.pb_ratio < 1:
-                score += 15
-            elif 1 <= self.pb_ratio < 2:
-                score += 5
-            elif self.pb_ratio > 3:
-                score -= 10
+            score = 50.0
 
-        self._cached_value_score = max(0, min(100, score))
-        return self._cached_value_score
+            # Оценка P/E
+            if self.pe_ratio > 0:
+                if self.pe_ratio < 10:
+                    score += 20
+                elif self.pe_ratio < 15:
+                    score += 10
+                elif self.pe_ratio < 20:
+                    score -= 5
+                else:
+                    score -= 15
+
+            # Оценка P/B
+            if self.pb_ratio > 0:
+                if self.pb_ratio < 1:
+                    score += 15
+                elif self.pb_ratio < 2:
+                    score += 5
+                elif self.pb_ratio > 3:
+                    score -= 10
+
+            return max(0, min(100, score))
+
+        return self._get_cached_score("value_score", calculate)
 
     @property
     def quality_score(self) -> float:
-        """Оценка качества (ROE, рост) - с кэшированием"""
-        if self._cached_quality_score is not None:
-            return self._cached_quality_score
+        """Оценка качества на основе ROE и роста"""
 
-        if self.roe == 0 and self.revenue_growth == 0:
-            self._cached_quality_score = 50.0
-            return 50.0
+        def calculate():
+            if self.roe == 0 and self.revenue_growth == 0:
+                return 50.0
 
-        score = 50.0
-        if self.roe > 0:
-            if self.roe > 25:
-                score += 20
-            elif self.roe > 15:
-                score += 10
-            elif 0 < self.roe < 5:
-                score -= 10
-        if self.revenue_growth != 0:
-            if self.revenue_growth > 20:
-                score += 15
-            elif self.revenue_growth > 10:
-                score += 8
-            elif self.revenue_growth < 0:
-                score -= 15
+            score = 50.0
 
-        self._cached_quality_score = max(0, min(100, score))
-        return self._cached_quality_score
+            # Оценка ROE
+            if self.roe > 0:
+                if self.roe > 25:
+                    score += 20
+                elif self.roe > 15:
+                    score += 10
+                elif self.roe < 5:
+                    score -= 10
+
+            # Оценка роста выручки
+            if self.revenue_growth != 0:
+                if self.revenue_growth > 20:
+                    score += 15
+                elif self.revenue_growth > 10:
+                    score += 8
+                elif self.revenue_growth < 0:
+                    score -= 15
+
+            return max(0, min(100, score))
+
+        return self._get_cached_score("quality_score", calculate)
 
     @property
     def safety_score(self) -> float:
-        """Оценка безопасности (долг) - с кэшированием"""
-        if self._cached_safety_score is not None:
-            return self._cached_safety_score
+        """Оценка безопасности на основе долговой нагрузки"""
 
-        if self.debt_to_equity == 0:
-            self._cached_safety_score = 50.0
-            return 50.0
+        def calculate():
+            if self.debt_to_equity == 0:
+                return 50.0
 
-        score = 50.0
-        if self.debt_to_equity < 0.5:
-            score += 20
-        elif self.debt_to_equity < 1:
-            score += 10
-        elif self.debt_to_equity > 2:
-            score -= 15
-        elif self.debt_to_equity > 3:
-            score -= 25
+            score = 50.0
 
-        self._cached_safety_score = max(0, min(100, score))
-        return self._cached_safety_score
+            if self.debt_to_equity < 0.5:
+                score += 20
+            elif self.debt_to_equity < 1:
+                score += 10
+            elif self.debt_to_equity > 2:
+                score -= 15
+            elif self.debt_to_equity > 3:
+                score -= 25
+
+            return max(0, min(100, score))
+
+        return self._get_cached_score("safety_score", calculate)
 
     @property
     def liquidity_score(self) -> float:
-        """Оценка ликвидности (оборот) - с кэшированием"""
-        if self._cached_liquidity_score is not None:
-            return self._cached_liquidity_score
+        """Оценка ликвидности на основе оборота"""
 
-        score = 50.0
-        if self.value_today_rub > 0:
-            if self.value_today_rub > 50_000_000:
-                score += 30
-            elif self.value_today_rub > 10_000_000:
-                score += 15
-            elif self.value_today_rub > 5_000_000:
-                score += 5
-            elif self.value_today_rub < 1_000_000:
-                score -= 20
+        def calculate():
+            score = 50.0
 
-        self._cached_liquidity_score = max(0, min(100, score))
-        return self._cached_liquidity_score
+            if self.value_today_rub > 0:
+                if self.value_today_rub > 50_000_000:
+                    score += 30
+                elif self.value_today_rub > 10_000_000:
+                    score += 15
+                elif self.value_today_rub > 5_000_000:
+                    score += 5
+                elif self.value_today_rub < 1_000_000:
+                    score -= 20
+
+            return max(0, min(100, score))
+
+        return self._get_cached_score("liquidity_score", calculate)
 
     @property
     def overall_score(self) -> float:
-        """Общая оценка - с кэшированием"""
-        if self._cached_overall_score is not None:
-            return self._cached_overall_score
+        """Общая фундаментальная оценка"""
 
-        # Временно включаем debug для одного прохода
-        old_debug_state = ColorLogger._debug_enabled
-        ColorLogger.set_debug_enabled(False)
-
-        try:
-            has_fundamental = (0.1 < self.pe_ratio < 100) or (0.1 < self.pb_ratio < 20) or (0.1 < self.roe < 100)
+        def calculate():
+            has_fundamental = (
+                    (0.1 < self.pe_ratio < 100) or
+                    (0.1 < self.pb_ratio < 20) or
+                    (0.1 < self.roe < 100)
+            )
 
             if has_fundamental:
-                score = (self.value_score * 0.30 +
-                         self.quality_score * 0.30 +
-                         self.safety_score * 0.25 +
-                         self.liquidity_score * 0.15)
+                score = (
+                        self.value_score * 0.30 +
+                        self.quality_score * 0.30 +
+                        self.safety_score * 0.25 +
+                        self.liquidity_score * 0.15
+                )
             else:
                 score = self.liquidity_score
                 if self.market_cap > 1_000_000_000_000:
@@ -384,16 +239,14 @@ class FundamentalMetrics:
                 elif self.market_cap > 100_000_000_000:
                     score += 5
 
-            self._cached_overall_score = max(0, min(100, score))
-        finally:
-            # Восстанавливаем состояние debug
-            ColorLogger.set_debug_enabled(old_debug_state)
+            return max(0, min(100, score))
 
-        return self._cached_overall_score
+        return self._get_cached_score("overall_score", calculate)
 
-    @property
-    def recommendation(self) -> Tuple[str, float]:
+    def get_recommendation(self) -> Tuple[str, float]:
+        """Получение рекомендации на основе общей оценки"""
         score = self.overall_score
+
         if score >= 70:
             return ("STRONG_BUY", score)
         elif score >= 55:
@@ -405,7 +258,40 @@ class FundamentalMetrics:
         else:
             return ("STRONG_SELL", score)
 
+    def get_reasons(self, action: str) -> List[str]:
+        """Генерация причин для действия"""
+        reasons = []
+
+        if action in ['STRONG_BUY', 'BUY']:
+            if 0 < self.pe_ratio < 10:
+                reasons.append(f"Low P/E ({self.pe_ratio:.1f})")
+            if 0 < self.pb_ratio < 1:
+                reasons.append(f"Discount to book (P/B={self.pb_ratio:.2f})")
+            if self.roe > 20:
+                reasons.append(f"High ROE ({self.roe:.1f}%)")
+            if self.dividend_yield > 5:
+                reasons.append(f"Good dividend ({self.dividend_yield:.1f}%)")
+            if self.value_today_rub > 50_000_000:
+                reasons.append(f"High liquidity")
+
+        elif action in ['STRONG_SELL', 'SELL']:
+            if self.pe_ratio > 20:
+                reasons.append(f"High P/E ({self.pe_ratio:.1f})")
+            if self.debt_to_equity > 2:
+                reasons.append(f"High debt (D/E={self.debt_to_equity:.1f})")
+            if 0 < self.roe < 5:
+                reasons.append(f"Low ROE ({self.roe:.1f}%)")
+            if 0 < self.value_today_rub < 5_000_000:
+                reasons.append(f"Low liquidity")
+
+        if not reasons:
+            reasons.append("Neutral fundamentals")
+
+        return reasons[:5]
+
     def to_dict(self) -> Dict[str, Any]:
+        """Конвертация в словарь"""
+        action, score = self.get_recommendation()
         return {
             'ticker': self.ticker,
             'name': self.name,
@@ -414,413 +300,226 @@ class FundamentalMetrics:
             'roe': self.roe,
             'dividend_yield': self.dividend_yield,
             'market_cap': self.market_cap,
-            'volume_today': self.volume_today,
             'value_today_rub': self.value_today_rub,
             'value_score': self.value_score,
             'quality_score': self.quality_score,
             'safety_score': self.safety_score,
             'liquidity_score': self.liquidity_score,
             'overall_score': self.overall_score,
-            'recommendation': self.recommendation[0],
+            'recommendation': action,
             'data_source': self.data_source,
             'fetched_at': self.fetched_at.isoformat() if self.fetched_at else None
         }
 
 
-@dataclass
-class FundamentalSignal:
-    ticker: str
-    action: str
-    confidence: float
-    metrics: FundamentalMetrics
-    impact_on_score: int
-    reasons: List[str]
-    timestamp: datetime = field(default_factory=get_moscow_time)
-
-
 class FundamentalAnalyzer:
-    """Фундаментальный анализатор для Render"""
+    """Фундаментальный анализатор"""
 
-    _cache: Dict[str, Tuple[FundamentalMetrics, datetime]] = {}
-    _cache_ttl = timedelta(hours=12)
-
-    SCORE_IMPACT = {
-        'STRONG_BUY': 5,
-        'BUY': 3,
-        'HOLD': 0,
-        'SELL': -3,
-        'STRONG_SELL': -5,
-    }
-
-    def __init__(self, enable_cache: bool = True, cache_ttl_hours: int = 12, debug_mode: bool = False):
+    def __init__(
+            self,
+            enable_cache: bool = True,
+            cache_ttl_hours: int = 12,
+            debug_mode: bool = False
+    ):
         self.enable_cache = enable_cache
         self.enabled = True
-        self._cache_ttl = timedelta(hours=cache_ttl_hours)
+        self.cache_ttl = timedelta(hours=cache_ttl_hours)
+        self.cache: Dict[str, Tuple[FundamentalMetrics, datetime]] = {}
 
-        ColorLogger.set_debug_enabled(debug_mode)
-
-        if USE_UNIFIED_CACHE:
-            self._unified_cache = UnifiedCache(default_ttl=3600, name="fundamental_analyzer")
-
+        # Статистика
         self.stats = {
             'total_requests': 0,
             'cache_hits': 0,
             'cache_misses': 0,
             'api_errors': 0,
-            'moex_errors': 0,
             'yahoo_hits': 0,
             'last_update': None
         }
 
-        separator()
-        success("🚀 FundamentalAnalyzer инициализирован для Render")
-        info(f"   📦 Кэш: {'включен' if enable_cache else 'выключен'}, TTL: {cache_ttl_hours}ч")
-        info(f"   🔗 Источник 1: MOEX ISS API (рыночные данные)")
-        info(f"   🔗 Источник 2: Yahoo Finance (мультипликаторы P/E, P/B, ROE)")
-        info(f"   📊 Статус: {'✅ ВКЛЮЧЁН' if self.enabled else '❌ ВЫКЛЮЧЁН'}")
-        info(f"   🐛 Debug режим: {'✅ ВКЛЮЧЁН' if debug_mode else '❌ ВЫКЛЮЧЁН'}")
-        if YFINANCE_AVAILABLE:
-            success(f"   ✅ Yahoo Finance доступен")
-        else:
-            warning(f"   ⚠️ Yahoo Finance НЕ ДОСТУПЕН - мультипликаторы будут из MOEX")
-        separator()
+        # Rate limiter для Yahoo
+        self.yahoo_rate_limiter = asyncio.Semaphore(1)
+        self.last_yahoo_request = 0
+        self.yahoo_min_interval = 4.0  # 15 запросов в минуту
 
-    def update_from_settings(self, enabled: bool = None):
-        if enabled is not None:
-            self.enabled = enabled
-            if self.enabled:
-                success(f"📊 FundamentalAnalyzer ВКЛЮЧЁН")
-            else:
-                warning(f"📊 FundamentalAnalyzer ВЫКЛЮЧЁН")
+        self._log_init()
+
+    def _log_init(self):
+        """Логирование инициализации"""
+        logger.info("=" * 60)
+        logger.info("🚀 FundamentalAnalyzer initialized for Render")
+        logger.info(
+            f"   📦 Cache: {'enabled' if self.enable_cache else 'disabled'}, TTL: {self.cache_ttl.total_seconds() / 3600:.0f}h")
+        logger.info(f"   📊 Status: {'ENABLED' if self.enabled else 'DISABLED'}")
+        logger.info(f"   📈 Yahoo Finance: {'available' if YFINANCE_AVAILABLE else 'not available'}")
+        logger.info("=" * 60)
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Включение/выключение анализатора"""
+        self.enabled = enabled
+        status = "ENABLED" if enabled else "DISABLED"
+        logger.info(f"📊 FundamentalAnalyzer {status}")
+
+    def is_enabled(self) -> bool:
+        """Проверка, включен ли анализатор"""
         return self.enabled
 
+    async def _wait_for_yahoo_rate_limit(self) -> None:
+        """Ожидание для соблюдения rate limit Yahoo"""
+        async with self.yahoo_rate_limiter:
+            now = time.time()
+            elapsed = now - self.last_yahoo_request
+            if elapsed < self.yahoo_min_interval:
+                wait_time = self.yahoo_min_interval - elapsed
+                await asyncio.sleep(wait_time)
+            self.last_yahoo_request = time.time()
+
     async def fetch_metrics(self, ticker: str, force_refresh: bool = False) -> Optional[FundamentalMetrics]:
+        """
+        Получение фундаментальных метрик для тикера
+
+        Args:
+            ticker: Тикер акции
+            force_refresh: Принудительное обновление кэша
+
+        Returns:
+            FundamentalMetrics или None
+        """
         if not self.enabled:
-            debug(f"⏸️ FundamentalAnalyzer выключен, пропускаем {ticker}")
             return None
 
         ticker = ticker.upper()
         now = get_moscow_time()
 
-        if force_refresh and ticker in self._cache:
-            del self._cache[ticker]
-            debug(f"🔄 Принудительное обновление для {ticker}")
-
-        if self.enable_cache and not force_refresh and ticker in self._cache:
-            metrics, timestamp = self._cache[ticker]
+        # Проверка кэша
+        if not force_refresh and self.enable_cache and ticker in self.cache:
+            metrics, timestamp = self.cache[ticker]
             cache_age = (now - timestamp).total_seconds()
-            if cache_age < self._cache_ttl.total_seconds():
+
+            if cache_age < self.cache_ttl.total_seconds():
                 if metrics.has_valid_data:
                     self.stats['cache_hits'] += 1
-                    age_hours = cache_age // 3600
-                    debug(f"📦 Кэш для {ticker} (возраст: {age_hours:.0f}ч, источник: {metrics.data_source})")
+                    logger.debug(f"📦 Cache hit for {ticker}")
                     return metrics
                 else:
-                    del self._cache[ticker]
-                    debug(f"🗑️ Кэш для {ticker} содержит невалидные данные, удалён")
+                    del self.cache[ticker]
 
         self.stats['cache_misses'] += 1
         self.stats['total_requests'] += 1
 
-        start_time = time.time()
-
+        # Получение данных
         try:
-            metrics = await self._fetch_combined_data(ticker)
-            elapsed = time.time() - start_time
-            if elapsed > 15.0:
-                debug(f"🐌 Медленный запрос для {ticker}: {elapsed:.2f}с")
+            metrics = await self._fetch_all_data(ticker)
         except Exception as e:
             self.stats['api_errors'] += 1
-            error(f"❌ Ошибка получения данных для {ticker}: {e}")
+            logger.error(f"❌ Failed to fetch data for {ticker}: {e}")
             return None
 
+        # Сохранение в кэш
         if metrics and metrics.has_valid_data and self.enable_cache:
-            MAX_CACHE_SIZE = 500
-            if len(self._cache) >= MAX_CACHE_SIZE:
-                oldest_key = next(iter(self._cache))
-                del self._cache[oldest_key]
-                debug(f"🗑️ Кэш достиг лимита {MAX_CACHE_SIZE}, удалена запись {oldest_key}")
+            if len(self.cache) >= 500:
+                oldest = next(iter(self.cache))
+                del self.cache[oldest]
 
-            metrics._reset_cache()
-            self._cache[ticker] = (metrics, now)
+            self.cache[ticker] = (metrics, now)
             self.stats['last_update'] = now
-            debug(f"💾 Данные для {ticker} сохранены в кэш (источник: {metrics.data_source})")
+            logger.debug(f"💾 Cached data for {ticker}")
 
         return metrics
 
-    async def _fetch_combined_data(self, ticker: str) -> Optional[FundamentalMetrics]:
+    async def _fetch_all_data(self, ticker: str) -> Optional[FundamentalMetrics]:
+        """Сбор данных из всех источников"""
         ticker_upper = ticker.upper()
-        debug(f"🔍 СБОР ДАННЫХ ДЛЯ {ticker_upper}")
-        debug(f"   {'─' * 40}")
-        metrics = FundamentalMetrics(ticker=ticker_upper, name=ticker_upper)
+        metrics = FundamentalMetrics(ticker=ticker_upper)
 
-        debug(f"   📡 1/3: MOEX ISS API (рыночные данные)...")
-        await self._fetch_market_data(ticker, metrics)
+        # 1. Рыночные данные из MOEX
+        await self._fetch_moex_market_data(ticker, metrics)
 
-        debug(f"   📡 2/3: MOEX ISS API (мультипликаторы)...")
+        # 2. Статистика из MOEX (P/E, P/B, ROE)
         await self._fetch_moex_statistics(ticker_upper, metrics)
-        await self._fetch_moex_board_securities(ticker_upper, metrics)
-        await self._fetch_moex_analytics(ticker_upper, metrics)
-        await self._fetch_moex_fundamental(ticker_upper, metrics)
 
-        has_moex_data = ((0.1 < metrics.pe_ratio < 100) or
-                         (0.1 < metrics.pb_ratio < 20) or
-                         (0.1 < metrics.roe < 100))
-
-        if has_moex_data:
-            metrics.data_source = "MOEX"
-            debug(f"   ✅ MOEX предоставил мультипликаторы")
+        # 3. Если нет данных из MOEX, пробуем Yahoo Finance
+        has_moex_data = (
+                (0.1 < metrics.pe_ratio < 100) or
+                (0.1 < metrics.pb_ratio < 20) or
+                (0.1 < metrics.roe < 100)
+        )
 
         if not has_moex_data and YFINANCE_AVAILABLE:
-            debug(f"   🌐 3/3: Yahoo Finance (мультипликаторы)...")
-            yahoo_data = await self._fetch_from_yahoo(ticker_upper)
-
+            yahoo_data = await self._fetch_yahoo_data(ticker_upper)
             if yahoo_data:
                 self.stats['yahoo_hits'] += 1
                 metrics.data_source = "Yahoo Finance"
+                metrics.pe_ratio = yahoo_data.get('pe', metrics.pe_ratio)
+                metrics.pb_ratio = yahoo_data.get('pb', metrics.pb_ratio)
+                metrics.roe = yahoo_data.get('roe', metrics.roe)
+                metrics.dividend_yield = yahoo_data.get('dividend_yield', metrics.dividend_yield)
+                metrics.market_cap = yahoo_data.get('market_cap', metrics.market_cap)
+        elif has_moex_data:
+            metrics.data_source = "MOEX"
 
-                if yahoo_data.get('pe'):
-                    metrics.pe_ratio = yahoo_data['pe']
-                if yahoo_data.get('pb'):
-                    metrics.pb_ratio = yahoo_data['pb']
-                if yahoo_data.get('roe'):
-                    metrics.roe = yahoo_data['roe']
-                if yahoo_data.get('dividend_yield'):
-                    metrics.dividend_yield = yahoo_data['dividend_yield']
-                if yahoo_data.get('market_cap'):
-                    metrics.market_cap = yahoo_data['market_cap']
-                if yahoo_data.get('revenue_growth'):
-                    metrics.revenue_growth = yahoo_data['revenue_growth']
-                if yahoo_data.get('debt_to_equity'):
-                    metrics.debt_to_equity = yahoo_data['debt_to_equity']
-
-                success(f"   ✅ Yahoo Finance предоставил мультипликаторы для {ticker_upper}")
-            else:
-                debug(f"   ⚠️ Yahoo Finance не вернул данных для {ticker_upper}")
-        elif not has_moex_data and not YFINANCE_AVAILABLE:
-            debug(f"   ⚠️ Yahoo Finance не доступен, используем только MOEX данные")
-
-        await self._fetch_dividend_data(ticker, metrics)
         metrics.fetched_at = get_moscow_time()
 
-        if metrics.pe_ratio > 0 or metrics.pb_ratio > 0 or metrics.roe > 0:
-            info(f"   📊 МУЛЬТИПЛИКАТОРЫ {ticker_upper}:")
-            if metrics.pe_ratio > 0:
-                info(f"      P/E: {metrics.pe_ratio:.2f}")
-            if metrics.pb_ratio > 0:
-                info(f"      P/B: {metrics.pb_ratio:.2f}")
-            if metrics.roe > 0:
-                info(f"      ROE: {metrics.roe:.1f}%")
-            if metrics.dividend_yield > 0:
-                info(f"      Дивиденды: {metrics.dividend_yield:.2f}%")
-            info(f"   📊 ИТОГОВЫЙ ФУНДАМЕНТАЛЬНЫЙ SCORE: {metrics.overall_score:.0f} ({metrics.recommendation[0]})")
-
-        has_valid = metrics.has_valid_data
-        if has_valid:
-            debug(f"   ✅ ИТОГО: данные получены из {metrics.data_source}")
-            self._log_metrics(ticker, metrics)
+        if metrics.has_valid_data:
+            self._log_metrics(metrics)
             return metrics
-        else:
-            debug(f"   ❌ Нет валидных данных для {ticker_upper}")
-            debug(f"      P/E={metrics.pe_ratio}, P/B={metrics.pb_ratio}, ROE={metrics.roe}")
-            return None
 
-    
-    async def _fetch_from_yahoo(self, ticker: str) -> Optional[Dict]:
-        """Получение фундаментальных данных из Yahoo Finance с повторными попытками"""
-        if not YFINANCE_AVAILABLE:
-            debug(f"      ⚠️ Yahoo Finance не доступен")
-            return None
-
-        if ticker.endswith('.ME'):
-            yf_ticker = ticker
-        else:
-            yf_ticker = f"{ticker}.ME"
-
-        debug(f"      📡 Запрос к Yahoo: {yf_ticker}")
-        start_time = time.time()
-
-        max_retries = 3
-        base_delay = 2.0
-
-        for attempt in range(max_retries):
-            try:
-                await _yahoo_rate_limiter.acquire()
-
-                async with asyncio.timeout(45):
-                    debug(f"      ⏳ Попытка {attempt + 1}/{max_retries} (таймаут 45с)...")
-
-                    # Запускаем синхронный yfinance в отдельном потоке
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        result = await loop.run_in_executor(None, self._get_yahoo_data, ticker)
-                        elapsed = time.time() - start_time
-
-                        if result:
-                            debug(f"      ✅ Yahoo вернул {len(result)} показателей за {elapsed:.1f}с")
-                            return result
-                        else:
-                            if attempt < max_retries - 1:
-                                delay = base_delay * (attempt + 1)
-                                debug(f"      ⚠️ Попытка {attempt + 1}/{max_retries} не удалась (нет данных), повтор через {delay:.1f}с...")
-                                await asyncio.sleep(delay)
-                            else:
-                                debug(f"      ⚠️ Yahoo не вернул мультипликаторов после {max_retries} попыток (всего {elapsed:.1f}с)")
-                                return None
-                    finally:
-                        loop.close()
-
-            except asyncio.TimeoutError:
-                elapsed = time.time() - start_time
-                debug(f"      ⏰ ТАЙМАУТ Yahoo Finance для {ticker} (45с), попытка {attempt + 1}/{max_retries}, прошло {elapsed:.1f}с")
-                if attempt < max_retries - 1:
-                    delay = base_delay * (attempt + 1)
-                    debug(f"      🔄 Повтор через {delay:.1f}с...")
-                    await asyncio.sleep(delay)
-                else:
-                    debug(f"      ❌ Yahoo Finance не ответил после {max_retries} попыток")
-                    return None
-
-            except Exception as e:
-                error_msg = str(e)
-                elapsed = time.time() - start_time
-                if "Rate limited" in error_msg or "Too Many Requests" in error_msg:
-                    debug(f"      ⏰ Rate limit Yahoo, попытка {attempt + 1}/{max_retries}, прошло {elapsed:.1f}с")
-                    if attempt < max_retries - 1:
-                        delay = base_delay * (attempt + 1) * 2
-                        debug(f"      🔄 Повтор через {delay:.1f}с...")
-                        await asyncio.sleep(delay)
-                    else:
-                        debug(f"      ❌ Yahoo Finance rate limit после {max_retries} попыток")
-                        return None
-                else:
-                    debug(f"      ❌ Yahoo Finance ошибка: {error_msg[:100]}, попытка {attempt + 1}/{max_retries}")
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(base_delay)
-                    else:
-                        return None
-
+        logger.debug(f"⚠️ No valid data for {ticker_upper}")
         return None
 
-    def _get_yahoo_data(self, ticker: str) -> Optional[Dict]:
-        """Синхронное получение данных из Yahoo (выполняется в потоке)"""
-        try:
-            if ticker.endswith('.ME'):
-                yf_ticker = ticker
-            else:
-                yf_ticker = f"{ticker}.ME"
-            stock = yf.Ticker(yf_ticker)
-            info_data = stock.info
-
-            if not info_data or not isinstance(info_data, dict):
-                debug(f"⚠️ Yahoo Finance вернул пустые данные для {ticker}")
-                return None
-
-            result = {}
-
-            pe = info_data.get('trailingPE') or info_data.get('forwardPE')
-            if pe and 0.1 < pe < 100:
-                result['pe'] = pe
-
-            pb = info_data.get('priceToBook')
-            if pb and 0.1 < pb < 20:
-                result['pb'] = pb
-
-            roe = info_data.get('returnOnEquity')
-            if roe:
-                roe = roe * 100
-                if 0.1 < roe < 100:
-                    result['roe'] = roe
-
-            div_yield = info_data.get('dividendYield')
-            if div_yield:
-                div_yield = div_yield * 100
-                if 0.1 < div_yield < 50:
-                    result['dividend_yield'] = div_yield
-
-            market_cap = info_data.get('marketCap')
-            if market_cap:
-                result['market_cap'] = market_cap
-
-            rev_growth = info_data.get('revenueGrowth')
-            if rev_growth:
-                result['revenue_growth'] = rev_growth * 100
-
-            debt_eq = info_data.get('debtToEquity')
-            if debt_eq:
-                result['debt_to_equity'] = debt_eq / 100
-
-            return result if result else None
-
-        except Exception as e:
-            debug(f"      ❌ Yahoo Finance синхронная ошибка: {e}")
-            return None
-
-    async def _fetch_market_data(self, ticker: str, metrics: FundamentalMetrics):
+    async def _fetch_moex_market_data(self, ticker: str, metrics: FundamentalMetrics) -> None:
+        """Получение рыночных данных из MOEX"""
         try:
             url = f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/{ticker}.json"
-            params = {"iss.meta": "off", "iss.only": "marketdata,securities"}
+            params = {"iss.meta": "off", "iss.only": "marketdata"}
 
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params, timeout=30) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if 'marketdata' in data:
-                            md = data['marketdata']
-                            cols = md.get('columns', [])
-                            rows = md.get('data', [])
-                            if rows:
-                                row = rows[0]
-                                for i, col in enumerate(cols):
-                                    if i >= len(row):
-                                        continue
-                                    val = row[i]
-                                    if not val or val == 'null':
-                                        continue
+                async with session.get(url, params=params, timeout=30) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        marketdata = data.get('marketdata', {})
+                        columns = marketdata.get('columns', [])
+                        rows = marketdata.get('data', [])
+
+                        if rows:
+                            row = rows[0]
+                            for idx, col in enumerate(columns):
+                                if idx >= len(row):
+                                    continue
+                                value = row[idx]
+                                if value and value != 'null':
                                     try:
-                                        v = float(val)
+                                        val = float(value)
                                         if col == 'VOLTODAY':
-                                            metrics.volume_today = v
+                                            metrics.volume_today = val
                                         elif col == 'VALTODAY_RUR':
-                                            metrics.value_today_rub = v
+                                            metrics.value_today_rub = val
                                         elif col == 'ISSUECAPITALIZATION':
-                                            metrics.market_cap = v
+                                            metrics.market_cap = val
                                     except (ValueError, TypeError):
                                         pass
-
-                        if 'securities' in data:
-                            sec = data['securities']
-                            cols = sec.get('columns', [])
-                            rows = sec.get('data', [])
-                            if rows:
-                                row = rows[0]
-                                for i, col in enumerate(cols):
-                                    if col in ('SHORTNAME', 'SECNAME') and i < len(row):
-                                        if row[i]:
-                                            metrics.name = str(row[i])
-                                            break
         except Exception as e:
-            debug(f"   ⚠️ Ошибка получения market data: {e}")
+            logger.debug(f"MOEX market data error for {ticker}: {e}")
 
-    async def _fetch_moex_statistics(self, ticker: str, metrics: FundamentalMetrics):
+    async def _fetch_moex_statistics(self, ticker: str, metrics: FundamentalMetrics) -> None:
+        """Получение статистики из MOEX"""
         try:
             url = f"https://iss.moex.com/iss/statistics/engines/stock/markets/shares/securities/{ticker}.json"
+
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=30) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if 'statistics' in data:
-                            columns = data['statistics'].get('columns', [])
-                            rows = data['statistics'].get('data', [])
-                            if rows:
-                                row = rows[0]
-                                for i, col in enumerate(columns):
-                                    if i >= len(row):
-                                        continue
-                                    value = row[i]
-                                    if not value or value == 'null':
-                                        continue
+                async with session.get(url, timeout=30) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        statistics = data.get('statistics', {})
+                        columns = statistics.get('columns', [])
+                        rows = statistics.get('data', [])
+
+                        if rows:
+                            row = rows[0]
+                            for idx, col in enumerate(columns):
+                                if idx >= len(row):
+                                    continue
+                                value = row[idx]
+                                if value and value != 'null':
                                     try:
                                         val = float(value)
                                         if col == 'PE' and val > 0 and metrics.pe_ratio == 0:
@@ -832,341 +531,193 @@ class FundamentalAnalyzer:
                                         elif col == 'DIV_YIELD' and val > 0 and metrics.dividend_yield == 0:
                                             metrics.dividend_yield = val
                                     except (ValueError, TypeError):
-                                        continue
+                                        pass
         except Exception as e:
-            debug(f"   ⚠️ Ошибка statistics: {e}")
+            logger.debug(f"MOEX statistics error for {ticker}: {e}")
 
-    async def _fetch_moex_board_securities(self, ticker: str, metrics: FundamentalMetrics):
+    async def _fetch_yahoo_data(self, ticker: str) -> Optional[Dict[str, float]]:
+        """Получение данных из Yahoo Finance"""
+        await self._wait_for_yahoo_rate_limit()
+
+        yf_ticker = f"{ticker}.ME" if not ticker.endswith('.ME') else ticker
+
         try:
-            boards = ['TQBR', 'TQTD', 'TQTF']
-            for board in boards:
-                url = f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/{board}/securities/{ticker}.json"
-                params = {"iss.meta": "off", "iss.only": "securities"}
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(url, params=params, timeout=30) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            if 'securities' in data:
-                                columns = data['securities'].get('columns', [])
-                                rows = data['securities'].get('data', [])
-                                if rows:
-                                    row = rows[0]
-                                    for i, col in enumerate(columns):
-                                        if i >= len(row):
-                                            continue
-                                        value = row[i]
-                                        if not value or value == 'null':
-                                            continue
-                                        try:
-                                            val = float(value)
-                                            if col in ('PE', 'P/E', 'PE_RATIO') and metrics.pe_ratio == 0:
-                                                if 0.1 < val < 100:
-                                                    metrics.pe_ratio = val
-                                            elif col in ('PB', 'P/B', 'PB_RATIO') and metrics.pb_ratio == 0:
-                                                if 0.1 < val < 20:
-                                                    metrics.pb_ratio = val
-                                            elif col in ('ROE', 'RETURN_ON_EQUITY') and metrics.roe == 0:
-                                                if 0.1 < val < 100:
-                                                    metrics.roe = val
-                                            elif col in ('DIV_YIELD', 'YIELD') and metrics.dividend_yield == 0:
-                                                if 0.1 < val < 50:
-                                                    metrics.dividend_yield = val
-                                        except (ValueError, TypeError):
-                                            continue
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, self._get_yahoo_data_sync, yf_ticker)
+            return result
         except Exception as e:
-            debug(f"   ⚠️ Ошибка board_securities: {e}")
-
-    async def _fetch_moex_analytics(self, ticker: str, metrics: FundamentalMetrics):
-        try:
-            url = f"https://iss.moex.com/iss/statistics/engines/stock/markets/shares/securities/{ticker}/analytics.json"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=30) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if 'analytics' in data:
-                            columns = data['analytics'].get('columns', [])
-                            rows = data['analytics'].get('data', [])
-                            if rows:
-                                row = rows[0]
-                                for i, col in enumerate(columns):
-                                    if i >= len(row):
-                                        continue
-                                    value = row[i]
-                                    if not value or value == 'null':
-                                        continue
-                                    try:
-                                        val = float(value)
-                                        if col == 'pe_ratio' and metrics.pe_ratio == 0:
-                                            if 0.1 < val < 100:
-                                                metrics.pe_ratio = val
-                                        elif col == 'pb_ratio' and metrics.pb_ratio == 0:
-                                            if 0.1 < val < 20:
-                                                metrics.pb_ratio = val
-                                        elif col == 'roe' and metrics.roe == 0:
-                                            if 0.1 < val < 100:
-                                                metrics.roe = val
-                                    except (ValueError, TypeError):
-                                        continue
-        except Exception as e:
-            debug(f"   ⚠️ Ошибка analytics: {e}")
-
-    async def _fetch_moex_fundamental(self, ticker: str, metrics: FundamentalMetrics):
-        try:
-            url = f"https://iss.moex.com/iss/statistics/engines/stock/markets/shares/fundamental.json"
-            params = {"securities": ticker, "iss.meta": "off", "limit": 1}
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params, timeout=30) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if 'fundamental' in data:
-                            columns = data['fundamental'].get('columns', [])
-                            rows = data['fundamental'].get('data', [])
-                            if rows:
-                                row = rows[0]
-                                for i, col in enumerate(columns):
-                                    if i >= len(row):
-                                        continue
-                                    value = row[i]
-                                    if not value or value == 'null':
-                                        continue
-                                    try:
-                                        val = float(value)
-                                        if 'pe' in col.lower() and metrics.pe_ratio == 0:
-                                            if 0.1 < val < 100:
-                                                metrics.pe_ratio = val
-                                        elif 'pb' in col.lower() and metrics.pb_ratio == 0:
-                                            if 0.1 < val < 20:
-                                                metrics.pb_ratio = val
-                                        elif 'roe' in col.lower() and metrics.roe == 0:
-                                            if 0.1 < val < 100:
-                                                metrics.roe = val
-                                    except (ValueError, TypeError):
-                                        continue
-        except Exception as e:
-            debug(f"   ⚠️ Ошибка fundamental: {e}")
-
-    async def _fetch_dividend_data(self, ticker: str, metrics: FundamentalMetrics):
-        try:
-            url = f"https://iss.moex.com/iss/statistics/engines/stock/markets/shares/dividends.json"
-            params = {"security": ticker, "limit": 1, "iss.meta": "off"}
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params, timeout=30) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if 'dividends' in data:
-                            columns = data['dividends'].get('columns', [])
-                            rows = data['dividends'].get('data', [])
-                            if rows:
-                                row = rows[0]
-                                for i, col in enumerate(columns):
-                                    if i >= len(row):
-                                        continue
-                                    val = row[i]
-                                    if not val or val == 'null':
-                                        continue
-                                    try:
-                                        v = float(val)
-                                        if col == 'yield_value' and v > 0 and metrics.dividend_yield == 0:
-                                            metrics.dividend_yield = v
-                                    except (ValueError, TypeError):
-                                        continue
-        except Exception as e:
-            debug(f"   ⚠️ Ошибка получения dividend data: {e}")
-
-    def _log_metrics(self, ticker: str, metrics: FundamentalMetrics):
-        """Вывод метрик без дублирования"""
-        print()
-        separator("-", 50)
-        success(f"📊 ФУНДАМЕНТАЛЬНЫЕ ДАННЫЕ {ticker}:")
-        if metrics.data_source:
-            info(f"   🔗 Источник: {metrics.data_source}")
-        if metrics.name and metrics.name != ticker:
-            info(f"   🏢 Компания: {metrics.name}")
-
-        has_multi = False
-        if metrics.pe_ratio > 0:
-            info(f"   📊 P/E: {metrics.pe_ratio:.2f}")
-            has_multi = True
-        if metrics.pb_ratio > 0:
-            info(f"   📊 P/B: {metrics.pb_ratio:.2f}")
-            has_multi = True
-        if metrics.roe > 0:
-            info(f"   📊 ROE: {metrics.roe:.1f}%")
-            has_multi = True
-        if metrics.ev_ebitda > 0:
-            info(f"   📊 EV/EBITDA: {metrics.ev_ebitda:.2f}")
-            has_multi = True
-        if not has_multi:
-            info(f"   📊 Мультипликаторы: нет данных")
-
-        if metrics.dividend_yield > 0:
-            money(f"   💰 Дивиденды: {metrics.dividend_yield:.2f}%")
-        if metrics.value_today_rub > 0:
-            money(f"   💰 Оборот: {metrics.value_today_rub / 1_000_000:.1f} млн ₽")
-        if metrics.market_cap > 0:
-            money(f"   💰 Капитализация: {metrics.market_cap / 1e9:.1f} млрд ₽")
-
-        print()
-        info(f"   📈 ОЦЕНКИ (0-100):")
-        chart(f"      Value (стоимость):   {metrics.value_score:.0f}")
-        chart(f"      Quality (качество):  {metrics.quality_score:.0f}")
-        chart(f"      Safety (безопасность): {metrics.safety_score:.0f}")
-        chart(f"      Liquidity (ликвидность): {metrics.liquidity_score:.0f}")
-        chart(f"      {'─' * 35}")
-
-        overall = metrics.overall_score
-        if overall >= 70:
-            success(f"      ИТОГОВЫЙ SCORE: {overall:.0f} 🔥")
-        elif overall >= 55:
-            success(f"      ИТОГОВЫЙ SCORE: {overall:.0f} ✅")
-        elif overall >= 40:
-            info(f"      ИТОГОВЫЙ SCORE: {overall:.0f} ⏸️")
-        else:
-            error(f"      ИТОГОВЫЙ SCORE: {overall:.0f} ❌")
-
-        action, _ = metrics.recommendation
-        if action in ['STRONG_BUY', 'BUY']:
-            success(f"   🎯 Рекомендация: {action}")
-        elif action in ['STRONG_SELL', 'SELL']:
-            error(f"   🎯 Рекомендация: {action}")
-        else:
-            info(f"   🎯 Рекомендация: {action}")
-        separator("-", 50)
-
-    async def analyze(self, ticker: str, technical_score: int = 0, force_refresh: bool = False) -> Optional[FundamentalSignal]:
-        if not self.enabled:
+            logger.debug(f"Yahoo Finance error for {ticker}: {e}")
             return None
+
+    def _get_yahoo_data_sync(self, yf_ticker: str) -> Optional[Dict[str, float]]:
+        """Синхронное получение данных из Yahoo"""
         try:
-            debug(f"🔬 Начало фундаментального анализа для {ticker}...")
-            metrics = await self.fetch_metrics(ticker, force_refresh=force_refresh)
-            if not metrics:
-                debug(f"⚠️ Нет валидных данных для {ticker}")
+            stock = yf.Ticker(yf_ticker)
+            info = stock.info
+
+            if not info:
                 return None
-            action, confidence = metrics.recommendation
-            reasons = self._generate_reasons(metrics, action)
-            impact = self.SCORE_IMPACT.get(action, 0)
-            signal = FundamentalSignal(
-                ticker=ticker,
-                action=action,
-                confidence=confidence / 100,
-                metrics=metrics,
-                impact_on_score=impact,
-                reasons=reasons
-            )
-            return signal
+
+            result = {}
+
+            pe = info.get('trailingPE') or info.get('forwardPE')
+            if pe and 0.1 < pe < 100:
+                result['pe'] = pe
+
+            pb = info.get('priceToBook')
+            if pb and 0.1 < pb < 20:
+                result['pb'] = pb
+
+            roe = info.get('returnOnEquity')
+            if roe:
+                roe_val = roe * 100
+                if 0.1 < roe_val < 100:
+                    result['roe'] = roe_val
+
+            div_yield = info.get('dividendYield')
+            if div_yield:
+                div_yield_val = div_yield * 100
+                if 0.1 < div_yield_val < 50:
+                    result['dividend_yield'] = div_yield_val
+
+            market_cap = info.get('marketCap')
+            if market_cap:
+                result['market_cap'] = market_cap
+
+            return result if result else None
+
         except Exception as e:
-            error(f"❌ Ошибка анализа {ticker}: {e}")
+            logger.debug(f"Yahoo sync error: {e}")
             return None
 
-    def _generate_reasons(self, metrics: FundamentalMetrics, action: str) -> List[str]:
-        reasons = []
-        if action in ['STRONG_BUY', 'BUY']:
-            if metrics.pe_ratio > 0 and metrics.pe_ratio < 10:
-                reasons.append(f"Низкий P/E ({metrics.pe_ratio:.1f})")
-            if metrics.pb_ratio > 0 and metrics.pb_ratio < 1:
-                reasons.append(f"Дисконт к балансу (P/B={metrics.pb_ratio:.2f})")
-            if metrics.roe > 20:
-                reasons.append(f"Высокая рентабельность (ROE={metrics.roe:.1f}%)")
-            if metrics.dividend_yield > 5:
-                reasons.append(f"Высокая дивидендная доходность ({metrics.dividend_yield:.1f}%)")
-            if metrics.value_today_rub > 50_000_000:
-                reasons.append(f"Высокая ликвидность (оборот {metrics.value_today_rub / 1_000_000:.0f} млн ₽)")
-        elif action in ['STRONG_SELL', 'SELL']:
-            if metrics.pe_ratio > 20:
-                reasons.append(f"Высокий P/E ({metrics.pe_ratio:.1f})")
-            if metrics.debt_to_equity > 2:
-                reasons.append(f"Высокая долговая нагрузка (D/E={metrics.debt_to_equity:.1f})")
-            if 0 < metrics.roe < 5:
-                reasons.append(f"Низкая рентабельность (ROE={metrics.roe:.1f}%)")
-            if 0 < metrics.value_today_rub < 5_000_000:
-                reasons.append(f"Низкая ликвидность (оборот {metrics.value_today_rub / 1_000_000:.1f} млн ₽)")
-        if not reasons:
-            reasons.append("Нейтральные показатели")
-        return reasons[:5]
+    def _log_metrics(self, metrics: FundamentalMetrics) -> None:
+        """Логирование метрик"""
+        action, score = metrics.get_recommendation()
 
-    async def enhance_technical_signal(
-            self, ticker: str, technical_score: int, technical_signals: List[str]
+        if metrics.pe_ratio > 0 or metrics.pb_ratio > 0 or metrics.roe > 0:
+            logger.info(
+                f"📊 {metrics.ticker}: P/E={metrics.pe_ratio:.2f}, P/B={metrics.pb_ratio:.2f}, ROE={metrics.roe:.1f}%")
+            logger.info(f"   Score: {metrics.overall_score:.0f} ({action}) | Source: {metrics.data_source}")
+
+    async def get_trading_signal(
+            self,
+            ticker: str,
+            technical_score: int,
+            technical_signals: List[str]
     ) -> Tuple[int, List[str], Dict[str, Any]]:
+        """
+        Получение торгового сигнала с учетом фундаментального анализа
+
+        Args:
+            ticker: Тикер акции
+            technical_score: Технический score (от -10 до 10)
+            technical_signals: Список технических сигналов
+
+        Returns:
+            (new_score, updated_signals, fundamental_data)
+        """
         if not self.enabled:
-            debug(f"⏸️ FundamentalAnalyzer выключен для {ticker}")
             return technical_score, technical_signals, {}
 
-        fund_signal = await self.analyze(ticker, technical_score, force_refresh=True)
+        metrics = await self.fetch_metrics(ticker)
 
-        if not fund_signal:
-            debug(f"⚠️ Нет фундаментального сигнала для {ticker}")
+        if not metrics:
             return technical_score, technical_signals, {}
 
-        if technical_score > 0:
-            new_score = technical_score + fund_signal.impact_on_score
-            if new_score < 0:
-                new_score = 0
-        elif technical_score < 0:
-            new_score = technical_score + fund_signal.impact_on_score
-            if new_score > 0:
-                new_score = 0
-        else:
-            new_score = max(-2, min(2, fund_signal.impact_on_score))
+        action, confidence = metrics.get_recommendation()
+        reasons = metrics.get_reasons(action)
+        impact = self._get_score_impact(action)
 
+        # Расчет нового score
+        new_score = self._calculate_new_score(technical_score, impact)
+
+        # Обновление списка сигналов
         new_signals = technical_signals.copy()
-
-        for reason in fund_signal.reasons:
+        for reason in reasons:
             new_signals.append(f"📊 {reason}")
 
-        if fund_signal.metrics.data_source:
-            new_signals.append(f"📊 Источник: {fund_signal.metrics.data_source}")
+        new_signals.append(f"📊 Fundamental: {action} ({metrics.data_source})")
 
-        impact = fund_signal.impact_on_score
-        if impact > 0:
-            info(f"📊 Фундаментальный анализ {ticker}: {fund_signal.action} | влияние: +{impact} | {technical_score} → {new_score}")
-        elif impact < 0:
-            info(f"📊 Фундаментальный анализ {ticker}: {fund_signal.action} | влияние: {impact} | {technical_score} → {new_score}")
-        else:
-            info(f"📊 Фундаментальный анализ {ticker}: {fund_signal.action} | влияние: нейтрально | score={technical_score}")
+        # Логирование
+        logger.info(
+            f"📊 {ticker}: Fundamental {action} | "
+            f"Impact: {impact:+d} | "
+            f"Technical: {technical_score:+d} → {new_score:+d}"
+        )
 
-        sign_tech = f"+{technical_score}" if technical_score > 0 else str(technical_score)
-        sign_new = f"+{new_score}" if new_score > 0 else str(new_score)
-
-        if fund_signal.impact_on_score > 0:
-            success(f"📊 {ticker}: {fund_signal.action} | Технический={sign_tech} → Итог={sign_new} (+{fund_signal.impact_on_score})")
-        elif fund_signal.impact_on_score < 0:
-            warning(f"📊 {ticker}: {fund_signal.action} | Технический={sign_tech} → Итог={sign_new} ({fund_signal.impact_on_score})")
-        else:
-            info(f"📊 {ticker}: {fund_signal.action} | Технический={sign_tech} → Итог={sign_new}")
-
+        # Подготовка данных
         fundamental_data = {
-            'action': fund_signal.action,
-            'confidence': fund_signal.confidence,
-            'overall_score': fund_signal.metrics.overall_score,
-            'pe_ratio': fund_signal.metrics.pe_ratio,
-            'pb_ratio': fund_signal.metrics.pb_ratio,
-            'roe': fund_signal.metrics.roe,
-            'dividend_yield': fund_signal.metrics.dividend_yield,
-            'data_source': fund_signal.metrics.data_source,
+            'action': action,
+            'confidence': confidence / 100,
+            'overall_score': metrics.overall_score,
+            'pe_ratio': metrics.pe_ratio,
+            'pb_ratio': metrics.pb_ratio,
+            'roe': metrics.roe,
+            'dividend_yield': metrics.dividend_yield,
+            'data_source': metrics.data_source,
+            'reasons': reasons
         }
 
         return new_score, new_signals, fundamental_data
 
-    def clear_cache(self, ticker: str = None) -> int:
+    def _get_score_impact(self, action: str) -> int:
+        """Получение влияния на score"""
+        impacts = {
+            'STRONG_BUY': 5,
+            'BUY': 3,
+            'HOLD': 0,
+            'SELL': -3,
+            'STRONG_SELL': -5,
+        }
+        return impacts.get(action, 0)
+
+    def _calculate_new_score(self, technical_score: int, impact: int) -> int:
+        """Расчет нового score"""
+        if technical_score > 0:
+            new_score = technical_score + impact
+            return max(0, new_score)
+        elif technical_score < 0:
+            new_score = technical_score + impact
+            return min(0, new_score)
+        else:
+            return max(-2, min(2, impact))
+
+    def clear_cache(self, ticker: Optional[str] = None) -> int:
+        """
+        Очистка кэша
+
+        Args:
+            ticker: Тикер для очистки (если None, очищает весь кэш)
+
+        Returns:
+            Количество очищенных записей
+        """
         if ticker:
             ticker = ticker.upper()
-            if ticker in self._cache:
-                del self._cache[ticker]
-                debug(f"🗑️ Кэш очищен для {ticker}")
+            if ticker in self.cache:
+                del self.cache[ticker]
+                logger.debug(f"🗑️ Cache cleared for {ticker}")
                 return 1
             return 0
         else:
-            count = len(self._cache)
-            self._cache.clear()
-            debug(f"🗑️ Кэш полностью очищен (удалено {count} записей)")
+            count = len(self.cache)
+            self.cache.clear()
+            logger.debug(f"🗑️ Cache fully cleared ({count} entries)")
             return count
 
-    def get_stats(self) -> Dict[str, Any]:
-        total_requests = self.stats['cache_hits'] + self.stats['cache_misses']
-        hit_rate = (self.stats['cache_hits'] / total_requests * 100) if total_requests > 0 else 0
+    def get_statistics(self) -> Dict[str, Any]:
+        """
+        Получение статистики работы анализатора
+
+        Returns:
+            Словарь со статистикой
+        """
+        total = self.stats['cache_hits'] + self.stats['cache_misses']
+        hit_rate = (self.stats['cache_hits'] / total * 100) if total > 0 else 0
+
         return {
             'enabled': self.enabled,
-            'cache_size': len(self._cache),
+            'cache_size': len(self.cache),
             'cache_hits': self.stats['cache_hits'],
             'cache_misses': self.stats['cache_misses'],
             'hit_rate': round(hit_rate, 1),
@@ -1178,82 +729,5 @@ class FundamentalAnalyzer:
         }
 
 
-# Глобальный экземпляр
-fundamental_analyzer = FundamentalAnalyzer(debug_mode=False)
-
-
-async def enhance_trading_decision(
-        ticker: str,
-        technical_score: int,
-        technical_signals: List[str]
-) -> Tuple[int, List[str], Dict[str, Any]]:
-    return await fundamental_analyzer.enhance_technical_signal(
-        ticker=ticker,
-        technical_score=technical_score,
-        technical_signals=technical_signals
-    )
-
-
-def get_fundamental_stats() -> Dict[str, Any]:
-    return fundamental_analyzer.get_stats()
-
-
-def clear_fundamental_cache(ticker: str = None) -> int:
-    return fundamental_analyzer.clear_cache(ticker)
-
-
-async def test_fundamental_analyzer():
-    separator("=", 70)
-    chart("🧪 ТЕСТ ФУНДАМЕНТАЛЬНОГО АНАЛИЗАТОРА")
-    chart("   Источники: MOEX ISS API + Yahoo Finance")
-    separator("=", 70)
-
-    test_tickers = ["SBER", "GAZP", "LKOH", "ROSN", "TATN", "NVTK"]
-
-    print()
-    info(f"📊 Yahoo Finance доступен: {'✅ ДА' if YFINANCE_AVAILABLE else '❌ НЕТ'}")
-    info(f"📊 Анализатор включён: {'✅ ДА' if fundamental_analyzer.enabled else '❌ НЕТ'}")
-    info(f"🐛 Debug режим: {'✅ ВКЛЮЧЁН' if ColorLogger._debug_enabled else '❌ ВЫКЛЮЧЁН'}")
-    print()
-
-    for ticker in test_tickers:
-        print()
-        separator("─", 70)
-        chart(f"📊 ТЕСТ {ticker}")
-        separator("─", 70)
-
-        signal = await fundamental_analyzer.analyze(ticker, technical_score=5)
-
-        if signal:
-            if signal.action in ['STRONG_BUY', 'BUY']:
-                success(f"\n✅ {ticker}: {signal.action} (уверенность: {signal.confidence:.0%})")
-            elif signal.action in ['STRONG_SELL', 'SELL']:
-                error(f"\n❌ {ticker}: {signal.action} (уверенность: {signal.confidence:.0%})")
-            else:
-                info(f"\n🟡 {ticker}: {signal.action} (уверенность: {signal.confidence:.0%})")
-
-            if signal.reasons:
-                print(f"\n   📋 Причины:")
-                for reason in signal.reasons:
-                    print(f"      • {reason}")
-        else:
-            error(f"\n❌ {ticker}: НЕТ ДАННЫХ")
-
-    print()
-    separator("=", 70)
-    stats = fundamental_analyzer.get_stats()
-    info(f"📊 СТАТИСТИКА:")
-    info(f"   Анализатор: {'ВКЛЮЧЁН' if stats['enabled'] else 'ВЫКЛЮЧЁН'}")
-    info(f"   Yahoo Finance: {'ДОСТУПЕН' if stats['yahoo_available'] else 'НЕ ДОСТУПЕН'}")
-    info(f"   Размер кэша: {stats['cache_size']}")
-    info(f"   Попадания в кэш: {stats['cache_hits']}")
-    info(f"   Промахи: {stats['cache_misses']}")
-    info(f"   Hit rate: {stats['hit_rate']}%")
-    info(f"   Yahoo запросов: {stats['yahoo_hits']}")
-    info(f"   Ошибки API: {stats['api_errors']}")
-    separator("=", 70)
-
-
-if __name__ == "__main__":
-    fundamental_analyzer = FundamentalAnalyzer(debug_mode=True)
-    asyncio.run(test_fundamental_analyzer())
+# Создание глобального экземпляра
+fundamental_analyzer = FundamentalAnalyzer()
