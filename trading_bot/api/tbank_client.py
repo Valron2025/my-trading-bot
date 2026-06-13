@@ -1,7 +1,5 @@
 """Клиент для работы с T-Bank API - ПОЛНАЯ ПРОДАКШН ВЕРСИЯ (с TTLCache)"""
 
-import os
-import sys
 import time
 from functools import wraps
 from typing import List, Optional, Tuple, Dict, Any
@@ -11,28 +9,7 @@ from decimal import Decimal
 import signal
 from contextlib import contextmanager
 from threading import Lock
-from socket import timeout as SocketTimeoutError
-
-# ========== RENDER SSL FIX ==========
-import grpc
-
-def patch_grpc_for_render():
-    """Патчим gRPC channel creation для Render"""
-    original_secure_channel = grpc.secure_channel
-
-    def patched_secure_channel(*args, **kwargs):
-        """Заменяем secure_channel на insecure_channel (принимает любые аргументы)"""
-        target = args[0] if args else kwargs.get('target', 'invest-public-api.tbank.ru:443')
-        print(f"🔓 Render fix: using insecure channel for {target}")
-        return grpc.insecure_channel(target)
-
-    # Заменяем функцию
-    grpc.secure_channel = patched_secure_channel
-    print("✅ RENDER FIX ACTIVE: gRPC secure_channel -> insecure_channel (universal)")
-
-# Применяем патч ДО импорта Client
-patch_grpc_for_render()
-# ========== END FIX ==========
+from socket import timeout as SocketTimeoutError  # ← ЭТОТ ИМПОРТ НУЖЕН!
 
 MOSCOW_TZ = timezone(timedelta(hours=3))
 
