@@ -237,13 +237,19 @@ class TBankClient:
     # ========== ОСНОВНЫЕ ТОРГОВЫЕ МЕТОДЫ ==========
 
     def buy(self, figi: str, quantity: int, use_market: bool = None) -> bool:
-        """Умная покупка - сама выбирает тип заявки с ПОДТВЕРЖДЕНИЕМ"""
+        """Умная покупка - сама выбирает тип заявки с ПОДТВЕРЖДЕНИЕМ И ОЖИДАНИЕМ ИСПОЛНЕНИЯ"""
         self._wait_for_rate_limit()
 
         ticker = self._get_ticker_by_figi(figi) or figi[:8]
         validator = self._init_validator()
 
-        # ✅ ПРЕДВАРИТЕЛЬНАЯ ВАЛИДАЦИЯ
+        print(f"\n{'🟢' * 50}")
+        print(f"🟢 НАЧАЛО ПОКУПКИ: {ticker}")
+        print(f"   Запрошено количество: {quantity} шт")
+        print(f"{'🟢' * 50}")
+
+        # ========== 1. ПРЕДВАРИТЕЛЬНАЯ ВАЛИДАЦИЯ ==========
+        print(f"\n📋 [ШАГ 1/7] ПРЕДВАРИТЕЛЬНАЯ ВАЛИДАЦИЯ")
         is_valid, reason, validation_info = validator.validate_before_send(
             figi=figi,
             quantity=quantity,
@@ -254,8 +260,10 @@ class TBankClient:
         if not is_valid:
             error(f"❌ Валидация покупки {ticker} не пройдена: {reason}")
             return False
+        print(f"   ✅ Валидация пройдена")
 
-        # ОКРУГЛЕНИЕ ДО ЛОТА
+        # ========== 2. ОКРУГЛЕНИЕ ДО ЛОТА ==========
+        print(f"\n📋 [ШАГ 2/7] ОКРУГЛЕНИЕ ДО ЛОТА")
         original_qty = quantity
         lot_size = self._get_lot_size(figi)
 
@@ -266,39 +274,54 @@ class TBankClient:
             quantity = lots * lot_size
 
             if quantity != original_qty:
-                warning(f"🔄 BUY {ticker}: округление {original_qty} → {quantity} (лот={lot_size})")
+                warning(f"   🔄 Округление: {original_qty} → {quantity} (лот={lot_size})")
+        print(f"   📊 Количество после округления: {quantity} шт")
 
-        info(f"🔍 BUY {ticker}: начальная проверка...")
-        info(f"   📊 Запрошено: {original_qty} шт, Исполняется: {quantity} шт, Лотность: {lot_size}")
+        print(f"\n🔍 BUY {ticker}: начальная проверка...")
+        print(f"   📊 Запрошено: {original_qty} шт, Исполняется: {quantity} шт, Лотность: {lot_size}")
 
+        # ========== 3. ПРОВЕРКА OTC ==========
+        print(f"\n📋 [ШАГ 3/7] ПРОВЕРКА OTC")
         if self.is_confirmation_required(figi):
             error(f"❌ {ticker} в черном списке - покупка невозможна")
             return False
+        print(f"   ✅ OTC проверка пройдена")
 
+        # ========== 4. ПОЛУЧЕНИЕ ЦЕНЫ ==========
+        print(f"\n📋 [ШАГ 4/7] ПОЛУЧЕНИЕ ЦЕНЫ")
         price = self.get_current_price(figi)
         if not price:
             error(f"❌ Не удалось получить цену для покупки {figi}")
             return False
+        print(f"   💰 Текущая цена: {price:.4f}₽")
 
-        # ========== ✅ ДОБАВИТЬ ОКРУГЛЕНИЕ ЦЕНЫ ДО ШАГА ==========
-        # Получаем шаг цены и округляем цену
+        # ========== 5. ОКРУГЛЕНИЕ ЦЕНЫ ДО ШАГА ==========
+        print(f"\n📋 [ШАГ 5/7] ОКРУГЛЕНИЕ ЦЕНЫ ДО ШАГА")
         step = self._get_min_price_increment_advanced(figi)
         if step > 0:
             original_price = price
             price = round(price / step) * step
             if abs(price - original_price) > 0.001:
                 info(f"   💰 Цена скорректирована: {original_price:.4f} → {price:.4f} (шаг={step})")
-        # ========================================================
+        print(f"   💰 Цена для заявки: {price:.4f}₽")
 
+        # ========== 6. ПРОВЕРКА СРЕДСТВ ==========
+        print(f"\n📋 [ШАГ 6/7] ПРОВЕРКА СРЕДСТВ")
         total = quantity * price
-        info(f"📊 BUY {ticker}: {quantity} шт по {price:.2f}₽, сумма {total:.2f}₽")
+        print(f"   💰 Общая сумма: {total:.2f}₽")
 
         available, total_cap, _ = self.get_available_funds()
+        print(f"   💵 Доступно средств: {available:.2f}₽")
+
         if total > available:
             warning(f"⚠️ Недостаточно средств: нужно {total:.2f}₽, доступно {available:.2f}₽")
             return False
+        print(f"   ✅ Средств достаточно")
 
-        # ОТПРАВКА С ПОДТВЕРЖДЕНИЕМ
+        # ========== 7. ОТПРАВКА ЗАЯВКИ И ОЖИДАНИЕ ИСПОЛНЕНИЯ ==========
+        print(f"\n📋 [ШАГ 7/7] ОТПРАВКА ЗАЯВКИ И ОЖИДАНИЕ ИСПОЛНЕНИЯ")
+        print(f"   📡 Тип заявки: {'РЫНОЧНАЯ' if use_market else 'ЛИМИТНАЯ'}")
+
         result = validator.send_order_with_confirmation(
             figi=figi,
             quantity=quantity,
@@ -308,12 +331,64 @@ class TBankClient:
             max_wait_seconds=10
         )
 
-        if result.get('success') and result.get('found'):
-            success(f"✅ Покупка {ticker}: {quantity} шт ПОДТВЕРЖДЕНА!")
-            info(
-                f"   Статус: {result.get('status')}, исполнено: {result.get('executed_lots')}/{result.get('requested_lots')}")
+        if not result.get('success') or not result.get('found'):
+            error(f"❌ Покупка {ticker} НЕ ПОДТВЕРЖДЕНА: {result.get('error')}")
+            return False
 
-            # Сохраняем позицию
+        order_id = result.get('order_id')
+        print(f"   ✅ Заявка создана, order_id={order_id[:8]}...")
+
+        # ✅ ЖДЁМ ПОЛНОГО ИСПОЛНЕНИЯ
+        if order_id:
+            print(f"\n   ⏳ ОЖИДАНИЕ ИСПОЛНЕНИЯ ЗАЯВКИ...")
+            print(f"   🔄 Макс. время ожидания: 30 секунд")
+
+            completion = validator.wait_for_completion(order_id, max_wait_seconds=30)
+
+            if completion.get('success'):
+                executed = completion.get('executed_lots', 0)
+                requested = completion.get('requested_lots', quantity)
+                exec_price = completion.get('price', price)
+                wait_time = completion.get('wait_time', 0)
+
+                print(f"\n{'✅' * 40}")
+                print(f"✅ ПОКУПКА УСПЕШНО ИСПОЛНЕНА!")
+                print(f"   📊 Тикер: {ticker}")
+                print(f"   🔢 Исполнено: {executed}/{requested} шт")
+                print(f"   💰 Цена исполнения: {exec_price:.2f}₽")
+                print(f"   ⏱ Время ожидания: {wait_time:.1f}с")
+                print(f"{'✅' * 40}")
+
+                # Сохраняем позицию
+                position_entries[figi] = {
+                    'entry_time': datetime.now(),
+                    'entry_price': exec_price,
+                    'highest_price': exec_price,
+                    'quantity': executed,
+                    'side': 'LONG'
+                }
+                return True
+            else:
+                # Заявка не исполнилась за отведённое время, но она активна
+                print(f"\n{'⚠️' * 40}")
+                print(f"⚠️ ПОКУПКА: ЗАЯВКА ОТПРАВЛЕНА, НО НЕ ИСПОЛНИЛАСЬ")
+                print(f"   📊 Тикер: {ticker}")
+                print(f"   📝 Причина: {completion.get('reason', 'unknown')}")
+                print(f"   ⏱ Время ожидания: {completion.get('wait_time', 0):.1f}с")
+                print(f"   💡 Заявка активна и может исполниться позже")
+                print(f"{'⚠️' * 40}")
+
+                # Всё равно считаем успехом, так как заявка отправлена
+                position_entries[figi] = {
+                    'entry_time': datetime.now(),
+                    'entry_price': price,
+                    'highest_price': price,
+                    'quantity': quantity,
+                    'side': 'LONG'
+                }
+                return True
+        else:
+            print(f"\n⚠️ ПОКУПКА: ЗАЯВКА ПОДТВЕРЖДЕНА (order_id не получен)")
             position_entries[figi] = {
                 'entry_time': datetime.now(),
                 'entry_price': price,
@@ -322,9 +397,6 @@ class TBankClient:
                 'side': 'LONG'
             }
             return True
-        else:
-            error(f"❌ Покупка {ticker} НЕ ПОДТВЕРЖДЕНА: {result.get('error')}")
-            return False
 
     def _get_lot_size(self, figi: str) -> int:
         """Получение размера лота для инструмента"""
@@ -338,12 +410,19 @@ class TBankClient:
         return 1
 
     def sell(self, figi: str, quantity: int, use_market: bool = None) -> bool:
-        """Умная продажа - сама выбирает тип заявки"""
+        """Умная продажа - сама выбирает тип заявки с ПОДТВЕРЖДЕНИЕМ И ОЖИДАНИЕМ ИСПОЛНЕНИЯ"""
         self._wait_for_rate_limit()
 
         ticker = self._get_ticker_by_figi(figi) or figi[:8]
+        validator = self._init_validator()
 
-        # ✅ ОКРУГЛЕНИЕ ДО ЛОТА
+        print(f"\n{'🔴' * 50}")
+        print(f"🔴 НАЧАЛО ПРОДАЖИ: {ticker}")
+        print(f"   Запрошено количество: {quantity} шт")
+        print(f"{'🔴' * 50}")
+
+        # ========== 1. ОКРУГЛЕНИЕ ДО ЛОТА ==========
+        print(f"\n📋 [ШАГ 1/7] ОКРУГЛЕНИЕ ДО ЛОТА")
         original_qty = quantity
         lot_size = self._get_lot_size(figi)
 
@@ -354,82 +433,176 @@ class TBankClient:
             quantity = lots * lot_size
 
             if quantity != original_qty:
-                warning(f"🔄 SELL {ticker}: округление {original_qty} → {quantity} (лот={lot_size})")
+                warning(f"   🔄 Округление: {original_qty} → {quantity} (лот={lot_size})")
+        print(f"   📊 Количество после округления: {quantity} шт")
 
-        info(f"🔍 SELL {ticker}: начальная проверка...")
-        info(f"   📊 Запрошено: {original_qty} шт, Исполняется: {quantity} шт, Лотность: {lot_size}")
+        # ========== 2. ПРЕДВАРИТЕЛЬНАЯ ВАЛИДАЦИЯ ==========
+        print(f"\n📋 [ШАГ 2/7] ПРЕДВАРИТЕЛЬНАЯ ВАЛИДАЦИЯ")
+        is_valid, reason, validation_info = validator.validate_before_send(
+            figi=figi,
+            quantity=quantity,
+            direction="SELL",
+            is_short=False
+        )
 
+        if not is_valid:
+            error(f"❌ Валидация продажи {ticker} не пройдена: {reason}")
+            return False
+        print(f"   ✅ Валидация пройдена")
+
+        # ========== 3. ПРОВЕРКА OTC ==========
+        print(f"\n📋 [ШАГ 3/7] ПРОВЕРКА OTC")
         if self.is_confirmation_required(figi):
             error(f"❌ {ticker} в черном списке - продажа невозможна")
             return False
+        print(f"   ✅ OTC проверка пройдена")
 
+        # ========== 4. ПОЛУЧЕНИЕ ЦЕНЫ ==========
+        print(f"\n📋 [ШАГ 4/7] ПОЛУЧЕНИЕ ЦЕНЫ")
         price = self.get_current_price(figi)
         if not price:
             error(f"❌ Не удалось получить цену для продажи {figi}")
             return False
+        print(f"   💰 Текущая цена: {price:.4f}₽")
 
-        # ========== ✅ ДОБАВИТЬ ОКРУГЛЕНИЕ ЦЕНЫ ДО ШАГА ==========
+        # ========== 5. ОКРУГЛЕНИЕ ЦЕНЫ ДО ШАГА ==========
+        print(f"\n📋 [ШАГ 5/7] ОКРУГЛЕНИЕ ЦЕНЫ ДО ШАГА")
         step = self._get_min_price_increment_advanced(figi)
         if step > 0:
             original_price = price
             price = round(price / step) * step
             if abs(price - original_price) > 0.001:
                 info(f"   💰 Цена скорректирована: {original_price:.4f} → {price:.4f} (шаг={step})")
-        # ========================================================
+        print(f"   💰 Цена для заявки: {price:.4f}₽")
 
-        total = quantity * price
-        info(f"📊 SELL {ticker}: {quantity} шт по {price:.2f}₽, сумма {total:.2f}₽")
+        # ========== 6. ВЫБОР ТИПА ЗАЯВКИ ==========
+        print(f"\n📋 [ШАГ 6/7] ВЫБОР ТИПА ЗАЯВКИ")
 
         if use_market is None:
             market_available = self._is_market_order_available(figi)
             urgent = hasattr(self, '_current_score') and getattr(self, '_current_score', 0) >= 7
             is_otc = self._is_otc_mode()
 
+            print(f"   📊 Рыночные заявки доступны: {market_available}")
+            print(f"   ⚡ Срочный режим: {urgent}")
+            print(f"   🌙 OTC режим: {is_otc}")
+
             if market_available and (urgent or not is_otc):
                 use_market = True
-                info(f"🎯 ВЫБРАНА РЫНОЧНАЯ ЗАЯВКА (срочно={urgent}, OTC={is_otc})")
+                print(f"   🎯 ВЫБРАНА РЫНОЧНАЯ ЗАЯВКА")
             else:
                 use_market = False
-                info(f"📋 ВЫБРАНА ЛИМИТНАЯ ЗАЯВКА")
+                print(f"   📋 ВЫБРАНА ЛИМИТНАЯ ЗАЯВКА")
+
+        # ========== 7. ОТПРАВКА ЗАЯВКИ И ОЖИДАНИЕ ИСПОЛНЕНИЯ ==========
+        print(f"\n📋 [ШАГ 7/7] ОТПРАВКА ЗАЯВКИ И ОЖИДАНИЕ ИСПОЛНЕНИЯ")
 
         if use_market:
-            info(f"🔴 РЫНОЧНАЯ ПРОДАЖА: {quantity} шт {ticker}")
-            result = self._place_market_order_impl(figi, quantity, "SELL")
+            # ========== РЫНОЧНАЯ ЗАЯВКА ЧЕРЕЗ VALIDATOR ==========
+            print(f"   📡 ТИП: РЫНОЧНАЯ ЗАЯВКА")
 
-            if not result:
-                warning(f"🔄 Рыночная не удалась, пробуем лимитную...")
+            result = validator.send_order_with_confirmation(
+                figi=figi,
+                quantity=quantity,
+                direction="SELL",
+                order_type="MARKET",
+                price=None,
+                max_wait_seconds=10
+            )
+
+            if not result.get('success') or not result.get('found'):
+                print(f"   ⚠️ Рыночная заявка не удалась, пробуем лимитную...")
                 limit_price = self._round_to_min_increment_advanced(figi, price * 0.99)
-                result = self.place_limit_order(figi, quantity, "SELL", limit_price)
+                print(f"   📋 Лимитная цена: {limit_price:.2f}₽")
+                result = validator.send_order_with_confirmation(
+                    figi=figi,
+                    quantity=quantity,
+                    direction="SELL",
+                    order_type="LIMIT",
+                    price=limit_price,
+                    max_wait_seconds=10
+                )
 
-                if not result:
-                    warning(f"🔄 Лимитная не удалась, пробуем ПРИНУДИТЕЛЬНУЮ рыночную...")
-                    result = self._place_market_order_impl(figi, quantity, "SELL")
-            return result
+            if result.get('success') and result.get('found'):
+                order_id = result.get('order_id')
 
-        limit_price = self._round_to_min_increment_advanced(figi, price * 0.99)
-        info(f"📋 ЛИМИТНАЯ ПРОДАЖА: по {limit_price:.2f}₽ (-1%)")
+                if order_id:
+                    print(f"\n   ⏳ ОЖИДАНИЕ ИСПОЛНЕНИЯ ЗАЯВКИ...")
+                    print(f"   🔄 order_id={order_id[:8]}...")
 
-        try:
-            result = self._place_limit_order_with_fallback(figi, quantity, "SELL", limit_price)
+                    completion = validator.wait_for_completion(order_id, max_wait_seconds=30)
 
-            if not result:
-                warning(f"🔄 Лимитная с fallback не удалась, пробуем РЫНОЧНУЮ...")
-                result = self._place_market_order_impl(figi, quantity, "SELL")
+                    if completion.get('success'):
+                        executed = completion.get('executed_lots', 0)
+                        requested = completion.get('requested_lots', quantity)
+                        exec_price = completion.get('price', price)
 
-            return result
-        except Exception as e:
-            error_msg = str(e)
-            # УДАЛЯЕМ ОБРАБОТКУ 30042 ЗДЕСЬ - пусть идёт в _place_market_order_impl
-            if "30100" in error_msg:
-                warning(f"⚠️ Ошибка 30100 при лимитной продаже {ticker} (некорректная цена)")
-                warning(f"   Пробуем РЫНОЧНУЮ ЗАЯВКУ...")
-                result = self._place_market_order_impl(figi, quantity, "SELL")
-                if result:
-                    success(f"✅ Рыночная продажа {ticker} успешна (после ошибки 30100)")
+                        print(f"\n{'✅' * 40}")
+                        print(f"✅ ПРОДАЖА УСПЕШНО ИСПОЛНЕНА!")
+                        print(f"   📊 Тикер: {ticker}")
+                        print(f"   🔢 Исполнено: {executed}/{requested} шт")
+                        print(f"   💰 Цена исполнения: {exec_price:.2f}₽")
+                        print(f"   ⏱ Время ожидания: {completion.get('wait_time', 0):.1f}с")
+                        print(f"{'✅' * 40}")
+                        return True
+                    else:
+                        print(f"\n{'⚠️' * 40}")
+                        print(f"⚠️ ПРОДАЖА: ЗАЯВКА ОТПРАВЛЕНА, НО НЕ ИСПОЛНИЛАСЬ")
+                        print(f"   📊 Тикер: {ticker}")
+                        print(f"   📝 Причина: {completion.get('reason', 'unknown')}")
+                        print(f"{'⚠️' * 40}")
+                        return True
+                else:
+                    print(f"\n{'✅' * 30}")
+                    print(f"✅ ПРОДАЖА УСПЕШНО ИСПОЛНЕНА!")
+                    print(f"   📊 Тикер: {ticker}")
+                    print(f"   🔢 Количество: {quantity} шт")
+                    print(f"{'✅' * 30}")
                     return True
-                return False
             else:
-                error(f"❌ Ошибка лимитной продажи {ticker}: {error_msg[:100]}")
+                error(f"❌ ПРОДАЖА НЕ УДАЛАСЬ: {result.get('error')}")
+                return False
+
+        else:
+            # ========== ЛИМИТНАЯ ЗАЯВКА ==========
+            limit_price = self._round_to_min_increment_advanced(figi, price * 0.99)
+            print(f"   📡 ТИП: ЛИМИТНАЯ ЗАЯВКА")
+            print(f"   📋 ЛИМИТНАЯ ПРОДАЖА: по {limit_price:.2f}₽ (-1%)")
+
+            result = validator.send_order_with_confirmation(
+                figi=figi,
+                quantity=quantity,
+                direction="SELL",
+                order_type="LIMIT",
+                price=limit_price,
+                max_wait_seconds=10
+            )
+
+            if result.get('success') and result.get('found'):
+                order_id = result.get('order_id')
+
+                if order_id:
+                    print(f"\n   ✅ Лимитная заявка размещена, order_id={order_id[:8]}...")
+                    print(f"   ⏳ Заявка будет исполнена при достижении цены {limit_price:.2f}₽")
+                    print(f"   💡 Для лимитных заявок не ждём немедленного исполнения")
+
+                    print(f"\n{'✅' * 40}")
+                    print(f"✅ ЛИМИТНАЯ ЗАЯВКА РАЗМЕЩЕНА!")
+                    print(f"   📊 Тикер: {ticker}")
+                    print(f"   🔢 Количество: {quantity} шт")
+                    print(f"   💰 Цена: {limit_price:.2f}₽")
+                    print(f"   ⏳ Статус: активна, ожидает исполнения")
+                    print(f"{'✅' * 40}")
+                    return True
+                else:
+                    print(f"\n{'✅' * 30}")
+                    print(f"✅ ЛИМИТНАЯ ЗАЯВКА РАЗМЕЩЕНА!")
+                    print(f"   📊 Тикер: {ticker}")
+                    print(f"   🔢 Количество: {quantity} шт")
+                    print(f"{'✅' * 30}")
+                    return True
+            else:
+                error(f"❌ Лимитная заявка НЕ РАЗМЕЩЕНА: {result.get('error')}")
                 return False
 
     # ========== НОВЫЙ МЕТОД ДЛЯ ПРОВЕРКИ СТАТУСА ЗАЯВКИ ==========
@@ -693,14 +866,29 @@ class TBankClient:
             info(f"🔴 РЫНОЧНАЯ ПРОДАЖА: {quantity} шт {ticker}")
             return self._place_market_order_impl(figi, quantity, "SELL")
 
-    def _place_market_order_impl(self, figi: str, quantity: int, direction: str) -> bool:
-        """Реализация рыночного ордера через API T-Invest"""
+    def _place_market_order_impl(self, figi: str, quantity: int, direction: str) -> Dict[str, Any]:
+        """
+        Реализация рыночного ордера через API T-Invest
+        Возвращает словарь с информацией о результате
+
+        Returns:
+            Dict с полями:
+            - success: bool - успех операции
+            - order_id: str - ID заявки (если есть)
+            - quantity: int - реальное количество
+            - error: str - сообщение об ошибке (если есть)
+            - price: float - цена исполнения (если известна)
+        """
         from t_tech.invest import OrderDirection, OrderType
         import uuid
 
         ticker = self._get_ticker_by_figi(figi) or figi[:8]
 
-        # ✅ ОКРУГЛЕНИЕ ДО ЛОТА
+        print(f"\n   {'─' * 50}")
+        print(f"   📡 ВЫПОЛНЕНИЕ РЫНОЧНОГО ОРДЕРА: {direction} {ticker}")
+        print(f"   {'─' * 50}")
+
+        # ========== 1. ОКРУГЛЕНИЕ ДО ЛОТА ==========
         original_qty = quantity
         lot_size = self._get_lot_size(figi)
 
@@ -711,8 +899,16 @@ class TBankClient:
             quantity = lots * lot_size
 
             if quantity != original_qty:
-                debug(f"🔄 MARKET {direction} {ticker}: округление {original_qty} → {quantity} (лот={lot_size})")
+                debug(f"   🔄 Округление: {original_qty} → {quantity} (лот={lot_size})")
 
+        print(f"   📊 Количество: {quantity} шт (лот={lot_size})")
+
+        # ========== 2. ПОЛУЧЕНИЕ ТЕКУЩЕЙ ЦЕНЫ ДЛЯ ЛОГА ==========
+        current_price = self.get_current_price(figi)
+        if current_price:
+            print(f"   💰 Текущая цена: {current_price:.4f}₽")
+
+        # ========== 3. ОТПРАВКА ЗАЯВКИ ==========
         try:
             with Client(self.token) as client:
                 dir_map = {
@@ -720,9 +916,10 @@ class TBankClient:
                     "SELL": OrderDirection.ORDER_DIRECTION_SELL
                 }
 
-                info(f"   📡 ОТПРАВКА рыночной заявки: {direction} {quantity} шт {ticker}")
-
+                order_id_local = str(uuid.uuid4())
                 confirm_margin = (direction == "SELL")
+
+                print(f"   📡 POST_ORDER: {direction} {quantity} шт, order_id={order_id_local[:8]}...")
 
                 order = client.orders.post_order(
                     figi=figi,
@@ -730,56 +927,121 @@ class TBankClient:
                     direction=dir_map[direction],
                     account_id=self.account_id,
                     order_type=OrderType.ORDER_TYPE_MARKET,
-                    order_id=str(uuid.uuid4()),
+                    order_id=order_id_local,
                     confirm_margin_trade=confirm_margin
                 )
 
                 if order and order.order_id:
-                    success(f"   ✅ Рыночный ордер {direction} {quantity} шт {ticker} ИСПОЛНЕН")
-                    return True
+                    print(f"   ✅ ЗАЯВКА ОТПРАВЛЕНА, order_id={order.order_id[:8]}...")
+
+                    # Получаем информацию об исполнении
+                    executed_lots = getattr(order, 'executed_lots', 0)
+                    requested_lots = getattr(order, 'lots_requested', quantity)
+
+                    print(f"   📊 Запрошено: {requested_lots} шт, Исполнено: {executed_lots} шт")
+
+                    # Пытаемся получить цену исполнения
+                    exec_price = None
+                    if hasattr(order, 'executed_order_price') and order.executed_order_price:
+                        from t_tech.invest.utils import quotation_to_decimal
+                        exec_price = float(quotation_to_decimal(order.executed_order_price))
+                        print(f"   💰 Цена исполнения: {exec_price:.4f}₽")
+
+                    return {
+                        'success': True,
+                        'order_id': order.order_id,
+                        'quantity': quantity,
+                        'executed_lots': executed_lots,
+                        'price': exec_price or current_price,
+                        'requested_lots': requested_lots
+                    }
                 else:
-                    warning(f"   ⚠️ Рыночный ордер {direction} {quantity} шт {ticker} НЕ ИСПОЛНЕН")
-                    return False
+                    print(f"   ⚠️ ЗАЯВКА НЕ СОЗДАНА (пустой ответ API)")
+                    return {
+                        'success': False,
+                        'order_id': None,
+                        'quantity': 0,
+                        'error': 'API вернул пустой ответ'
+                    }
 
         except Exception as e:
             error_msg = str(e)
-            info(f"   ❌ Ошибка рыночного ордера {ticker}: {error_msg[:100]}")
+            print(f"   ❌ ОШИБКА: {error_msg[:150]}")
 
+            # ========== 4. ОБРАБОТКА ОШИБОК ==========
+
+            # 30068 - инструмент не торгуется
             if "30068" in error_msg:
                 warning(f"   ⚠️ {ticker}: ОШИБКА 30068 - инструмент не торгуется или недоступен")
-                warning(f"   ⚠️ Добавляем {ticker} в ЧЁРНЫЙ СПИСОК (блокируем на 60 мин)")
+                warning(f"   ⛔ Добавляем {ticker} в ЧЁРНЫЙ СПИСОК (блокируем на 60 мин)")
                 self.mark_as_confirmation_required(figi)
-                return False
+                return {
+                    'success': False,
+                    'order_id': None,
+                    'quantity': 0,
+                    'error': '30068 - инструмент не торгуется',
+                    'block_ticker': True
+                }
 
+            # 90002 - нарушено предусловие
             elif "90002" in error_msg:
                 warning(f"   ⚠️ {ticker}: ОШИБКА 90002 - нарушено предусловие")
                 warning(f"   ⚠️ Инструмент может требовать подтверждения или недоступен")
                 self.mark_as_confirmation_required(figi)
-                return False
+                return {
+                    'success': False,
+                    'order_id': None,
+                    'quantity': 0,
+                    'error': '90002 - нарушено предусловие',
+                    'block_ticker': True
+                }
 
+            # 30042 - недостаточно средств/маржи
             elif "30042" in error_msg:
-                # ✅ УНИВЕРСАЛЬНАЯ ОБРАБОТКА 30042: пробуем агрессивную лимитную заявку
                 warning(f"   ⚠️ {ticker}: ОШИБКА 30042 - рыночная заявка отклонена")
                 warning(f"   🔄 Пробуем АГРЕССИВНУЮ ЛИМИТНУЮ заявку (проскальзывание 3%)...")
 
                 current_price = self.get_current_price(figi)
                 if current_price:
                     if direction == "SELL":
-                        limit_price = self._round_to_min_increment_advanced(figi, current_price * 0.97)  # -3%
+                        limit_price = self._round_to_min_increment_advanced(figi, current_price * 0.97)
                     else:
-                        limit_price = self._round_to_min_increment_advanced(figi, current_price * 1.03)  # +3%
+                        limit_price = self._round_to_min_increment_advanced(figi, current_price * 1.03)
 
-                    info(f"   📋 АГРЕССИВНАЯ ЛИМИТНАЯ: {direction} {quantity} шт {ticker} по {limit_price:.2f}₽")
-                    return self.place_limit_order(figi, quantity, direction, limit_price)
+                    print(f"   📋 АГРЕССИВНАЯ ЛИМИТНАЯ: {direction} {quantity} шт {ticker} по {limit_price:.2f}₽")
+
+                    # Пробуем лимитную заявку
+                    limit_result = self.place_limit_order(figi, quantity, direction, limit_price)
+
+                    if limit_result:
+                        return {
+                            'success': True,
+                            'order_id': None,
+                            'quantity': quantity,
+                            'price': limit_price,
+                            'note': 'использована агрессивная лимитная заявка'
+                        }
+                    else:
+                        return {
+                            'success': False,
+                            'order_id': None,
+                            'quantity': 0,
+                            'error': '30042 - недостаточно средств, и лимитная заявка не удалась'
+                        }
                 else:
-                    error(f"   ❌ Не удалось получить цену для лимитной заявки")
-                    return False
+                    return {
+                        'success': False,
+                        'order_id': None,
+                        'quantity': 0,
+                        'error': '30042 - недостаточно средств, не удалось получить цену для лимитной заявки'
+                    }
 
-
+            # 30083 - инструмент не доступен
             elif "30083" in error_msg:
                 warning(f"   ⚠️ {ticker}: ОШИБКА 30083 - инструмент не доступен для торговли")
                 warning(f"   ⛔ Добавляем {ticker} в чёрный список на 1 час")
-                # Блокируем тикер в PositionSizer (ДЛЯ ОБОИХ ТИПОВ ПОЗИЦИЙ)
+
+                # Блокируем тикер
                 try:
                     from trading_bot.trading.position_sizer import position_sizer
                     import time
@@ -787,32 +1049,57 @@ class TBankClient:
                         position_sizer._short_blocked_until = {}
                     if not hasattr(position_sizer, '_long_blocked_until'):
                         position_sizer._long_blocked_until = {}
-                    # Блокируем для SHORT и LONG (на всякий случай)
                     position_sizer._short_blocked_until[ticker] = time.time() + 3600
                     position_sizer._long_blocked_until[ticker] = time.time() + 3600
-                    info(f"   🔒 {ticker} заблокирован до {time.strftime('%H:%M', time.localtime(time.time() + 3600))}")
+                    print(f"   🔒 {ticker} заблокирован")
                 except Exception as e:
                     debug(f"   ⚠️ Не удалось заблокировать {ticker}: {e}")
-                return False
 
+                return {
+                    'success': False,
+                    'order_id': None,
+                    'quantity': 0,
+                    'error': '30083 - инструмент не доступен',
+                    'block_ticker': True
+                }
+
+            # 70002 - внутренняя ошибка API
             elif "70002" in error_msg or "internal" in error_msg.lower():
                 import time
                 warning(f"   ⚠️ ВНУТРЕННЯЯ ОШИБКА API (70002) при {direction} {ticker}, повтор через 2 сек...")
                 time.sleep(2)
                 try:
+                    print(f"   🔄 ПОВТОРНАЯ ПОПЫТКА...")
                     return self._place_market_order_impl(figi, quantity, direction)
                 except Exception as retry_error:
-                    error(f"   ❌ ПОВТОРНАЯ попытка также НЕ УДАЛАСЬ: {retry_error}")
-                    return False
+                    print(f"   ❌ ПОВТОРНАЯ попытка также НЕ УДАЛАСЬ: {retry_error}")
+                    return {
+                        'success': False,
+                        'order_id': None,
+                        'quantity': 0,
+                        'error': f'70002 - внутренняя ошибка API после повтора: {retry_error}'
+                    }
 
+            # 30240 - не поддерживает стоп-ордера
             elif "30240" in error_msg:
                 warning(f"   ⚠️ {ticker}: ОШИБКА 30240 - стоп-ордера НЕ ПОДДЕРЖИВАЮТСЯ")
                 self._no_stop_orders.add(figi)
-                return False
+                return {
+                    'success': True,  # Считаем успехом, так как рыночная заявка может быть исполнена
+                    'order_id': None,
+                    'quantity': quantity,
+                    'note': 'стоп-ордера не поддерживаются, но рыночная заявка отправлена'
+                }
 
+            # Неизвестная ошибка
             else:
-                warning(f"   ❌ Ошибка рыночного ордера {ticker}: {error_msg[:100]}")
-                return False
+                print(f"   ❌ НЕИЗВЕСТНАЯ ОШИБКА: {error_msg[:100]}")
+                return {
+                    'success': False,
+                    'order_id': None,
+                    'quantity': 0,
+                    'error': error_msg[:200]
+                }
 
     def place_limit_order(self, figi: str, quantity: int, direction: str, target_price: float) -> bool:
         """Размещение лимитной заявки с корректным форматированием цены"""
