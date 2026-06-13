@@ -1,0 +1,49 @@
+services:
+  - type: web
+    name: trading-bot-web
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python web_server.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: TBANK_TOKEN
+        sync: false
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: ENABLE_FUNDAMENTAL_ANALYSIS
+        value: "true"
+      - key: FUNDAMENTAL_UPDATE_HOURS
+        value: "24"
+      - key: ENABLE_OTC_TRADING
+        value: "true"  # ← поменяйте на "true" если хотите OTC в выходные
+    healthCheckPath: /health
+    autoDeploy: true
+    plan: free
+    numInstances: 1
+
+  - type: worker
+    name: trading-bot-worker
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python worker.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: TBANK_TOKEN
+        sync: false
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: ENABLE_FUNDAMENTAL_ANALYSIS
+        value: "true"
+      - key: FUNDAMENTAL_UPDATE_HOURS
+        value: "24"
+      - key: ENABLE_OTC_TRADING
+        value: "true"  # ← поменяйте на "true" если хотите OTC в выходные
+    autoDeploy: true
+    plan: free
+    numInstances: 1

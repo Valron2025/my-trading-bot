@@ -1,0 +1,287 @@
+{
+  "SBER": {
+    "interval": 60,
+    "last_update": "2026-05-05T22:48:06.802608",
+    "candles": 474
+  },
+  "GAZP": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:29:23.535710",
+    "candles": 500
+  },
+  "LKOH": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:29:26.566699",
+    "candles": 500
+  },
+  "ROSN": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:29:29.584868",
+    "candles": 500
+  },
+  "TATN": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:29:32.638695",
+    "candles": 500
+  },
+  "VTBR": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:29:20.382084",
+    "candles": 500
+  },
+  "MTSS": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:29:51.994574",
+    "candles": 500
+  },
+  "SBERP": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:29:17.324816",
+    "candles": 500
+  },
+  "TATNP": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:29:35.737815",
+    "candles": 500
+  },
+  "NVTK": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:29:38.904598",
+    "candles": 500
+  },
+  "SNGS": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:29:41.896913",
+    "candles": 500
+  },
+  "SNGSP": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:29:45.717189",
+    "candles": 500
+  },
+  "MGNT": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:29:48.838276",
+    "candles": 500
+  },
+  "CHMF": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:29:55.112951",
+    "candles": 500
+  },
+  "NLMK": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:29:58.213231",
+    "candles": 500
+  },
+  "GMKN": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:30:01.533570",
+    "candles": 500
+  },
+  "PLZL": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:30:04.528801",
+    "candles": 500
+  },
+  "OZON": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:30:19.384373",
+    "candles": 500
+  },
+  "FIXP": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:30:22.486866",
+    "candles": 495
+  },
+  "PIKK": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:30:25.526256",
+    "candles": 500
+  },
+  "MAGN": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:30:28.508183",
+    "candles": 500
+  },
+  "RUAL": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:30:31.572140",
+    "candles": 500
+  },
+  "AFLT": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:30:34.599202",
+    "candles": 500
+  },
+  "MOEX": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:30:41.556193",
+    "candles": 500
+  },
+  "POSI": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:30:44.594868",
+    "candles": 500
+  },
+  "SIBN": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:30:47.760145",
+    "candles": 500
+  },
+  "AFKS": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:30:50.784516",
+    "candles": 500
+  },
+  "HYDR": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:30:53.882243",
+    "candles": 500
+  },
+  "PHOR": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:30:56.898262",
+    "candles": 500
+  },
+  "TRNFP": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:31:03.364416",
+    "candles": 500
+  },
+  "APTK": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:31:06.401491",
+    "candles": 500
+  },
+  "ENPG": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:31:09.720163",
+    "candles": 500
+  },
+  "IRAO": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:31:16.568863",
+    "candles": 500
+  },
+  "FEES": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:31:19.567080",
+    "candles": 500
+  },
+  "MSTT": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:31:22.528815",
+    "candles": 500
+  },
+  "OGKB": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:31:25.890470",
+    "candles": 500
+  },
+  "TGKA": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:31:28.859668",
+    "candles": 500
+  },
+  "MRKS": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:31:31.888458",
+    "candles": 500
+  },
+  "MRKV": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:31:35.170217",
+    "candles": 500
+  },
+  "MRKZ": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:31:38.149436",
+    "candles": 500
+  },
+  "MRKU": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:31:41.165944",
+    "candles": 500
+  },
+  "MRKK": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:31:44.176554",
+    "candles": 500
+  },
+  "LSNG": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:31:47.200105",
+    "candles": 500
+  },
+  "KMAZ": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:31:50.182496",
+    "candles": 500
+  },
+  "AVAN": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:31:53.208153",
+    "candles": 500
+  },
+  "BSPB": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:31:56.226653",
+    "candles": 500
+  },
+  "SVAV": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:31:59.228533",
+    "candles": 500
+  },
+  "MSNG": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:32:02.272040",
+    "candles": 500
+  },
+  "SFIN": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:32:05.479518",
+    "candles": 500
+  },
+  "FLOT": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:32:08.476442",
+    "candles": 500
+  },
+  "BELU": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:32:11.884840",
+    "candles": 500
+  },
+  "MVID": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:32:15.028057",
+    "candles": 500
+  },
+  "CARM": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:32:21.509309",
+    "candles": 500
+  },
+  "RNFT": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:32:24.772238",
+    "candles": 500
+  },
+  "SELG": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:32:27.738306",
+    "candles": 500
+  },
+  "RENI": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:32:30.830436",
+    "candles": 500
+  },
+  "RASP": {
+    "interval": 5,
+    "last_update": "2026-05-05T22:32:33.849509",
+    "candles": 500
+  }
+}
