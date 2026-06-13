@@ -1,4 +1,13 @@
-"""Клиент для работы с T-Bank API - ПОЛНАЯ ПРОДАКШН ВЕРСИЯ (с TTLCache)"""
+"""Клиент для работы с T-Bank API - ПОЛНАЯ ПРОДАКШН ВЕРСИЯ"""
+
+# ========== SSL FIX FOR T-BANK API ==========
+import os
+
+# Включаем встроенную валидацию сертификатов МинЦифры
+os.environ['SSL_TBANK_VERIFY'] = 'True'
+
+print("✅ SSL_TBANK_VERIFY=True - используем сертификаты МинЦифры")
+# ========== END FIX ==========
 
 import time
 from functools import wraps
@@ -9,7 +18,6 @@ from decimal import Decimal
 import signal
 from contextlib import contextmanager
 from threading import Lock
-from socket import timeout as SocketTimeoutError  # ← ЭТОТ ИМПОРТ НУЖЕН!
 
 MOSCOW_TZ = timezone(timedelta(hours=3))
 
