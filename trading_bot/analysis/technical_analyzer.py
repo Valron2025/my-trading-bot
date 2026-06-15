@@ -182,7 +182,7 @@ class TechnicalAnalyzer:
 
         return []
 
-    def analyze_with_candles(self, ticker: str, candles: List, current_price: float) -> Dict[str, Any]:
+    def analyze_with_candles(self, figi: str, ticker: str, candles: List, current_price: float) -> Dict[str, Any]:
         """
         СИНХРОННЫЙ анализ акции с уже полученными свечами
         БЕЗ EVENT LOOP - просто работаем с данными
@@ -204,7 +204,11 @@ class TechnicalAnalyzer:
 
             # Запуск StrategyEngine (синхронно!)
             signal_result = self.engine.analyze_signal(
-                prices=prices, volumes=volumes, name=ticker, candles=candle_dicts
+                prices=prices,
+                volumes=volumes,
+                name=ticker,
+                figi=figi,
+                candles=candle_dicts
             )
 
             elapsed = time.time() - start_time
@@ -223,7 +227,9 @@ class TechnicalAnalyzer:
                 'recommendation': signal_result.recommendation,
                 'rsi': signal_result.rsi,
                 'macd': signal_result.macd,
-                'volume_ratio': signal_result.volume_ratio
+                'volume_ratio': signal_result.volume_ratio,
+                'take_profit_pct': getattr(signal_result, 'take_profit_pct', 1.2),
+                'stop_loss_pct': getattr(signal_result, 'stop_loss_pct', 0.6)
             }
 
         except Exception as e:
@@ -330,7 +336,13 @@ class TechnicalAnalyzer:
         candle_patterns = self.analyze_candle_patterns(candle_dicts)
         supports, resistances, round_support, round_resistance = self.find_support_resistance_advanced(candle_dicts)
 
-        signal_result = self.engine.analyze_signal(prices, volumes, name, candles=candle_dicts)
+        signal_result = self.engine.analyze_signal(
+            prices=prices,
+            volumes=volumes,
+            name=name,
+            figi=figi,
+            candles=candle_dicts
+        )
 
         adjusted_score = self._adjust_score_by_patterns(
             signal_result.score, candle_patterns, supports, resistances,

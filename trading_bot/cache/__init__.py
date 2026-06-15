@@ -24,7 +24,7 @@ price_cache = TTLCache(default_ttl=5, max_size=1000, name="price_cache")
 positions_cache = TTLCache(default_ttl=5, max_size=200, name="positions_cache")
 
 # Кэш для свечей (30 секунд) - свечи обновляются реже
-candles_cache = TTLCache(default_ttl=30, max_size=500, name="candles_cache")
+candles_cache = TTLCache(default_ttl=300, max_size=500, name="candles_cache")
 
 # Кэш для маржи (10 секунд)
 margin_cache = TTLCache(default_ttl=30, max_size=10, name="margin_cache")

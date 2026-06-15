@@ -283,63 +283,63 @@ class MarketAnalyzer:
     def calculate_adaptive_parameters(self, total_capital: float, market: MarketConditions) -> Dict[str, Any]:
         """ПОЛНОСТЬЮ АВТОМАТИЧЕСКИЙ РАСЧЁТ ВСЕХ ПАРАМЕТРОВ"""
 
-        # Защита: микро-капитал (< 5000₽)
-        if total_capital < 5000:
-            success(f"\n🔒 МИКРО-КАПИТАЛ: {total_capital:.0f}₽ < 5000₽ — очень осторожная торговля")
-
-            min_trade_amount = max(300, int(total_capital * 0.15))
-            min_trade_amount = ((min_trade_amount + 9) // 10) * 10
-
-            return {
-                'trading_style': 'MICRO',
-                'take_profit': 1 + 1.5 / 100,
-                'stop_loss': 1 - 0.8 / 100,
-                'trailing_stop': 0.003,
-                'timeout_minutes': 10,
-                'cycle_seconds': 8,
-                'position_size_pct': 0.05,
-                'max_positions': 1,
-                'min_trade_amount': min_trade_amount,
-                'min_share_price': 1,
-                'max_share_price': 2000,
-                'min_confidence_score': 3,
-                'use_short': False,
-                'short_score_threshold': -20,
-                'long_score_threshold': 3,
-                'short_vwap_threshold': 1.02,
-                'short_volume_spike': 2.0,
-                'otc_timeout_multiplier': self.otc_timeout_multiplier,
-                'max_hold_minutes': 15,
-            }
-
-        # Защита: очень малый капитал (5000-10000₽)
-        if total_capital < 10000:
-            success(f"\n🔒 МАЛЫЙ КАПИТАЛ: {total_capital:.0f}₽ — осторожная торговля")
-
-            min_trade_amount = max(400, int(total_capital * 0.12))
-            min_trade_amount = ((min_trade_amount + 9) // 10) * 10
-
-            return {
-                'trading_style': 'SMALL',
-                'take_profit': 1 + 1.2 / 100,
-                'stop_loss': 1 - 0.6 / 100,
-                'trailing_stop': 0.004,
-                'timeout_minutes': 15,
-                'cycle_seconds': 10,
-                'position_size_pct': 0.08,
-                'max_positions': 2,
-                'min_trade_amount': min_trade_amount,
-                'min_share_price': 1,
-                'max_share_price': 2000,
-                'min_confidence_score': 2,
-                'use_short': False,
-                'short_score_threshold': -20,
-                'long_score_threshold': 2,
-                'short_vwap_threshold': 1.02,
-                'short_volume_spike': 2.0,
-                'otc_timeout_multiplier': self.otc_timeout_multiplier,
-                'max_hold_minutes': 20,
-            }
+        # # Защита: микро-капитал (< 5000₽)
+        # if total_capital < 5000:
+        #     success(f"\n🔒 МИКРО-КАПИТАЛ: {total_capital:.0f}₽ < 5000₽ — очень осторожная торговля")
+        #
+        #     min_trade_amount = max(300, int(total_capital * 0.15))
+        #     min_trade_amount = ((min_trade_amount + 9) // 10) * 10
+        #
+        #     return {
+        #         'trading_style': 'MICRO',
+        #         'take_profit': 1 + 1.5 / 100,
+        #         'stop_loss': 1 - 0.8 / 100,
+        #         'trailing_stop': 0.003,
+        #         'timeout_minutes': 10,
+        #         'cycle_seconds': 8,
+        #         'position_size_pct': 0.05,
+        #         'max_positions': 1,
+        #         'min_trade_amount': min_trade_amount,
+        #         'min_share_price': 1,
+        #         'max_share_price': 2000,
+        #         'min_confidence_score': 3,
+        #         'use_short': False,
+        #         'short_score_threshold': -20,
+        #         'long_score_threshold': 3,
+        #         'short_vwap_threshold': 1.02,
+        #         'short_volume_spike': 2.0,
+        #         'otc_timeout_multiplier': self.otc_timeout_multiplier,
+        #         'max_hold_minutes': 15,
+        #     }
+        #
+        # # Защита: очень малый капитал (5000-10000₽)
+        # if total_capital < 10000:
+        #     success(f"\n🔒 МАЛЫЙ КАПИТАЛ: {total_capital:.0f}₽ — осторожная торговля")
+        #
+        #     min_trade_amount = max(400, int(total_capital * 0.12))
+        #     min_trade_amount = ((min_trade_amount + 9) // 10) * 10
+        #
+        #     return {
+        #         'trading_style': 'SMALL',
+        #         'take_profit': 1 + 1.2 / 100,
+        #         'stop_loss': 1 - 0.6 / 100,
+        #         'trailing_stop': 0.004,
+        #         'timeout_minutes': 15,
+        #         'cycle_seconds': 10,
+        #         'position_size_pct': 0.08,
+        #         'max_positions': 2,
+        #         'min_trade_amount': min_trade_amount,
+        #         'min_share_price': 1,
+        #         'max_share_price': 2000,
+        #         'min_confidence_score': 2,
+        #         'use_short': False,
+        #         'short_score_threshold': -20,
+        #         'long_score_threshold': 2,
+        #         'short_vwap_threshold': 1.02,
+        #         'short_volume_spike': 2.0,
+        #         'otc_timeout_multiplier': self.otc_timeout_multiplier,
+        #         'max_hold_minutes': 20,
+        #     }
 
         # ========== АВТОМАТИЧЕСКИЙ ВЫБОР СТИЛЯ ==========
         trading_style, style_reason = self.select_trading_style(total_capital, market)
@@ -448,20 +448,20 @@ class MarketAnalyzer:
 
         return {
             'trading_style': trading_style.value,
-            'take_profit': 1 + take_profit / 100,
-            'stop_loss': 1 - stop_loss / 100,
-            'trailing_stop': trailing_stop / 100,
+            # ✅ ИСПРАВЛЕНО: возвращаем ПРОЦЕНТЫ, а не множители
+            'take_profit_pct': take_profit,  # например 1.5
+            'stop_loss_pct': stop_loss,  # например 0.8
+            'trailing_stop_pct': trailing_stop,  # например 0.5
             'timeout_minutes': timeout_minutes,
             'cycle_seconds': cycle_seconds,
-            'position_size_pct': position_size_pct,
+            'position_size_pct': position_size_pct * 100,  # в процентах (например 6.0)
             'max_positions': max_positions,
             'min_trade_amount': min_trade_amount,
             'min_share_price': min_share_price,
             'max_share_price': max_share_price,
-            'min_confidence_score': min_confidence,
+            'long_score_threshold': min_confidence,  # ← для LONG
+            'short_score_threshold': short_score_threshold,  # ← для SHORT
             'use_short': use_short,
-            'short_score_threshold': short_score_threshold,
-            'long_score_threshold': min_confidence,
             'short_vwap_threshold': 1.02,
             'short_volume_spike': 2.0,
             'otc_timeout_multiplier': self.otc_timeout_multiplier,

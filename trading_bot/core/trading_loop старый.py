@@ -23,71 +23,6 @@ from trading_bot.models import OrderSide
 
 from trading_bot.trading.position_closer import position_closer
 
-# ========== ПРОФАЙЛЕР ДЛЯ ОПТИМИЗАЦИИ ==========
-from collections import defaultdict
-import functools
-
-
-class SimpleProfiler:
-    """Простой профайлер для поиска узких мест"""
-    _instance = None
-    _timings = defaultdict(list)
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-
-    def measure(self, name: str):
-        def decorator(func):
-            @functools.wraps(func)
-            def wrapper(*args, **kwargs):
-                start = time.perf_counter()
-                try:
-                    result = func(*args, **kwargs)
-                    elapsed_ms = (time.perf_counter() - start) * 1000
-                    self._timings[name].append(elapsed_ms)
-
-                    # Предупреждение о медленных операциях
-                    if elapsed_ms > 100:
-                        warning(f"🐌 {name} = {elapsed_ms:.0f}ms")
-
-                    return result
-                except Exception as e:
-                    elapsed_ms = (time.perf_counter() - start) * 1000
-                    self._timings[name].append(elapsed_ms)
-                    raise
-
-            return wrapper
-
-        return decorator
-
-    def get_stats(self):
-        stats = {}
-        for name, times in self._timings.items():
-            if times:
-                stats[name] = {
-                    'avg_ms': sum(times) / len(times),
-                    'max_ms': max(times),
-                    'min_ms': min(times),
-                    'count': len(times)
-                }
-        return stats
-
-    def print_stats(self):
-        stats = self.get_stats()
-        if not stats:
-            return
-        info("\n" + "=" * 60)
-        info("📊 СТАТИСТИКА ПРОИЗВОДИТЕЛЬНОСТИ")
-        info("=" * 60)
-        for name, data in sorted(stats.items(), key=lambda x: x[1]['avg_ms'], reverse=True)[:15]:
-            info(f"   {name:<35} | ср:{data['avg_ms']:>6.1f}ms | макс:{data['max_ms']:>6.1f}ms | n={data['count']}")
-        info("=" * 60)
-
-
-profiler = SimpleProfiler()
-
 
 def _get_tbank():
     from trading_bot.api.tbank_client import tbank
@@ -129,207 +64,7 @@ class TradingLoop:
         self._top_tickers_cache: Optional[List[str]] = None
         self._top_tickers_cache_time: float = 0
 
-        # Отдельный поток для мониторинга позиций
-        self._position_monitor = None
-
-        # Кэш для технического анализа (60 секунд)
-        self._tech_cache = {}
-
-        self._last_check_time = 0  # для _check_positions
-        self._last_check_nontrading = 0  # для не торгового времени (опционально)
-
-        self._tech_analysis_cache = {}  # {cache_key: {'timestamp': time, 'data': result}}
-        self._tech_cache_ttl = 60  # 60 секунд TTL
-
         info("✅ TradingLoop инициализирован")
-
-    # ==================== МЕТОД ДЛЯ УМНОГО ЗАКРЫТИЯ ПОЗИЦИЙ ====================
-
-    def _should_close_position_smart_detailed(self, ticker: str, figi: str, side: str, qty: float,
-                                               profit_pct: float, pnl: float, position_value: float,
-                                               current_price: float, avg_price: float,
-                                               market_conditions: Dict, total_portfolio_pnl: float,
-                                               max_overnight: float, total_capital: float) -> Tuple[bool, str, float, List[str]]:
-        """
-        ИНТЕЛЛЕКТУАЛЬНЫЙ АНАЛИЗ позиции - стоит ли закрывать перед выходными/при критической марже
-
-        Возвращает:
-            should_close: bool - нужно ли закрыть
-            reason: str - причина решения
-            confidence: float - уверенность (0-1)
-            details: List[str] - детали анализа
-        """
-        details = []
-
-        # 1. Анализ убыточности
-        if profit_pct < 0:
-            # Убыточная позиция
-            details.append(f"📉 Позиция убыточная ({profit_pct:.2f}%)")
-
-            # Чем больше убыток, тем выше вероятность закрытия
-            loss_severity = min(1.0, abs(profit_pct) / 10.0)  # При -10% -> 1.0
-
-            # Проверка на "затянувшийся" убыток (есть ли надежда на разворот)
-            tech_analysis = self._analyze_position_technicals(ticker, figi, side, current_price, avg_price)
-            local_trend = tech_analysis.get('local_trend', 'neutral')
-            rsi = tech_analysis.get('rsi', 50)
-
-            # Сигналы на разворот
-            reversal_signals = []
-
-            if side.upper() == "LONG":
-                # Для LONG: oversold + бычий тренд
-                if tech_analysis.get('oversold', False):
-                    reversal_signals.append("oversold (RSI<30)")
-                if local_trend == "bullish":
-                    reversal_signals.append("локальный бычий тренд")
-                if rsi < 35:
-                    reversal_signals.append(f"RSI={rsi:.0f} (зона перепроданности)")
-            else:
-                # Для SHORT: overbought + медвежий тренд
-                if tech_analysis.get('overbought', False):
-                    reversal_signals.append("overbought (RSI>70)")
-                if local_trend == "bearish":
-                    reversal_signals.append("локальный медвежий тренд")
-                if rsi > 65:
-                    reversal_signals.append(f"RSI={rsi:.0f} (зона перекупленности)")
-
-            # Если есть сигналы разворота, снижаем вероятность закрытия
-            reversal_bonus = len(reversal_signals) * 0.2
-            reversal_bonus = min(0.6, reversal_bonus)
-
-            # Базовый скор закрытия для убыточной позиции
-            close_score = loss_severity * 0.8 - reversal_bonus
-
-            if reversal_signals:
-                details.append(f"🔄 Сигналы разворота: {', '.join(reversal_signals)}")
-                details.append(f"   → Снижаем вероятность закрытия на {reversal_bonus*100:.0f}%")
-
-            details.append(f"   → Скор закрытия: {close_score:.2f}")
-
-            if close_score > 0.5:
-                return True, f"убыток {profit_pct:.1f}%, нет сигналов разворота", close_score, details
-            else:
-                return False, f"убыток {profit_pct:.1f}%, есть надежда на разворот", 1 - close_score, details
-
-        # 2. Прибыльная позиция
-        details.append(f"📈 Позиция прибыльная ({profit_pct:.2f}%)")
-
-        # Анализируем, стоит ли фиксировать прибыль
-        tech_analysis = self._analyze_position_technicals(ticker, figi, side, current_price, avg_price)
-
-        # Локальный тренд
-        local_trend = tech_analysis.get('local_trend', 'neutral')
-        atr_pct = tech_analysis.get('atr_pct', 1.5)
-
-        # Проверка на сопротивление/поддержку
-        if side.upper() == "LONG":
-            near_resistance = tech_analysis.get('near_resistance', False)
-            overbought = tech_analysis.get('overbought', False)
-            trend_weakening = tech_analysis.get('trend_weakening', False)
-
-            if near_resistance:
-                details.append(f"⚠️ Цена у сопротивления")
-            if overbought:
-                details.append(f"⚠️ Перекупленность (RSI={tech_analysis.get('rsi', 50):.0f})")
-            if trend_weakening:
-                details.append(f"⚠️ Тренд ослабевает")
-
-            # Скор закрытия для LONG
-            if local_trend == "bearish":
-                close_score = 0.8
-                details.append(f"📉 Локальный тренд медвежий → закрываем")
-            elif near_resistance or overbought or trend_weakening:
-                close_score = 0.6
-                details.append(f"⚠️ Признаки разворота → вероятно закрытие")
-            else:
-                close_score = 0.2
-                details.append(f"✅ Тренд благоприятный → оставляем")
-        else:
-            # SHORT
-            near_support = tech_analysis.get('near_support', False)
-            oversold = tech_analysis.get('oversold', False)
-            trend_weakening = tech_analysis.get('trend_weakening', False)
-
-            if near_support:
-                details.append(f"⚠️ Цена у поддержки")
-            if oversold:
-                details.append(f"⚠️ Перепроданность (RSI={tech_analysis.get('rsi', 50):.0f})")
-            if trend_weakening:
-                details.append(f"⚠️ Тренд ослабевает")
-
-            if local_trend == "bullish":
-                close_score = 0.8
-                details.append(f"📈 Локальный тренд бычий → закрываем")
-            elif near_support or oversold or trend_weakening:
-                close_score = 0.6
-                details.append(f"⚠️ Признаки разворота → вероятно закрытие")
-            else:
-                close_score = 0.2
-                details.append(f"✅ Тренд благоприятный → оставляем")
-
-        # 3. Учёт рыночных условий
-        market_trend = market_conditions.get('trend', 'sideways')
-        market_volatility = market_conditions.get('volatility', 0.3)
-        news_risk = market_conditions.get('news_risk', 'neutral')
-
-        details.append(f"📊 Рынок: тренд={market_trend}, волатильность={market_volatility:.1%}")
-
-        # Корректировка
-        if market_trend == "bearish" and side.upper() == "LONG":
-            close_score += 0.2
-            details.append(f"⚠️ Медвежий рынок → риск для LONG")
-        elif market_trend == "bullish" and side.upper() == "SHORT":
-            close_score += 0.2
-            details.append(f"⚠️ Бычий рынок → риск для SHORT")
-
-        if market_volatility > 0.5:
-            close_score += 0.15
-            details.append(f"⚠️ Высокая волатильность → повышенный риск")
-
-        if news_risk == "negative" and side.upper() == "LONG":
-            close_score += 0.2
-            details.append(f"📰 Негативный новостной фон → риск для LONG")
-        elif news_risk == "positive" and side.upper() == "SHORT":
-            close_score += 0.2
-            details.append(f"📰 Позитивный новостной фон → риск для SHORT")
-
-        # 4. Учёт размера позиции
-        if total_capital > 0:
-            position_pct = (position_value / total_capital) * 100
-            details.append(f"📏 Размер позиции: {position_pct:.1f}% от капитала")
-
-            if position_pct > 20:
-                close_score += 0.2
-                details.append(f"⚠️ Крупная позиция → повышенный риск")
-
-        # 5. Учёт общего P&L портфеля
-        if total_portfolio_pnl < 0 and total_capital > 0:
-            portfolio_loss_pct = (abs(total_portfolio_pnl) / total_capital) * 100
-            details.append(f"📉 Портфель в минусе: {portfolio_loss_pct:.1f}%")
-            close_score += 0.15
-
-        # 6. Лимит переноса через выходные
-        if max_overnight < float('inf') and position_value > max_overnight:
-            details.append(f"⚠️ Позиция ({position_value:.0f}₽) превышает лимит переноса ({max_overnight:.0f}₽)")
-            close_score += 0.3
-
-        # Ограничиваем скор
-        close_score = min(0.95, max(0.05, close_score))
-
-        # Решение
-        should_close = close_score > 0.5
-
-        if should_close:
-            reason = f"скор закрытия {close_score:.0%} > 50%"
-        else:
-            reason = f"скор закрытия {close_score:.0%} ≤ 50%"
-
-        details.append(f"\n{'='*40}")
-        details.append(f"🎯 ИТОГОВЫЙ СКОР: {close_score:.0%}")
-        details.append(f"📌 РЕШЕНИЕ: {'ЗАКРЫТЬ' if should_close else 'ОСТАВИТЬ'}")
-
-        return should_close, reason, close_score, details
 
     async def start_websocket_for_ticker(self, ticker: str):
         """Запуск WebSocket для тикера"""
@@ -664,8 +399,8 @@ class TradingLoop:
                 return minutes
 
         # ДСВД/OTC сессия в выходные до 19:00
-        from trading_bot.utils.time_utils import is_dsvd_trading_time, is_otc_trading_time
-        if is_dsvd_trading_time() or is_otc_trading_time():
+        from trading_bot.utils.time_utils import is_weekend_trading_time, is_otc_trading_time
+        if is_weekend_trading_time() or is_otc_trading_time():
             close_time = dt_time(19, 0)
             if current_time < close_time:
                 minutes = (close_time.hour * 60 + close_time.minute) - (current_time.hour * 60 + current_time.minute)
@@ -752,41 +487,20 @@ class TradingLoop:
             total_position_value = 0.0
             positions_data = []
 
-            # ✅ СОБИРАЕМ ВСЕ FIGI ДЛЯ BATCH-ЗАПРОСА
-            figis_for_weekend = []
-            pos_map = {}  # figi -> pos
-
             for pos in positions:
                 if not isinstance(pos, dict):
                     continue
+
                 figi = pos.get('figi')
                 if not figi:
                     continue
-                qty = pos.get('quantity', 0)
-                if qty == 0:
-                    continue
 
-                figis_for_weekend.append(figi)
-                pos_map[figi] = pos
-
-            # ✅ ОДИН BATCH-ЗАПРОС ДЛЯ ВСЕХ ПОЗИЦИЙ
-            prices_for_weekend = {}
-            if figis_for_weekend:
-                prices_for_weekend = _get_tbank().get_last_prices_batch(figis_for_weekend)
-                debug(f"   📡 Получены цены для {len(prices_for_weekend)}/{len(figis_for_weekend)} позиций")
-
-            # ✅ ТЕПЕРЬ ОБРАБАТЫВАЕМ ПОЗИЦИИ С ЦЕНАМИ ИЗ СЛОВАРЯ
-            for figi, pos in pos_map.items():
                 qty = pos.get('quantity', 0)
                 avg_price = pos.get('avg_price', 0)
+                current_price = _get_tbank().get_current_price(figi)
 
-                # ✅ БЕРЁМ ЦЕНУ ИЗ СЛОВАРЯ (МГНОВЕННО)
-                current_price = prices_for_weekend.get(figi)
-                if not current_price:
-                    # Fallback: отдельный запрос только если не получили
-                    current_price = _get_tbank().get_current_price(figi)
-                    if not current_price:
-                        continue
+                if not current_price or qty == 0:
+                    continue
 
                 position_value = abs(qty) * current_price
                 total_position_value += position_value
@@ -794,11 +508,11 @@ class TradingLoop:
                 # Расчёт P&L
                 if qty > 0:  # LONG
                     pnl = (current_price - avg_price) * qty
-                    profit_pct = (current_price - avg_price) / avg_price * 100 if avg_price > 0 else 0
+                    profit_pct = (current_price - avg_price) / avg_price * 100
                     side = "LONG"
                 else:  # SHORT
                     pnl = (avg_price - current_price) * abs(qty)
-                    profit_pct = (avg_price - current_price) / avg_price * 100 if avg_price > 0 else 0
+                    profit_pct = (avg_price - current_price) / avg_price * 100
                     side = "SHORT"
 
                 total_portfolio_pnl += pnl
@@ -976,44 +690,26 @@ class TradingLoop:
     def _analyze_position_technicals(self, ticker: str, figi: str, side: str,
                                      current_price: float, avg_price: float) -> Dict[str, Any]:
         """Технический анализ конкретной позиции с определением ЛОКАЛЬНОГО тренда и ATR"""
-
-        # ✅ ПРОВЕРКА КЭША
-        cache_key = f"tech_{ticker}_{figi}_{side}_{int(current_price * 100)}_{int(avg_price * 100)}"
-
-        if hasattr(self, '_tech_analysis_cache'):
-            cached = self._tech_analysis_cache.get(cache_key)
-            if cached and (time.time() - cached['timestamp']) < self._tech_cache_ttl:
-                debug(f"   📦 Тех.анализ {ticker} из кэша (возраст: {time.time() - cached['timestamp']:.1f}с)")
-                return cached['data']
-
         try:
+            # ✅ ИСПОЛЬЗУЕМ side и avg_price (убираем тёмно-серый цвет)
             side_upper = side.upper() if side else "UNKNOWN"
             distance_from_entry_pct = ((current_price - avg_price) / avg_price * 100) if avg_price > 0 else 0
 
             candles = _get_tbank().get_candles(figi, days=2, interval_minutes=15)
 
-            # ✅ УМЕНЬШЕНО: 50 → 30 свечей
-            if candles and len(candles) > 30:
-                candles = candles[-30:]
+            if candles and len(candles) > 50:
+                candles = candles[-50:]
 
             if not candles or len(candles) < 20:
-                result = {
+                return {
                     'near_resistance': False, 'near_support': False,
                     'overbought': False, 'oversold': False,
                     'trend_weakening': False, 'volume_drop': False,
                     'local_trend': 'neutral', 'trend_strength': 0,
                     'atr_pct': 1.5,
-                    'side': side_upper,
-                    'distance_from_entry_pct': distance_from_entry_pct
+                    'side': side_upper,  # ✅ ДОБАВЛЕНО
+                    'distance_from_entry_pct': distance_from_entry_pct  # ✅ ДОБАВЛЕНО
                 }
-                # ✅ СОХРАНЕНИЕ В КЭШ
-                if not hasattr(self, '_tech_analysis_cache'):
-                    self._tech_analysis_cache = {}
-                self._tech_analysis_cache[cache_key] = {
-                    'timestamp': time.time(),
-                    'data': result
-                }
-                return result
 
             closes = []
             highs = []
@@ -1044,127 +740,102 @@ class TradingLoop:
                     highs.append(c)
                     lows.append(c)
 
-            if len(closes) < 20:
-                result = {
-                    'near_resistance': False, 'near_support': False,
-                    'overbought': False, 'oversold': False,
-                    'trend_weakening': False, 'volume_drop': False,
-                    'local_trend': 'neutral', 'trend_strength': 0,
-                    'atr_pct': 1.5,
-                    'side': side_upper,
-                    'distance_from_entry_pct': distance_from_entry_pct
+                if len(closes) < 20:
+                    return {
+                        'near_resistance': False, 'near_support': False,
+                        'overbought': False, 'oversold': False,
+                        'trend_weakening': False, 'volume_drop': False,
+                        'local_trend': 'neutral', 'trend_strength': 0,
+                        'atr_pct': 1.5,
+                        'side': side_upper,  # ✅ ДОБАВЛЕНО
+                        'distance_from_entry_pct': distance_from_entry_pct  # ✅ ДОБАВЛЕНО
+                    }
+
+                # ========== РАСЧЁТ ATR ==========
+                true_ranges = []
+                for i in range(1, len(closes)):
+                    high_low = highs[i] - lows[i]
+                    high_close = abs(highs[i] - closes[i - 1])
+                    low_close = abs(lows[i] - closes[i - 1])
+                    true_range = max(high_low, high_close, low_close)
+                    true_ranges.append(true_range)
+
+                atr = sum(true_ranges[-14:]) / min(14, len(true_ranges)) if true_ranges else 0
+                atr_pct = (atr / current_price) * 100 if current_price > 0 else 1.5
+
+                # ========== ОПРЕДЕЛЕНИЕ ЛОКАЛЬНОГО ТРЕНДА ==========
+                ma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else closes[-1]
+                ma10 = sum(closes[-10:]) / 10 if len(closes) >= 10 else closes[-1]
+                ma5 = sum(closes[-5:]) / 5 if len(closes) >= 5 else closes[-1]
+
+                current = closes[-1]
+
+                if current > ma20 and ma20 > ma10 and ma10 > ma5:
+                    local_trend = "bullish"
+                    trend_strength = min(1.0, (current - ma20) / ma20 * 10)
+                elif current < ma20 and ma20 < ma10 and ma10 < ma5:
+                    local_trend = "bearish"
+                    trend_strength = min(1.0, (ma20 - current) / ma20 * 10)
+                else:
+                    local_trend = "neutral"
+                    trend_strength = 0
+
+                # Определяем уровни
+                resistance = max(highs[-20:])
+                support = min(lows[-20:])
+
+                near_resistance = abs(current_price - resistance) / current_price < 0.015
+                near_support = abs(current_price - support) / current_price < 0.015
+
+                # RSI
+                rsi = self._calculate_rsi(closes)
+                overbought = rsi > 70
+                oversold = rsi < 30
+
+                # Тренд ослабевает?
+                recent_trend = (closes[-1] - closes[-10]) / closes[-10] if len(closes) >= 10 else 0
+                older_trend = (closes[-10] - closes[-20]) / closes[-20] if len(closes) >= 20 else 0
+                trend_weakening = abs(recent_trend) < abs(older_trend) * 0.5 if older_trend != 0 else False
+
+                # Объёмы падают?
+                if len(volumes) >= 20:
+                    recent_volume_avg = sum(volumes[-5:]) / 5 if len(volumes) >= 5 else 0
+                    older_volume_avg = sum(volumes[-20:-5]) / 15 if len(volumes) >= 20 else recent_volume_avg
+                    volume_drop = recent_volume_avg < older_volume_avg * 0.7 if older_volume_avg > 0 else False
+                else:
+                    volume_drop = False
+
+                # ✅ ВОЗВРАЩАЕМ С ДОБАВЛЕННЫМИ ПОЛЯМИ
+                return {
+                    'near_resistance': near_resistance,
+                    'near_support': near_support,
+                    'overbought': overbought,
+                    'oversold': oversold,
+                    'trend_weakening': trend_weakening,
+                    'volume_drop': volume_drop,
+                    'rsi': rsi,
+                    'local_trend': local_trend,
+                    'trend_strength': trend_strength,
+                    'atr': atr,
+                    'atr_pct': atr_pct,
+                    'ma20': ma20,
+                    'ma10': ma10,
+                    'side': side_upper,  # ✅ ДОБАВЛЕНО
+                    'distance_from_entry_pct': distance_from_entry_pct  # ✅ ДОБАВЛЕНО
                 }
-                # ✅ СОХРАНЕНИЕ В КЭШ
-                if not hasattr(self, '_tech_cache'):
-                    self._tech_cache = {}
-                self._tech_cache[cache_key] = {
-                    'timestamp': time.time(),
-                    'data': result
-                }
-                return result
-
-            # ========== РАСЧЁТ ATR ==========
-            true_ranges = []
-            for i in range(1, len(closes)):
-                high_low = highs[i] - lows[i]
-                high_close = abs(highs[i] - closes[i - 1])
-                low_close = abs(lows[i] - closes[i - 1])
-                true_range = max(high_low, high_close, low_close)
-                true_ranges.append(true_range)
-
-            atr = sum(true_ranges[-14:]) / min(14, len(true_ranges)) if true_ranges else 0
-            atr_pct = (atr / current_price) * 100 if current_price > 0 else 1.5
-
-            # ========== ОПРЕДЕЛЕНИЕ ЛОКАЛЬНОГО ТРЕНДА ==========
-            ma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else closes[-1]
-            ma10 = sum(closes[-10:]) / 10 if len(closes) >= 10 else closes[-1]
-            ma5 = sum(closes[-5:]) / 5 if len(closes) >= 5 else closes[-1]
-
-            current = closes[-1]
-
-            if current > ma20 and ma20 > ma10 and ma10 > ma5:
-                local_trend = "bullish"
-                trend_strength = min(1.0, (current - ma20) / ma20 * 10)
-            elif current < ma20 and ma20 < ma10 and ma10 < ma5:
-                local_trend = "bearish"
-                trend_strength = min(1.0, (ma20 - current) / ma20 * 10)
-            else:
-                local_trend = "neutral"
-                trend_strength = 0
-
-            # Определяем уровни
-            resistance = max(highs[-20:])
-            support = min(lows[-20:])
-
-            near_resistance = abs(current_price - resistance) / current_price < 0.015
-            near_support = abs(current_price - support) / current_price < 0.015
-
-            # RSI
-            rsi = self._calculate_rsi(closes)
-            overbought = rsi > 70
-            oversold = rsi < 30
-
-            # Тренд ослабевает?
-            recent_trend = (closes[-1] - closes[-10]) / closes[-10] if len(closes) >= 10 else 0
-            older_trend = (closes[-10] - closes[-20]) / closes[-20] if len(closes) >= 20 else 0
-            trend_weakening = abs(recent_trend) < abs(older_trend) * 0.5 if older_trend != 0 else False
-
-            # Объёмы падают?
-            if len(volumes) >= 20:
-                recent_volume_avg = sum(volumes[-5:]) / 5 if len(volumes) >= 5 else 0
-                older_volume_avg = sum(volumes[-20:-5]) / 15 if len(volumes) >= 20 else recent_volume_avg
-                volume_drop = recent_volume_avg < older_volume_avg * 0.7 if older_volume_avg > 0 else False
-            else:
-                volume_drop = False
-
-            # ✅ ФОРМИРУЕМ РЕЗУЛЬТАТ
-            result = {
-                'near_resistance': near_resistance,
-                'near_support': near_support,
-                'overbought': overbought,
-                'oversold': oversold,
-                'trend_weakening': trend_weakening,
-                'volume_drop': volume_drop,
-                'rsi': rsi,
-                'local_trend': local_trend,
-                'trend_strength': trend_strength,
-                'atr': atr,
-                'atr_pct': atr_pct,
-                'ma20': ma20,
-                'ma10': ma10,
-                'side': side_upper,
-                'distance_from_entry_pct': distance_from_entry_pct
-            }
-
-            # ✅ СОХРАНЕНИЕ В КЭШ
-            if not hasattr(self, '_tech_analysis_cache'):
-                self._tech_analysis_cache = {}
-            self._tech_analysis_cache[cache_key] = {
-                'timestamp': time.time(),
-                'data': result
-            }
-
-            return result
 
         except Exception as e:
             debug(f"Ошибка тех.анализа {ticker}: {e}")
-            result = {
+            return {
                 'near_resistance': False, 'near_support': False,
                 'overbought': False, 'oversold': False,
                 'trend_weakening': False, 'volume_drop': False,
                 'local_trend': 'neutral', 'trend_strength': 0,
                 'atr_pct': 1.5,
-                'side': side.upper() if side else "UNKNOWN",
+                'side': side.upper() if side else "UNKNOWN",  # ✅ ДОБАВЛЕНО
                 'distance_from_entry_pct': ((current_price - avg_price) / avg_price * 100) if avg_price > 0 else 0
+                # ✅ ДОБАВЛЕНО
             }
-            # ✅ ПРИ ОШИБКЕ ТОЖЕ СОХРАНЯЕМ
-            if not hasattr(self, '_tech_analysis_cache'):
-                self._tech_analysis_cache = {}
-            self._tech_analysis_cache[cache_key] = {
-                'timestamp': time.time(),
-                'data': result
-            }
-            return result
 
     def _calculate_rsi(self, closes: List[float], period: int = 14) -> float:
         """Расчёт RSI"""
@@ -1258,8 +929,8 @@ class TradingLoop:
         except Exception as e:
             debug(f"Ошибка проверки API: {e}")
             try:
-                from trading_bot.utils.time_utils import is_dsvd_trading_time, is_otc_trading_time
-                can_trade_weekend = is_dsvd_trading_time() or is_otc_trading_time()
+                from trading_bot.utils.time_utils import is_weekend_trading_time, is_otc_trading_time
+                return is_weekend_trading_time() or is_otc_trading_time()
             except:
                 return False
 
@@ -1269,11 +940,11 @@ class TradingLoop:
             warning("⚠️ TradingLoop уже запущен")
             return
     
-        from trading_bot.utils.time_utils import get_moscow_time, is_dsvd_trading_time, is_otc_trading_time
+        from trading_bot.utils.time_utils import get_moscow_time, is_weekend_trading_time, is_otc_trading_time
     
         now = get_moscow_time()
         is_weekend = now.weekday() >= 5
-        can_trade_weekend = is_dsvd_trading_time() or is_otc_trading_time()
+        can_trade_weekend = is_weekend_trading_time() or is_otc_trading_time()
         
         # Синхронизация позиций при старте
         self._sync_positions()
@@ -1288,11 +959,6 @@ class TradingLoop:
             self._thread = threading.Thread(target=self._weekend_wait_loop, daemon=True, name="WeekendWaitLoop")
             self._thread.start()
             return
-
-        # Запускаем отдельный поток для мониторинга позиций
-        self._position_monitor = PositionMonitor(self)
-        self._position_monitor.start()
-        info("✅ PositionMonitor запущен (проверка позиций каждые 2 секунды)")
     
         info("🔄 Запуск TradingLoop...")
         self._running = True
@@ -1302,11 +968,14 @@ class TradingLoop:
 
     def _run_async_wrapper(self):
         """Обёртка для запуска асинхронного _run в потоке"""
+        import asyncio
+import nest_asyncio
+nest_asyncio.apply()
         asyncio.run(self._run())
 
     def _weekend_wait_loop(self):
         """Цикл ожидания в выходные дни"""
-        from trading_bot.utils.time_utils import get_moscow_time, is_dsvd_trading_time, is_otc_trading_time
+        from trading_bot.utils.time_utils import get_moscow_time, is_weekend_trading_time, is_otc_trading_time
 
         info("🌙 Режим ожидания выходного дня активирован")
 
@@ -1314,7 +983,7 @@ class TradingLoop:
             now = get_moscow_time()
             is_weekend = now.weekday() >= 5
 
-            can_trade_weekend = is_dsvd_trading_time() or is_otc_trading_time()
+            can_trade_weekend = is_weekend_trading_time() or is_otc_trading_time()
 
             if not is_weekend or can_trade_weekend:
                 info("🏛️ Торговля возобновляется! Запускаем основной цикл...")
@@ -1329,10 +998,6 @@ class TradingLoop:
 
     def stop_loop(self):
         """Остановка торгового цикла"""
-        # Останавливаем монитор
-        if self._position_monitor:
-            self._position_monitor.stop()
-
         info("🛑 Остановка TradingLoop...")
         self._running = False
         if self._thread:
@@ -1369,8 +1034,8 @@ class TradingLoop:
         now = get_moscow_time()
         is_weekend = now.weekday() >= 5
 
-        from trading_bot.utils.time_utils import is_dsvd_trading_time, is_otc_trading_time
-        can_trade_weekend = is_dsvd_trading_time() or is_otc_trading_time()
+        from trading_bot.utils.time_utils import is_weekend_trading_time, is_otc_trading_time
+        can_trade_weekend = is_weekend_trading_time() or is_otc_trading_time()
 
         if is_weekend and not can_trade_weekend:
             info("🌙 ВЫХОДНОЙ ДЕНЬ - ТОРГОВЛЯ НЕВОЗМОЖНА")
@@ -1440,8 +1105,8 @@ class TradingLoop:
                 now = get_moscow_time()
                 is_weekend = now.weekday() >= 5
 
-                from trading_bot.utils.time_utils import is_dsvd_trading_time, is_otc_trading_time
-                can_trade_weekend = is_dsvd_trading_time() or is_otc_trading_time()
+                from trading_bot.utils.time_utils import is_weekend_trading_time, is_otc_trading_time
+                can_trade_weekend = is_weekend_trading_time() or is_otc_trading_time()
 
                 if is_weekend and not can_trade_weekend and not weekend_mode:
                     weekend_mode = True
@@ -1479,14 +1144,15 @@ class TradingLoop:
                 info(f"   ⏰ Торговля разрешена: {trading_allowed}")
 
                 if not trading_allowed:
-                    # ✅ ИЗМЕНИТЬ: 60 → 300 секунд (5 минут) ночью
-                    info(f"   ⏸️ Торговое время выключено, ждём 300 секунд")
-                    time.sleep(300)  # было 60
+                    info(f"   ⏸️ Торговое время выключено, ждём 60 секунд")
+                    time.sleep(60)
                     continue
 
                 # ========== 2. ПОЛУЧЕНИЕ КАПИТАЛА ==========
                 info("💰 [2/11] ПОЛУЧЕНИЕ КАПИТАЛА...")
                 try:
+                    available: float
+                    total_capital: float
                     available, total_capital, _ = _get_tbank().get_available_funds()
                     info(f"   💰 КАПИТАЛ: {total_capital:.0f}₽ | СВОБОДНО: {available:.0f}₽")
 
@@ -1498,46 +1164,20 @@ class TradingLoop:
                         config.total_capital = total_capital
                         debug(f"   💰 Авто-обновление капитала в config: {total_capital:.2f}₽")
 
-                    # ✅ ТОЛЬКО ОДИН ВЫЗОВ АДАПТАЦИИ
-                    self._adaptive_reconfigure(total_capital)  # ← ЭТОТ ОСТАВИТЬ
+                    if total_capital == 0 and available == 0:
+                        warning("   ⚠️ КАПИТАЛ = 0₽! Проверьте подключение к T-Bank API и токен!")
+
+                        try:
+                            positions = self.bot._get_positions(force_refresh=True)
+                            info(f"   📊 Позиций у брокера: {len(positions)}")
+                        except Exception as e2:
+                            warning(f"   ❌ Ошибка получения позиций: {e2}")
 
                 except Exception as e:
                     error(f"   ❌ Ошибка получения капитала: {e}")
                     self._consecutive_errors += 1
                     time.sleep(10)
                     continue
-
-                self._adaptive_reconfigure(total_capital)
-
-                # ========== АВТОМАТИЧЕСКАЯ АДАПТАЦИЯ ПАРАМЕТРОВ ==========
-                from trading_bot.analysis.market_analyzer import market_analyzer
-
-                # 1. Анализируем рыночные условия
-                market_conditions = market_analyzer.analyze_market_conditions()
-
-                # 2. Рассчитываем адаптивные параметры
-                adaptive_params = market_analyzer.calculate_adaptive_parameters(
-                    total_capital=total_capital,
-                    market=market_conditions
-                )
-
-                # 3. ПРИМЕНЯЕМ КОНФИГУРАЦИЮ
-                config.take_profit_pct = adaptive_params.get('take_profit_pct', config.take_profit_pct)
-                config.stop_loss_pct = adaptive_params.get('stop_loss_pct', config.stop_loss_pct)
-                config.trailing_stop_pct = adaptive_params.get('trailing_stop_pct', config.trailing_stop_pct)
-                config.max_positions = adaptive_params.get('max_positions', config.max_positions)
-                config.min_trade_amount = adaptive_params.get('min_trade_amount', config.min_trade_amount)
-                config.adaptive_cycle_seconds = adaptive_params.get('cycle_seconds', config.adaptive_cycle_seconds)
-                config.adaptive_timeout_minutes = adaptive_params.get('timeout_minutes',
-                                                                      config.adaptive_timeout_minutes)
-
-                # 4. Обновляем пороги в StrategyEngine
-                if hasattr(self.bot, 'technical_analyzer') and self.bot.technical_analyzer:
-                    self.bot.technical_analyzer.engine.score_threshold_long = adaptive_params['long_score_threshold']
-                    self.bot.technical_analyzer.engine.score_threshold_short = adaptive_params['short_score_threshold']
-
-                info(f"📊 АДАПТАЦИЯ: TP={config.take_profit_pct:.1f}%, SL={config.stop_loss_pct:.1f}%, "
-                     f"позиций={config.max_positions}, порог={adaptive_params['long_score_threshold']}")
 
                 # ========== 3. АВТОМАТИЧЕСКАЯ НАСТРОЙКА SHORT ==========
                 info("🔻 [3/11] НАСТРОЙКА SHORT...")
@@ -1575,20 +1215,6 @@ class TradingLoop:
                 info(f"   📊 ПОЗИЦИЙ: {current_positions}")
 
                 if current_positions > 0:
-                    # ✅ СОБИРАЕМ ВСЕ FIGI В СПИСОК
-                    figis_to_update = []
-                    for pos in positions:
-                        if isinstance(pos, dict):
-                            figi = pos.get('figi')
-                            if figi:
-                                figis_to_update.append(figi)
-
-                    # ✅ ОДИН BATCH-ЗАПРОС ДЛЯ ВСЕХ ПОЗИЦИЙ
-                    prices_dict = {}
-                    if figis_to_update:
-                        prices_dict = _get_tbank().get_last_prices_batch(figis_to_update)
-                        debug(f"   📡 Получены цены для {len(prices_dict)}/{len(figis_to_update)} позиций")
-
                     for pos in positions:
                         if not isinstance(pos, dict):
                             debug(f"   ⚠️ Пропуск позиции: ожидался dict, получен {type(pos)}")
@@ -1599,12 +1225,7 @@ class TradingLoop:
                         qty = pos.get('quantity', 0)
                         avg = pos.get('avg_price', 0)
                         side = "SHORT" if qty < 0 else "LONG"
-
-                        # ✅ БЕРЁМ ЦЕНУ ИЗ СЛОВАРЯ (МГНОВЕННО)
-                        cur = prices_dict.get(figi)
-                        if not cur:
-                            # Fallback: отдельный запрос только если не получили
-                            cur = _get_tbank().get_current_price(figi)
+                        cur = _get_tbank().get_current_price(figi)
 
                         if cur:
                             if qty < 0:
@@ -1621,7 +1242,7 @@ class TradingLoop:
                 # ========== 4.5 ПРОВЕРКА TP/SL (ПЕРЕД МАРЖЕЙ!) ==========
                 info("⚡ [4.6/11] БЫСТРОЕ СКАНИРОВАНИЕ...")
 
-                top_tickers = self._get_top_liquid_tickers(limit=5)
+                top_tickers = self._get_top_liquid_tickers(limit=10)
 
                 quick_candidates = []
                 for ticker in top_tickers:
@@ -1788,125 +1409,9 @@ class TradingLoop:
                 # ========== 9. ОТПРАВКА ЕЖЕДНЕВНОГО ОТЧЁТА ==========
                 self._send_daily_report()
 
-                # ========== 10. ОЧИСТКА ДУБЛИКАТОВ ЗАЯВОК (АВТОМАТИЧЕСКАЯ) ==========
-                info("🧹 [9/11] АВТОМАТИЧЕСКАЯ ОЧИСТКА ЗАВИСШИХ ЗАЯВОК...")
-
-                try:
-                    from trading_bot.api.tbank_client import tbank
-
-                    # Получаем текущее время для логов
-                    from trading_bot.utils.time_utils import get_moscow_time
-                    cleanup_start = get_moscow_time()
-                    debug(f"   🕐 Начало очистки: {cleanup_start.strftime('%H:%M:%S')}")
-
-                    # Получаем список активных заявок ДО очистки
-                    orders_before = tbank.get_active_orders()
-                    debug(f"   📊 Активных заявок ДО очистки: {len(orders_before)}")
-
-                    if orders_before:
-                        for order in orders_before:
-                            ticker = order.get('ticker', 'unknown')
-                            direction = order.get('direction', '?')
-                            price = order.get('price', 0)
-                            qty = order.get('quantity', 0)
-                            created = order.get('created_at', '?')
-                            debug(f"      - {ticker}: {direction} {qty}шт по {price:.2f}₽ (создана: {created})")
-
-                    # Автоматическая очистка (отменяет заявки старше 5 минут и дубликаты)
-                    result = tbank.cleanup_stuck_orders_auto(max_age_seconds=300, force_all=False)
-
-                    # Детальный вывод результатов
-                    info(f"\n   {'─' * 50}")
-                    info(f"   📊 РЕЗУЛЬТАТЫ АВТО-ОЧИСТКИ:")
-                    info(f"   {'─' * 50}")
-
-                    if result['cancelled'] > 0:
-                        success(f"   ✅ ОТМЕНЕНО ЗАЯВОК: {result['cancelled']}")
-                        info(f"   ❌ Не удалось отменить: {result['failed']}")
-                        info(f"   📊 Было заявок: {result['orders_before']}")
-                        info(f"   📊 Осталось заявок: {result['orders_after']}")
-
-                        # Детальный список отменённых заявок
-                        if result['details']:
-                            info(f"\n   📋 СПИСОК ОТМЕНЁННЫХ ЗАЯВОК:")
-                            for idx, detail in enumerate(result['details'][:10], 1):
-                                info(
-                                    f"      {idx}. {detail['ticker']}: {detail['reason']} (order_id={detail['order_id']})")
-
-                            if len(result['details']) > 10:
-                                info(f"      ... и ещё {len(result['details']) - 10} заявок")
-
-                        # Отправляем уведомление в Telegram
-                        try:
-                            telegram = _get_telegram()
-                            if telegram:
-                                # Формируем красивое сообщение
-                                if result['cancelled'] == 1:
-                                    detail_text = f"• {result['details'][0]['ticker']}: {result['details'][0]['reason']}"
-                                else:
-                                    detail_lines = [f"• {d['ticker']}: {d['reason']}" for d in result['details'][:5]]
-                                    detail_text = "\n".join(detail_lines)
-                                    if len(result['details']) > 5:
-                                        detail_text += f"\n• ... и ещё {len(result['details']) - 5} заявок"
-
-                                telegram.send_message(
-                                    f"🧹 **АВТО-ОЧИСТКА ЗАЯВОК**\n\n"
-                                    f"🕐 {cleanup_start.strftime('%H:%M:%S')}\n"
-                                    f"{'─' * 25}\n"
-                                    f"✅ Отменено: **{result['cancelled']}**\n"
-                                    f"❌ Не удалось: {result['failed']}\n"
-                                    f"📊 Было: {result['orders_before']} → Осталось: {result['orders_after']}\n"
-                                    f"{'─' * 25}\n"
-                                    f"📋 **Детали:**\n{detail_text}"
-                                )
-                                success(f"   📱 Уведомление отправлено в Telegram")
-                        except Exception as e:
-                            debug(f"   ⚠️ Ошибка отправки Telegram: {e}")
-
-                    elif result['failed'] > 0:
-                        warning(f"   ⚠️ АВТО-ОЧИСТКА: не удалось отменить {result['failed']} заявок")
-                        info(f"   📊 Было заявок: {result['orders_before']}")
-                        info(f"   📊 Осталось заявок: {result['orders_after']}")
-
-                    else:
-                        debug(f"   ✅ Зависших заявок не найдено")
-                        if result['orders_before'] > 0:
-                            debug(f"   📊 Активных заявок: {result['orders_before']} (все актуальны)")
-
-                    # Получаем список заявок ПОСЛЕ очистки
-                    orders_after = tbank.get_active_orders()
-                    if orders_after:
-                        debug(f"\n   📊 Активных заявок ПОСЛЕ очистки: {len(orders_after)}")
-                        for order in orders_after:
-                            ticker = order.get('ticker', 'unknown')
-                            direction = order.get('direction', '?')
-                            price = order.get('price', 0)
-                            qty = order.get('quantity', 0)
-                            debug(f"      - {ticker}: {direction} {qty}шт по {price:.2f}₽")
-
-                    cleanup_end = get_moscow_time()
-                    elapsed = (cleanup_end - cleanup_start).total_seconds()
-                    info(f"   ⏱ Время выполнения: {elapsed:.2f}с")
-
-                except ImportError as e:
-                    warning(f"   ⚠️ Не удалось импортировать tbank: {e}")
-                except AttributeError as e:
-                    warning(f"   ⚠️ Метод cleanup_stuck_orders_auto не найден: {e}")
-                    info(f"   💡 Убедитесь, что метод добавлен в TBankClient")
-                except Exception as e:
-                    error(f"   ❌ КРИТИЧЕСКАЯ ОШИБКА АВТО-ОЧИСТКИ: {e}")
-                    import traceback
-                    debug(f"      {traceback.format_exc()}")
-
-                # ========== 9.5 ОЧИСТКА ПАМЯТИ (каждые 10 циклов) ==========
-                if self._cycle_count % 10 == 0:
-                    try:
-                        from trading_bot.utils.memory_utils import trim_caches
-                        result = trim_caches(self.bot)
-                        if result['freed_mb'] > 5:
-                            info(f"   💾 Очистка памяти: освобождено {result['freed_mb']:.1f}MB")
-                    except Exception as e:
-                        debug(f"   ⚠️ Ошибка очистки памяти: {e}")
+                # ========== 10. ОЧИСТКА ДУБЛИКАТОВ ЗАЯВОК ==========
+                info("🧹 [9/11] ОЧИСТКА ДУБЛИКАТОВ ЗАЯВОК...")
+                self._cleanup_duplicate_orders()
 
                 # ========== 11. ОЧИСТКА УСТАРЕВШИХ ЗАЯВОК ==========
                 info("⏰ [10/11] ОЧИСТКА УСТАРЕВШИХ ЗАЯВОК...")
@@ -1919,15 +1424,6 @@ class TradingLoop:
                 info(f"⏳ [11/11] ПАУЗА: {sleep_time:.1f} сек (цикл занял {cycle_time:.1f} сек)")
                 info(f"   {'=' * 50}")
                 time.sleep(sleep_time)
-                if self._cycle_count % 100 == 0:
-                    from trading_bot.api.tbank_client import api_monitor
-                    stats = api_monitor.get_stats()
-                    if stats:
-                        info("\n🌐 СТАТИСТИКА API Т-БАНКА:")
-                        for name, data in stats.items():
-                            info(
-                                f"   {name:<25} | ср:{data['avg_ms']:>6.1f}ms | макс:{data['max_ms']:>6.1f}ms | n={data['count']}")
-                    profiler.print_stats()
 
             except Exception as e:
                 error(f"❌ КРИТИЧЕСКАЯ ОШИБКА В ТОРГОВОМ ЦИКЛЕ: {e}")
@@ -1953,47 +1449,6 @@ class TradingLoop:
 
         info("🛑 TradingLoop остановлен")
 
-    def _adaptive_reconfigure(self, total_capital: float):
-        """Единый метод адаптации всех параметров"""
-        if total_capital <= 0:
-            return
-
-        from trading_bot.analysis.market_analyzer import market_analyzer
-        from trading_bot.config import config
-
-        # Анализ рынка
-        market = market_analyzer.analyze_market_conditions()
-
-        # Расчёт параметров
-        params = market_analyzer.calculate_adaptive_parameters(total_capital, market)
-
-        # ✅ ПРИМЕНЯЕМ КОНФИГУРАЦИЮ (теперь с правильными ключами)
-        config.take_profit_pct = params.get('take_profit_pct', config.take_profit_pct)
-        config.stop_loss_pct = params.get('stop_loss_pct', config.stop_loss_pct)
-        config.trailing_stop_pct = params.get('trailing_stop_pct', config.trailing_stop_pct)
-        config.max_positions = params.get('max_positions', config.max_positions)
-        config.min_trade_amount = params.get('min_trade_amount', config.min_trade_amount)
-        config.adaptive_cycle_seconds = params.get('cycle_seconds', config.adaptive_cycle_seconds)
-        config.adaptive_timeout_minutes = params.get('timeout_minutes', config.adaptive_timeout_minutes)
-        config.long_score_threshold = params.get('long_score_threshold', config.long_score_threshold)
-        config.short_score_threshold = params.get('short_score_threshold', config.short_score_threshold)
-        config.use_short = params.get('use_short', config.use_short)
-
-        # Обновление в StrategyEngine
-        if hasattr(self.bot, 'technical_analyzer') and self.bot.technical_analyzer:
-            engine = self.bot.technical_analyzer.engine
-            if engine:
-                engine.score_threshold_long = config.long_score_threshold
-                engine.score_threshold_short = config.short_score_threshold
-                engine.take_profit_pct = config.take_profit_pct
-                engine.stop_loss_pct = config.stop_loss_pct
-                engine.trailing_stop_pct = config.trailing_stop_pct
-
-        # Логируем изменения
-        info(f"📊 АДАПТАЦИЯ: TP={config.take_profit_pct:.1f}%, SL={config.stop_loss_pct:.1f}%, "
-             f"позиций={config.max_positions}, порог LONG≥{config.long_score_threshold}, "
-             f"SHORT≤{config.short_score_threshold}, SHORT={'✅' if config.use_short else '❌'}")
-
     def _get_top_liquid_tickers(self, limit: int = 10) -> List[str]:
         """
         Получение топ-N самых ликвидных тикеров на основе объёма торгов в рублях
@@ -2013,9 +1468,7 @@ class TradingLoop:
             # Получаем все акции
             all_shares = tbank.get_all_shares(limit=500)
 
-            # ✅ СОБИРАЕМ ВСЕ FIGI ДЛЯ BATCH-ЗАПРОСА
-            figis_for_liquid = []
-            shares_data = []
+            liquid_shares = []
 
             for share in all_shares:
                 # Только рублёвые акции
@@ -2026,68 +1479,28 @@ class TradingLoop:
                 if not ticker:
                     continue
 
+                # Пытаемся получить цену
                 figi = share.get('figi')
                 if not figi:
                     continue
 
-                figis_for_liquid.append(figi)
-                shares_data.append({
-                    'share': share,
-                    'figi': figi,
-                    'ticker': ticker
-                })
-
-            # ✅ ОДИН BATCH-ЗАПРОС ДЛЯ ВСЕХ ЦЕН
-            prices_dict = {}
-            if figis_for_liquid:
-                prices_dict = tbank.get_last_prices_batch(figis_for_liquid)
-                debug(f"   📡 Получены цены для {len(prices_dict)}/{len(figis_for_liquid)} тикеров")
-
-            # ✅ ТЕПЕРЬ ОБРАБАТЫВАЕМ ТИКЕРЫ С ЦЕНАМИ ИЗ СЛОВАРЯ
-            liquid_shares = []
-
-            for data in shares_data:
-                share = data['share']
-                ticker = data['ticker']
-                figi = data['figi']
-
-                # ✅ БЕРЁМ ЦЕНУ ИЗ СЛОВАРЯ (МГНОВЕННО)
-                current_price = prices_dict.get(figi)
+                # Получаем реальную текущую цену
+                current_price = tbank.get_current_price(figi)
                 if not current_price or current_price <= 0:
-                    # Fallback: цена из объекта акции
+                    # Если не получили цену, пробуем из данных
                     current_price = share.get('price', 0) or share.get('last_price', 0) or 0
 
                 lot = share.get('lot', 1)
 
-                # Получаем объём торгов за последние 24 часа (если доступно)
-                volume_24h = share.get('volume_24h', 0) or share.get('turnover', 0)
-
-                # Оценка ликвидности: цена * лот + бонус за объём торгов
+                # Оценка ликвидности: цена * лот (чем дороже лот, тем ликвиднее)
                 liquidity_score = current_price * lot
-                if volume_24h > 0:
-                    liquidity_score += volume_24h / 1000000  # Добавляем объём в млн руб.
 
                 if liquidity_score > 0:
                     liquid_shares.append((ticker, liquidity_score))
                     debug(f"   {ticker}: цена={current_price:.2f}, лот={lot}, ликвидность={liquidity_score:.0f}")
 
-            # Сортируем по ликвидности
+            # Сортируем по ликвидности (от большего к меньшему)
             liquid_shares.sort(key=lambda x: x[1], reverse=True)
-
-            if not liquid_shares:
-                warning("⚠️ Не удалось получить список ликвидных тикеров")
-                # Пробуем получить хотя бы какие-то тикеры из первого попавшегося списка
-                if all_shares:
-                    top_tickers = [s.get('ticker') for s in all_shares[:limit] if s.get('ticker')]
-                    if top_tickers:
-                        info(f"📊 Используем первые {len(top_tickers)} доступных тикеров: {', '.join(top_tickers[:5])}")
-                        self._top_tickers_cache = top_tickers
-                        self._top_tickers_cache_time = time.time()
-                        return top_tickers[:limit]
-
-                # Если совсем ничего нет, возвращаем пустой список
-                warning("⚠️ Нет доступных тикеров для анализа")
-                return []
 
             # Берём топ-N
             top_tickers = [ticker for ticker, _ in liquid_shares[:limit]]
@@ -2098,33 +1511,28 @@ class TradingLoop:
 
             if top_tickers:
                 info(f"📊 Динамический топ-{limit} ликвидных тикеров: {', '.join(top_tickers[:5])}")
+            else:
+                # Если ничего не нашли, используем fallback
+                fallback = ["SBER", "GAZP", "LKOH", "ROSN", "TATN", "NVTK", "MGNT", "ALRS", "AFLT", "VTBR"]
+                warning("⚠️ Не удалось определить топ тикеры, используем базовый список")
+                return fallback[:limit]
 
-                # Выводим топ-10 для отладки (только если собрано достаточно)
-                if len(liquid_shares) >= 10:
-                    top_10 = liquid_shares[:10]
-                    debug("📊 Топ-10 по ликвидности:")
-                    for ticker, score in top_10:
-                        debug(f"   {ticker}: {score:.0f}")
+            # После сбора liquid_shares, добавьте:
+            info(f"DEBUG: собрано {len(liquid_shares)} тикеров с ликвидностью")
+
+            if liquid_shares:
+                # Выводим топ-10 для проверки
+                top_10 = sorted(liquid_shares, key=lambda x: x[1], reverse=True)[:10]
+                for ticker, score in top_10:
+                    info(f"   {ticker}: {score:.0f}")
 
             return top_tickers
 
         except Exception as e:
-            error(f"❌ Ошибка получения топ-тикеров: {e}")
-            # В случае ошибки пробуем получить хотя бы какие-то тикеры
-            try:
-                # Пытаемся получить любые доступные акции
-                all_shares = tbank.get_all_shares(limit=limit)
-                if all_shares:
-                    fallback_tickers = [s.get('ticker') for s in all_shares if s.get('ticker')]
-                    if fallback_tickers:
-                        info(f"📊 Используем доступные тикеры из API: {', '.join(fallback_tickers[:5])}")
-                        return fallback_tickers[:limit]
-            except:
-                pass
-
-            # Если API совсем недоступен, возвращаем пустой список
-            warning("⚠️ API недоступен, поиск сигналов будет пропущен")
-            return []
+            warning(f"⚠️ Ошибка получения топ-тикеров: {e}")
+            # Fallback
+            fallback = ["SBER", "GAZP", "LKOH", "ROSN", "TATN", "NVTK", "MGNT", "ALRS", "AFLT", "VTBR"]
+            return fallback[:limit]
 
     async def _try_open_quick_position(self, candidate, total_capital, available_funds) -> bool:
         """Попытка открыть позицию по быстрому кандидату"""
@@ -2427,7 +1835,6 @@ class TradingLoop:
 
     # ==================== ОСТАЛЬНЫЕ МЕТОДЫ ====================
 
-    @profiler.measure("sync_positions")
     def _sync_positions(self):
         """Синхронизация позиций при старте"""
         try:
@@ -2438,15 +1845,15 @@ class TradingLoop:
             warning(f"⚠️ Ошибка синхронизации позиций: {e}")
 
     def _is_trading_time(self) -> bool:
-        """Проверка, можно ли торговать сейчас (ПРЯМАЯ ПРОВЕРКА, без рекурсии)"""
+        """Проверка, можно ли торговать сейчас"""
         from ..utils.time_utils import (
             get_moscow_time,
             is_pre_market_time,
             is_main_session_time,
             is_evening_session_time,
             is_technical_break,
+            is_weekend_trading_time,
             is_dsvd_trading_time,
-            is_otc_trading_time,
             is_holiday,
         )
         from ..config import config
@@ -2455,37 +1862,36 @@ class TradingLoop:
         weekday = now.weekday()
         is_weekend = weekday >= 5
 
-        # ========== 1. ТЕХНИЧЕСКИЙ ПЕРЕРЫВ ==========
+        if is_holiday(now):
+            # В праздник торгуем ТОЛЬКО в часы ДСВД
+            if is_dsvd_trading_time():
+                debug(f"   🎉 Праздничный день, ДСВД активна - торговля разрешена")
+                # Не возвращаем False, продолжаем проверку
+            else:
+                debug(f"   🎄 Праздничный день, ДСВД не активна - торговля запрещена")
+                return False
+
         if is_technical_break():
             debug(f"   ⏸️ Технический перерыв - торговля запрещена")
             return False
 
-        # ========== 2. ДСВД/OTC СЕССИЯ (ПРЯМАЯ ПРОВЕРКА) ==========
-        # Проверяем напрямую, без вызова is_weekend_trading_time()
-        if is_dsvd_trading_time() or is_otc_trading_time():
+        if is_weekend and is_weekend_trading_time():
             config.is_weekend_session = True
-            config.is_otc_mode = True
-            debug(f"   📊 ДСВД/OTC СЕССИЯ АКТИВНА - торговля разрешена")
+            config.is_otc_mode = False
+            debug(f"   📊 ДОПОЛНИТЕЛЬНАЯ СЕССИЯ ВЫХОДНОГО ДНЯ (ДСВД): торговля разрешена")
             return True
 
-        # ========== 3. ПРАЗДНИКИ (без ДСВД) ==========
-        if is_holiday(now):
-            debug(f"   🎄 Праздничный день, ДСВД не активна - торговля запрещена")
-            return False
+        if not is_weekend:
+            if is_main_session_time() or is_pre_market_time() or is_evening_session_time():
+                config.is_weekend_session = False
+                config.is_otc_mode = False
+                return True
 
-        # ========== 4. ВЫХОДНЫЕ ДНИ (без ДСВД) ==========
-        if is_weekend:
+        if is_weekend and not is_weekend_trading_time():
             debug(f"   🌙 Выходной день, ДСВД не активна - торговля запрещена")
             config.is_weekend_session = False
             config.is_otc_mode = False
             return False
-
-        # ========== 5. БУДНИЕ ДНИ - ОБЫЧНЫЕ СЕССИИ ==========
-        if is_main_session_time() or is_pre_market_time() or is_evening_session_time():
-            config.is_weekend_session = False
-            config.is_otc_mode = False
-            debug(f"   🏛️ Основная сессия - торговля разрешена")
-            return True
 
         debug(f"   ⏸️ Торговля запрещена")
         return False
@@ -3062,7 +2468,6 @@ class TradingLoop:
             warning(f"   ⚠️ Ошибка проверки ликвидности {ticker}: {e}")
             return False
 
-    @profiler.measure("open_positions")
     async def _open_positions(self, total_capital: float, available_funds: float, current_positions: int):
         """Открытие новых позиций с учётом лимитов и балансировки"""
         from trading_bot.api.tbank_client import tbank
@@ -3129,47 +2534,24 @@ class TradingLoop:
             import traceback
             debug(f"   {traceback.format_exc()}")
 
-    @profiler.measure("check_positions")
     def _check_positions(self):
-        """Проверка стоп-лоссов, тейк-профитов и отката от максимума"""
-
-        # ✅ ДОБАВИТЬ: проверяем позиции ТОЛЬКО в торговое время
-        if not self._is_trading_time():
-            debug(f"   ⏸️ Пропускаем проверку позиций (не торговое время)")
-            return
-
-        # ✅ ДОБАВИТЬ: проверяем не чаще раза в 5 секунд
-        now = time.time()
-        if hasattr(self, '_last_check_time') and (now - self._last_check_time) < 5:
-            debug(f"   ⏸️ Пропускаем проверку позиций (прошло <5с)")
-            return
-        self._last_check_time = now
-
+        """Проверка стоп-лоссов, тейк-профитов и отката от максимума с ДИНАМИЧЕСКИМ трейлинг-стопом"""
         try:
             from trading_bot.risk.position_manager import position_manager
             from trading_bot.api.tbank_client import tbank
+            from ..config import config
 
+            # Получаем все позиции
             positions = position_manager.get_all_positions()
+
             if not positions:
+                debug(f"   📭 Нет позиций для проверки")
                 return
 
-            # ✅ СОБИРАЕМ ВСЕ FIGI
-            figis = list(positions.keys())
-
-            # ✅ ОДИН BATCH-ЗАПРОС
-            prices_dict = {}
-            if figis:
-                prices_dict = tbank.get_last_prices_batch(figis)
-                debug(f"   📡 Batch-запрос цен для {len(prices_dict)}/{len(figis)} позиций")
-
             for figi, position in positions.items():
-                # ✅ БЕРЁМ ЦЕНУ ИЗ СЛОВАРЯ
-                current_price = prices_dict.get(figi)
+                current_price = tbank.get_current_price(figi)
                 if not current_price:
-                    # Fallback: отдельный запрос
-                    current_price = tbank.get_current_price(figi)
-                if not current_price:
-                    warning(f"   ⚠️ {position.ticker}: не удалось получить цену")
+                    warning(f"   ⚠️ {position.ticker}: не удалось получить текущую цену")
                     continue
 
                 # ========== 1. РАСЧЁТ ТЕКУЩЕЙ ПРИБЫЛИ ==========
@@ -3399,7 +2781,6 @@ class TradingLoop:
         from trading_bot.risk.position_manager import position_manager
         from trading_bot.api.tbank_client import tbank
         from ..config import config
-        from trading_bot.utils.time_utils import get_moscow_time
 
         positions = position_manager.get_all_positions()
         if not positions:
@@ -3690,30 +3071,3 @@ class TradingLoop:
 
         info("🧹 Память очищена")
 
-
-class PositionMonitor(threading.Thread):
-    """ОТДЕЛЬНЫЙ ПОТОК ДЛЯ МОНИТОРИНГА ПОЗИЦИЙ (каждые 2 секунды!)"""
-
-    def __init__(self, trading_loop):
-        super().__init__(daemon=True)
-        self.trading_loop = trading_loop
-        self._running = False
-        self.check_interval = 5
-
-    def run(self):
-        self._running = True
-        while self._running:
-            try:
-                # ✅ Проверяем торговое время
-                if self.trading_loop._is_trading_time():
-                    self.trading_loop._check_positions()
-                    time.sleep(2)
-                else:
-                    # В не торговое время проверяем редко
-                    time.sleep(30)
-            except Exception as e:
-                debug(f"PositionMonitor error: {e}")
-                time.sleep(5)
-
-    def stop(self):
-        self._running = False

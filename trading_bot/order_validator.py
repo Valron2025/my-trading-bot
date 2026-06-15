@@ -44,17 +44,8 @@ class OrderValidator:
     ) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Полная предварительная проверка заявки
-
-        Args:
-            figi: FIGI инструмента
-            quantity: Количество
-            direction: "BUY" или "SELL"
-            price: Цена (для лимитных заявок)
-            is_short: True для SHORT позиций
-
-        Returns:
-            (is_valid, reason, additional_info)
         """
+        ticker = self._figi_resolver.get_ticker_by_figi(figi) or figi[:8]
         info(f"🔍 Валидация заявки: {direction} {quantity} шт, figi={figi[:8]}...")
 
         additional_info = {}
@@ -93,17 +84,24 @@ class OrderValidator:
                 if not trading_status.api_trade_available_flag:
                     return False, "API торговля недоступна", additional_info
 
-                # Проверяем доступность нужного типа заявок
-                if price:
-                    if not trading_status.limit_order_available_flag:
-                        return False, "Лимитные заявки недоступны для этого инструмента", additional_info
+                # ✅ НОВОЕ: Для SHORT если нет рыночных, но есть лимитные - пропускаем
+                if direction == "SELL" and is_short:
+                    if not trading_status.market_order_available_flag and not trading_status.limit_order_available_flag:
+                        return False, f"Нет доступных типов заявок для SHORT {ticker}", additional_info
+                    elif not trading_status.market_order_available_flag:
+                        # Предупреждаем, но не блокируем - используем лимитные
+                        info(f"   ⚠️ {ticker}: рыночные заявки недоступны, будет использована лимитная")
                 else:
-                    if not trading_status.market_order_available_flag:
-                        return False, "Рыночные заявки недоступны для этого инструмента", additional_info
+                    # Для LONG и обычной продажи
+                    if price:
+                        if not trading_status.limit_order_available_flag:
+                            return False, "Лимитные заявки недоступны для этого инструмента", additional_info
+                    else:
+                        if not trading_status.market_order_available_flag:
+                            return False, "Рыночные заявки недоступны для этого инструмента", additional_info
 
             except Exception as e:
                 warning(f"⚠️ Ошибка получения статуса торгов: {e}")
-                # Продолжаем, но отмечаем
                 additional_info['trading_status_error'] = str(e)
 
             # 4. Проверка цены (для лимитных заявок)
@@ -116,15 +114,12 @@ class OrderValidator:
                     step = self._get_min_price_increment(client, figi)
                     additional_info['min_price_increment'] = step
 
-                    # ✅ ИСПРАВЛЕНО: используем Decimal для точного сравнения
                     if step > 0:
                         from decimal import Decimal, ROUND_HALF_UP
-                        # Округляем цену до шага с помощью Decimal
                         price_decimal = Decimal(str(price))
                         step_decimal = Decimal(str(step))
                         rounded_price = float(price_decimal.quantize(step_decimal, rounding=ROUND_HALF_UP))
-            
-                        # Проверяем с погрешностью 0.0001
+
                         if abs(price - rounded_price) > 0.0001:
                             return False, f"Цена не кратна шагу {step}, предлагается {rounded_price:.4f}", additional_info
 
@@ -133,17 +128,17 @@ class OrderValidator:
 
             # 5. Проверка максимального количества лотов (GetMaxLots)
             try:
+                from decimal import Decimal
+
                 if price:
                     price_quotation = decimal_to_quotation(Decimal(str(price)))
                     max_lots = client.orders.get_max_lots(
-                        account_id=self.account_id,
-                        instrument_id=figi,
+                        figi=figi,  # ✅ ИСПРАВЛЕНО: instrument_id → figi
                         price=price_quotation
                     )
                 else:
                     max_lots = client.orders.get_max_lots(
-                        account_id=self.account_id,
-                        instrument_id=figi
+                        figi=figi  # ✅ ИСПРАВЛЕНО: instrument_id → figi
                     )
 
                 if direction == "BUY":
@@ -157,7 +152,9 @@ class OrderValidator:
                     return False, f"Превышен лимит: {quantity} > {max_quantity} шт", additional_info
 
             except Exception as e:
-                warning(f"⚠️ Ошибка получения max lots: {e}")
+                warning(f"⚠️ Ошибка получения max lots (пропускаем): {e}")
+                additional_info['max_lots_error'] = str(e)
+
 
             # 6. Проверка средств для покупки
             if direction == "BUY":
@@ -207,18 +204,15 @@ class OrderValidator:
         """
         Отправка заявки с подтверждением через GetOrderState
         """
-        from trading_bot.logger import info as log_info  # ← ДОБАВИТЬ ВНУТРИ
-
         ticker = self._figi_resolver.get_ticker_by_figi(figi) or figi[:8]
 
         # Предварительная валидация
-        is_valid, reason, validation_info = self.validate_before_send(figi, quantity, direction, price,
-                                                                      is_short)  # ← ИСПРАВЛЕНО
+        is_valid, reason, validation_info = self.validate_before_send(figi, quantity, direction, price, is_short)
         if not is_valid:
             return {
                 'success': False,
                 'error': reason,
-                'validation_info': validation_info,  # ← ИСПРАВЛЕНО
+                'validation_info': validation_info,
                 'order_id': None
             }
 
@@ -236,7 +230,6 @@ class OrderValidator:
                 # Формируем цену для лимитной заявки
                 price_quotation = None
                 if order_type == "LIMIT" and price:
-                    # ✅ ИСПРАВЛЕНО: используем Decimal для точного округления
                     from decimal import Decimal, ROUND_HALF_UP
                     step = self._get_min_price_increment(client, figi)
                     price_decimal = Decimal(str(price))
@@ -287,11 +280,14 @@ class OrderValidator:
                     'error': '30042 - недостаточно средств или маржи',
                     'order_id': None
                 }
+            # ✅ ДОБАВЛЕНА ОБРАБОТКА 30240
             elif "30240" in error_msg:
+                warning(f"🔐 {ticker}: ОШИБКА 30240 - требуется подтверждение сделок!")
                 return {
                     'success': False,
                     'error': '30240 - требуется подтверждение сделок',
-                    'order_id': None
+                    'order_id': None,
+                    'block_ticker': True
                 }
             else:
                 return {
@@ -325,9 +321,7 @@ class OrderValidator:
             max_wait_seconds: int = 10,
             check_interval: float = 0.5
     ) -> Dict[str, Any]:
-        """Подтверждение создания заявки через GetOrderState"""
-        from trading_bot.logger import info as log_info, debug as log_debug, warning as log_warning
-
+        """Подтверждение создания заявки через GetOrderState с ожиданием исполнения"""
         ticker = self._figi_resolver.get_ticker_by_figi(figi) if figi else order_id[:8]
 
         start_time = time.time()
@@ -345,17 +339,65 @@ class OrderValidator:
                     )
 
                     if order_state:
-                        # ✅ ИСПРАВЛЕННЫЕ АТРИБУТЫ
                         # Пробуем разные варианты для совместимости
                         executed = getattr(order_state, 'executed_lots',
                                            getattr(order_state, 'lots_executed', 0))
                         requested = getattr(order_state, 'lots_requested',
                                             getattr(order_state, 'requested_lots', 0))
-                        status = getattr(order_state, 'order_state',
-                                         getattr(order_state, 'state', 'EXECUTED'))
+                        status = str(getattr(order_state, 'order_state',
+                                             getattr(order_state, 'state', 'UNKNOWN')))
 
-                        log_info(f"✅ Заявка {order_id[:8]} найдена: статус={status}, исполнено={executed}/{requested}")
+                        info(f"🔍 Заявка {order_id[:8]}: статус={status}, исполнено={executed}/{requested}")
 
+                        # ✅ Если заявка полностью исполнена
+                        if executed >= requested or status in ['FILL', 'EXECUTED']:
+                            info(f"✅ Заявка {order_id[:8]} ПОЛНОСТЬЮ ИСПОЛНЕНА!")
+
+                            # Сохраняем в кэш
+                            self._order_cache[order_id] = {
+                                'status': status,
+                                'executed_lots': executed,
+                                'requested_lots': requested,
+                                'last_check': time.time()
+                            }
+
+                            return {
+                                'success': True,
+                                'found': True,
+                                'status': status,
+                                'executed_lots': executed,
+                                'requested_lots': requested,
+                                'is_completed': True,
+                                'attempts': attempts,
+                                'wait_time': time.time() - start_time
+                            }
+
+                        # ✅ Если заявка отменена или отклонена
+                        if status in ['CANCELLED', 'REJECTED', 'CANCELED']:
+                            warning(f"⚠️ Заявка {order_id[:8]} {status}")
+
+                            self._order_cache[order_id] = {
+                                'status': status,
+                                'executed_lots': executed,
+                                'requested_lots': requested,
+                                'last_check': time.time()
+                            }
+
+                            return {
+                                'success': False,
+                                'found': True,
+                                'status': status,
+                                'executed_lots': executed,
+                                'requested_lots': requested,
+                                'is_completed': False,
+                                'attempts': attempts,
+                                'wait_time': time.time() - start_time
+                            }
+
+                        # ✅ Заявка активна, но ещё не исполнена — продолжаем ждать
+                        debug(f"⏳ Заявка {order_id[:8]}: активна, ждём исполнения ({executed}/{requested})")
+
+                        # Обновляем кэш
                         self._order_cache[order_id] = {
                             'status': status,
                             'executed_lots': executed,
@@ -363,32 +405,24 @@ class OrderValidator:
                             'last_check': time.time()
                         }
 
-                        return {
-                            'success': True,
-                            'found': True,
-                            'status': status,
-                            'executed_lots': executed,
-                            'requested_lots': requested,
-                            'is_completed': executed >= requested,
-                            'attempts': attempts,
-                            'wait_time': time.time() - start_time
-                        }
+                        continue
 
             except Exception as e:
                 error_msg = str(e)
                 if "30070" in error_msg:
-                    log_debug(f"⏳ Заявка {order_id[:8]} ещё не появилась (попытка {attempts})")
+                    debug(f"⏳ Заявка {order_id[:8]} ещё не появилась (попытка {attempts})")
                     continue
                 else:
-                    log_warning(f"⚠️ Ошибка при проверке заявки: {e}")
+                    warning(f"⚠️ Ошибка при проверке заявки: {e}")
                     continue
 
-        log_warning(f"❌ Заявка {order_id[:8]} НЕ ПОДТВЕРЖДЕНА после {max_wait_seconds}с")
+        # Таймаут
+        warning(f"❌ Заявка {order_id[:8]} НЕ ИСПОЛНЕНА после {max_wait_seconds}с")
 
         return {
             'success': False,
             'found': False,
-            'error': f'Заявка не найдена после {max_wait_seconds}с',
+            'error': f'Заявка не исполнена после {max_wait_seconds}с',
             'attempts': attempts,
             'wait_time': time.time() - start_time
         }
@@ -448,16 +482,9 @@ class OrderValidator:
     ) -> Dict[str, Any]:
         """
         Ожидание полного исполнения заявки
-
-        Args:
-            order_id: ID заявки
-            max_wait_seconds: Максимальное время ожидания
-            check_interval: Интервал между проверками
-
-        Returns:
-            Dict с результатом исполнения
         """
         start_time = time.time()
+        last_status = None
 
         while time.time() - start_time < max_wait_seconds:
             status = self.get_order_status(order_id)
@@ -468,7 +495,9 @@ class OrderValidator:
 
             executed = status.get('executed_lots', 0)
             requested = status.get('requested_lots', 0)
+            status_str = status.get('status', '')
 
+            # ✅ Если заявка полностью исполнена
             if executed >= requested:
                 return {
                     'success': True,
@@ -476,20 +505,27 @@ class OrderValidator:
                     'executed_lots': executed,
                     'requested_lots': requested,
                     'price': status.get('price', 0),
-                    'wait_time': time.time() - start_time
+                    'wait_time': time.time() - start_time,
+                    'status': status_str
                 }
 
-            # Проверяем, не отменена ли заявка
-            status_str = status.get('status', '')
-            if 'CANCELLED' in status_str or 'REJECTED' in status_str:
+            # ✅ Если заявка отменена или отклонена
+            if 'CANCELLED' in status_str or 'REJECTED' in status_str or 'CANCELED' in status_str:
+                warning(f"⚠️ Заявка {order_id[:8]} {status_str}")
                 return {
                     'success': False,
                     'executed': False,
                     'reason': f'Заявка {status_str}',
                     'executed_lots': executed,
                     'requested_lots': requested,
-                    'wait_time': time.time() - start_time
+                    'wait_time': time.time() - start_time,
+                    'status': status_str
                 }
+
+            # Логируем изменение статуса
+            if status_str != last_status:
+                info(f"⏳ Заявка {order_id[:8]}: {status_str} ({executed}/{requested})")
+                last_status = status_str
 
             time.sleep(check_interval)
 

@@ -57,7 +57,26 @@ def get_health_monitor(bot=None) -> Optional[HealthMonitor]:
     global _health_monitor
     if _health_monitor is None and bot is not None:
         try:
-            _health_monitor = HealthMonitor(bot)
+            # ✅ Передаём словарь компонентов
+            components_to_monitor = {
+                "api_client": bot,
+                "position_manager": None,
+                "telegram": None,
+                "bot": bot
+            }
+            # Пытаемся получить реальные компоненты
+            try:
+                from trading_bot.risk.position_manager import position_manager
+                components_to_monitor["position_manager"] = position_manager
+            except:
+                pass
+            try:
+                from trading_bot.telegram.telegram_notifier import get_telegram_notifier
+                components_to_monitor["telegram"] = get_telegram_notifier()
+            except:
+                pass
+
+            _health_monitor = HealthMonitor(components=components_to_monitor, check_interval=60)
             logger.info("✅ HealthMonitor инициализирован")
         except Exception as e:
             logger.warning(f"⚠️ Не удалось инициализировать HealthMonitor: {e}")
@@ -65,21 +84,34 @@ def get_health_monitor(bot=None) -> Optional[HealthMonitor]:
     return _health_monitor
 
 
-def get_watchdog(bot=None, timeout_seconds: int = 300) -> Optional[Watchdog]:
+def get_watchdog(bot=None, check_interval: int = 60) -> Optional[Watchdog]:
     """Получение глобального экземпляра Watchdog"""
     global _watchdog
     if _watchdog is None and bot is not None:
         try:
-            _watchdog = Watchdog(bot, timeout_seconds=timeout_seconds)
-            logger.info(f"✅ Watchdog инициализирован (таймаут={timeout_seconds}с)")
+            _watchdog = Watchdog(
+                bot=bot,
+                check_interval=check_interval,
+                max_idle_cycles=30,
+                max_memory_mb=2000,
+                max_cpu_percent=90
+            )
+            logger.info(f"✅ Watchdog инициализирован (интервал={check_interval}с)")
         except Exception as e:
             logger.warning(f"⚠️ Не удалось инициализировать Watchdog: {e}")
             _watchdog = None
     return _watchdog
 
 
-def init_monitoring(bot=None, prometheus_port: int = 8001, watchdog_timeout: int = 300) -> dict:
+def init_monitoring(bot=None, prometheus_port: int = 8001,
+                    watchdog_interval: int = 60,
+                    watchdog_timeout: int = None) -> dict:
     """Инициализация всех компонентов мониторинга"""
+    # Если передан старый параметр watchdog_timeout, используем его
+    if watchdog_timeout is not None:
+        watchdog_interval = max(10, watchdog_timeout // 5)
+        logger.info(f"   🔄 Конвертирован watchdog_timeout={watchdog_timeout} → interval={watchdog_interval}")
+
     results = {
         'drawdown_tracker': False,
         'memory_monitor': False,
@@ -99,7 +131,7 @@ def init_monitoring(bot=None, prometheus_port: int = 8001, watchdog_timeout: int
         if health:
             results['health_monitor'] = True
 
-        watchdog = get_watchdog(bot, timeout_seconds=watchdog_timeout)
+        watchdog = get_watchdog(bot, check_interval=watchdog_interval)
         if watchdog:
             results['watchdog'] = True
 
@@ -131,7 +163,7 @@ def shutdown_monitoring():
 
     if _watchdog:
         try:
-            _watchdog.stop()
+            _watchdog.stop_watchdog()
             logger.info("   ✅ Watchdog остановлен")
         except Exception as e:
             logger.warning(f"   ⚠️ Ошибка остановки Watchdog: {e}")
@@ -139,7 +171,12 @@ def shutdown_monitoring():
 
     if _health_monitor:
         try:
-            _health_monitor.stop()
+            import asyncio
+            if _health_monitor._running:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(_health_monitor.shutdown())
+                loop.close()
             logger.info("   ✅ HealthMonitor остановлен")
         except Exception as e:
             logger.warning(f"   ⚠️ Ошибка остановки HealthMonitor: {e}")
@@ -150,6 +187,17 @@ def shutdown_monitoring():
 
 def get_monitoring_status() -> dict:
     """Получение статуса всех компонентов мониторинга"""
+    memory_mb = None
+    if _memory_monitor:
+        try:
+            memory_mb = _memory_monitor.get_usage_mb()
+        except:
+            memory_mb = None
+
+    watchdog_alive = None
+    if _watchdog:
+        watchdog_alive = _watchdog._running
+
     return {
         'drawdown_tracker': _drawdown_tracker is not None,
         'memory_monitor': _memory_monitor is not None,
@@ -157,8 +205,8 @@ def get_monitoring_status() -> dict:
         'health_monitor': _health_monitor is not None,
         'watchdog': _watchdog is not None,
         'stats': {
-            'memory_mb': _memory_monitor.get_memory_usage_mb() if _memory_monitor else None,
-            'watchdog_alive': _watchdog.is_alive() if _watchdog else None,
+            'memory_mb': memory_mb,
+            'watchdog_alive': watchdog_alive,
         }
     }
 

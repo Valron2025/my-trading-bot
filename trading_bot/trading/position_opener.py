@@ -310,7 +310,6 @@ class PositionOpener:
 
         # ========== 5. ПРОВЕРКА ВРЕМЕНИ ДО КЛИРИНГА ==========
         self._check_clearing_warning(quantity, stock.price, ticker)
-        # (предупреждение не блокирует)
 
         # ========== 6. ПРОВЕРКА ТОРГОВОГО ВРЕМЕНИ ==========
         from trading_bot.utils.time_utils import is_trading_time
@@ -326,11 +325,24 @@ class PositionOpener:
         try:
             trading_status = tbank.get_trading_status(stock.figi)
             api_available = trading_status.get('api_trade_available', False)
+            market_available = trading_status.get('market_order_available', False)
+            limit_available = trading_status.get('limit_order_available', False)
+
             info(f"   API торговля доступна: {api_available}")
+            info(f"   Рыночные заявки доступны: {market_available}")
+            info(f"   Лимитные заявки доступны: {limit_available}")
+
             if not api_available:
                 warning(f"⚠️ {ticker}: API торговля недоступна")
                 info(f"   ❌ ОТКАЗ: API торговля недоступна")
                 return False
+
+            # ✅ НОВОЕ: если нет ни рыночных, ни лимитных заявок - нельзя торговать
+            if not market_available and not limit_available:
+                error(f"❌ {ticker}: нет доступных типов заявок для SHORT")
+                info(f"   ❌ ОТКАЗ: нет доступных заявок")
+                return False
+
         except Exception as e:
             debug(f"Ошибка проверки статуса: {e}")
             info(f"   ❌ ОТКАЗ: ошибка статуса торгов")
@@ -388,7 +400,21 @@ class PositionOpener:
         # ========== ОТПРАВКА ЗАЯВКИ ==========
         try:
             info(f"📡 ОТПРАВКА заявки: SHORT {quantity} шт {ticker}")
-            if use_market:
+
+            # ✅ НОВОЕ: если рыночные недоступны, используем АГРЕССИВНУЮ лимитную
+            if not market_available:
+                info(f"   ⚠️ Рыночные заявки недоступны, используем АГРЕССИВНУЮ лимитную")
+                # Агрессивная цена: 3-4% ниже рынка для гарантированного исполнения
+                aggressive_price = stock.price * 0.96  # 4% ниже
+                step = tbank._get_min_price_increment_advanced(stock.figi)
+                if step > 0:
+                    aggressive_price = round(aggressive_price / step) * step
+                aggressive_price = max(aggressive_price, 0.01)
+
+                info(f"   📊 Агрессивная лимитная цена: {aggressive_price:.2f}₽ (рынок: {stock.price:.2f}₽)")
+                success_flag = tbank.place_limit_order(stock.figi, quantity, "SELL", aggressive_price)
+
+            elif use_market:
                 success_flag = tbank.sell(stock.figi, quantity)
                 info(f"   (рыночная заявка)")
             else:
@@ -419,18 +445,28 @@ class PositionOpener:
                 return True
 
             error(f"❌ SHORT {ticker} не открыт ({order_reason})")
-            # Fallback: если лимитная не сработала, пробуем рыночную
-            if not use_market:
-                warning(f"   🔄 Пробуем рыночную заявку как fallback...")
+
+            # Fallback: если лимитная не сработала, пробуем АГРЕССИВНУЮ лимитную (ещё ниже)
+            if not use_market or not market_available:
+                warning(f"   🔄 Fallback: пробуем СУПЕР-АГРЕССИВНУЮ лимитную заявку...")
                 try:
-                    success_flag = tbank.sell(stock.figi, quantity)
+                    super_aggressive_price = stock.price * 0.93  # 7% ниже
+                    step = tbank._get_min_price_increment_advanced(stock.figi)
+                    if step > 0:
+                        super_aggressive_price = round(super_aggressive_price / step) * step
+                    super_aggressive_price = max(super_aggressive_price, 0.01)
+
+                    info(f"   📊 Супер-агрессивная цена: {super_aggressive_price:.2f}₽")
+                    success_flag = tbank.place_limit_order(stock.figi, quantity, "SELL", super_aggressive_price)
+
                     if success_flag:
-                        success(f"✅ {ticker}: SHORT позиция открыта (рыночная fallback)")
+                        success(f"✅ {ticker}: SHORT позиция открыта (супер-агрессивная лимитная fallback)")
                         self._add_position_to_manager(stock, quantity, stock.price, OrderSide.SHORT)
                         self._short_pending.pop(pending_key, None)
                         return True
                 except Exception as fallback_error:
                     error(f"   ❌ Fallback тоже не сработал: {fallback_error}")
+
             self._short_pending.pop(pending_key, None)
             return False
 
@@ -492,17 +528,26 @@ class PositionOpener:
                     warning(f"   Комиссия за перенос: {daily_fee:.0f}₽/день")
 
     def _add_position_to_manager(self, stock: StockCandidate, quantity: int, price: float, side: OrderSide):
-        """Добавление позиции в менеджер"""
+        """Добавление позиции в менеджер с динамическими TP/SL"""
         try:
             position_manager = self._get_position_manager()
+
+            # ✅ БЕРЁМ TP/SL ИЗ АНАЛИЗА (если есть)
+            take_profit_pct = None
+            stop_loss_pct = None
+
+            if hasattr(stock, 'analysis') and stock.analysis:
+                take_profit_pct = getattr(stock.analysis, 'take_profit_pct', None)
+                stop_loss_pct = getattr(stock.analysis, 'stop_loss_pct', None)
+
             position_manager.add_position(
                 figi=stock.figi,
                 ticker=stock.ticker,
                 quantity=quantity,
                 price=price,
                 side=side,
-                take_profit_pct=config.take_profit_pct,
-                stop_loss_pct=config.stop_loss_pct,
+                take_profit_pct=take_profit_pct,  # ← ДИНАМИЧЕСКИЙ
+                stop_loss_pct=stop_loss_pct,  # ← ДИНАМИЧЕСКИЙ
                 trailing_stop_pct=config.trailing_stop_pct,
                 auto_set_stop=True
             )

@@ -74,6 +74,8 @@ class SignalResult:
     rsi: Optional[float] = None
     macd: Optional[float] = None
     volume_ratio: Optional[float] = 1.0
+    take_profit_pct: float = 1.2
+    stop_loss_pct: float = 0.6
 
     @property
     def signal_type(self) -> SignalType:
@@ -172,11 +174,14 @@ class StockAnalysis:
     used_fundamental: bool = False
     fundamental_impact: int = 0
     news_impact: int = 0
-    confidence: float = 0.5  # ← ДОБАВИТЬ ЭТУ СТРОКУ
+    confidence: float = 0.5
 
     technical: Optional[Dict[str, Any]] = None
     fundamental: Optional[Dict[str, Any]] = None
     news: Optional[Dict[str, Any]] = None
+
+    take_profit_pct: float = 1.2
+    stop_loss_pct: float = 0.6
 
     @property
     def side(self) -> Optional[OrderSide]:

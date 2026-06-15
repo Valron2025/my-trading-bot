@@ -1,0 +1,24 @@
+[
+  {
+    "timestamp": "2026-06-15T21:47:21.464009",
+    "profile": {
+      "cpu_count": 16,
+      "cpu_freq_mhz": 1550.0,
+      "total_ram_mb": 16308.828125,
+      "available_ram_mb": 5267.7265625,
+      "is_vps": false,
+      "is_low_end": false,
+      "network_latency_ms": 33.000946044921875,
+      "max_workers": 8,
+      "max_tickers": 10,
+      "cache_ttl_seconds": 45,
+      "cycle_sleep_seconds": 7,
+      "use_parallel_scan": true,
+      "use_websocket": true,
+      "use_fundamental": true,
+      "use_news": true,
+      "scan_timeout_seconds": 25,
+      "notes": "\u0421\u0431\u0430\u043b\u0430\u043d\u0441\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u044b\u0439 \u0440\u0435\u0436\u0438\u043c"
+    }
+  }
+]

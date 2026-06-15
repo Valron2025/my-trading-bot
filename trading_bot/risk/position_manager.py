@@ -482,6 +482,8 @@ class PositionManager:
         self._figi_to_ticker_cache: Dict[str, str] = {}
         self._checking_critical_margin = False
 
+        self.db = None
+
         self.iceberg_manager = None
         self.trailing_manager = None
 
@@ -489,6 +491,11 @@ class PositionManager:
         self._last_close_attempt: Dict[str, datetime] = {}
 
         info("✅ PositionManager (СИНГЛТОН) инициализирован с ATR-based SL")
+
+    def set_database(self, db):
+        """Установка менеджера базы данных"""
+        self.db = db
+        info("✅ PositionManager подключён к DatabaseManager")
 
     def init_advanced_managers(self, bot):
         self.iceberg_manager = IcebergOrderManager(bot)
@@ -624,6 +631,14 @@ class PositionManager:
         Добавление позиции с ATR-based SL/TP
         """
         from trading_bot.api.tbank_client import tbank
+
+        # ✅ ЕСЛИ TP/SL НЕ ПЕРЕДАНЫ - РАССЧИТЫВАЕМ ДИНАМИЧЕСКИ
+        if take_profit_pct is None or stop_loss_pct is None:
+            sl_pct, tp_pct, atr_pct = self._get_atr_based_sltp(figi, side.value, price)
+            if take_profit_pct is None:
+                take_profit_pct = tp_pct
+            if stop_loss_pct is None:
+                stop_loss_pct = sl_pct
 
         # ✅ ИСПРАВЛЕНО: используем прямой вызов tbank
         if ticker is None:
@@ -969,13 +984,15 @@ class PositionManager:
 
     def manage_long_position(self, position: Position, current_price: float) -> bool:
         """
-        Управление LONG позицией - ТОЛЬКО ПО СИГНАЛАМ!
-        Без таймаута - позиция живёт пока не сработает TP/SL/трейлинг/смена сигнала
+        Управление LONG позицией
         """
+        from trading_bot.trading.position_closer import position_closer
+        from trading_bot.api.tbank_client import tbank
+
         if self._trading_bot and hasattr(self._trading_bot, '_shutting_down'):
             if self._trading_bot._shutting_down:
-                self._close_position(position, current_price, "остановка бота", 0)
-                return True
+                info(f"🔒 Закрытие {position.ticker} по сигналу остановки бота")
+                return self._close_long_position_safe(position)
 
         if hasattr(position, '_in_manage') and position._in_manage:
             return False
@@ -992,10 +1009,8 @@ class PositionManager:
 
             profit_pct = (current_price - position.avg_price) / position.avg_price * 100
 
-            # ЗАЩИТА от мгновенного закрытия - 60 секунд
             if hold_seconds < 60:
-                info(
-                    f"   🕐 [{position.ticker}] ЗАЩИТА: {hold_seconds}/60с, {profit_pct:+.2f}% | {current_price:.2f}₽ - НЕ ЗАКРЫВАЕМ")
+                info(f"   🕐 [{position.ticker}] ЗАЩИТА: {hold_seconds}/60с, {profit_pct:+.2f}% - НЕ ЗАКРЫВАЕМ")
                 return False
 
             position.update_high_low(current_price)
@@ -1003,33 +1018,23 @@ class PositionManager:
             take_profit_pct = config.take_profit_pct
             stop_loss_pct = config.stop_loss_pct
 
-            # ========== 1. ПРОВЕРКА СТОП-ЛОССА ==========
+            # Стоп-лосс
             stop_loss_price = position.avg_price * (1 - stop_loss_pct / 100)
             if current_price <= stop_loss_price:
                 info(f"\n{'🛑' * 40}")
-                info(f"🛑 СТОП-ЛОСС LONG!")
-                info(f"   Тикер: {position.ticker}")
-                info(f"   Убыток: {profit_pct:.2f}%")
-                info(f"   Цена: {current_price:.2f}₽ (стоп {stop_loss_price:.2f}₽)")
-                info(f"   Время удержания: {hold_minutes:.1f} мин")
+                info(f"🛑 СТОП-ЛОСС LONG! {position.ticker} | Убыток: {profit_pct:.2f}%")
                 info(f"{'🛑' * 40}")
-                self._close_position(position, current_price, "стоп-лосс LONG", profit_pct)
-                return True
+                return self._close_long_position_safe(position)
 
-            # ========== 2. ПРОВЕРКА ТЕЙК-ПРОФИТА ==========
+            # Тейк-профит
             take_profit_price = position.avg_price * (1 + take_profit_pct / 100)
             if current_price >= take_profit_price:
                 info(f"\n{'🎯' * 40}")
-                info(f"🎯 ТЕЙК-ПРОФИТ LONG!")
-                info(f"   Тикер: {position.ticker}")
-                info(f"   Прибыль: {profit_pct:.2f}%")
-                info(f"   Цена: {current_price:.2f}₽ (тейк {take_profit_price:.2f}₽)")
-                info(f"   Время удержания: {hold_minutes:.1f} мин")
+                info(f"🎯 ТЕЙК-ПРОФИТ LONG! {position.ticker} | Прибыль: {profit_pct:.2f}%")
                 info(f"{'🎯' * 40}")
-                self._close_position(position, current_price, "тейк-профит LONG", profit_pct)
-                return True
+                return self._close_long_position_safe(position)
 
-            # ========== 3. ТРЕЙЛИНГ-СТОП (активируется при прибыли > 2.0%) ==========
+            # Трейлинг-стоп
             TRAILING_ACTIVATION_PCT = 2.0
             TRAILING_STOP_PCT = 0.5
 
@@ -1037,43 +1042,17 @@ class PositionManager:
                 position.trailing_activated = True
                 position.highest_price = current_price
                 position.trailing_stop = current_price * (1 - TRAILING_STOP_PCT / 100)
-                info(f"\n{'🔻' * 40}")
-                info(f"🔻 ТРЕЙЛИНГ-СТОП АКТИВИРОВАН!")
-                info(f"   Тикер: {position.ticker}")
-                info(f"   Прибыль: {profit_pct:.2f}%")
-                info(f"   Текущая цена: {current_price:.2f}₽")
-                info(f"   Стоп-цена: {position.trailing_stop:.2f}₽ (-{TRAILING_STOP_PCT}%)")
-                info(f"{'🔻' * 40}")
+                info(f"\n🔻 ТРЕЙЛИНГ-СТОП LONG АКТИВИРОВАН! {position.ticker}")
 
             if hasattr(position, 'trailing_activated') and position.trailing_activated:
                 if current_price > position.highest_price:
-                    old_stop = position.trailing_stop
                     position.highest_price = current_price
                     position.trailing_stop = current_price * (1 - TRAILING_STOP_PCT / 100)
-                    info(
-                        f"   📈 [{position.ticker}] Максимум: {position.highest_price:.2f}₽, новый стоп: {position.trailing_stop:.2f}₽ (был {old_stop:.2f}₽)")
+                    info(f"   📈 [{position.ticker}] Новый максимум: {position.highest_price:.2f}₽")
 
                 if current_price <= position.trailing_stop:
-                    info(f"\n{'🔔' * 40}")
-                    info(f"🔔 ТРЕЙЛИНГ-СТОП СРАБОТАЛ!")
-                    info(f"   Тикер: {position.ticker}")
-                    info(f"   Прибыль: {profit_pct:.2f}%")
-                    info(f"   Максимум: {position.highest_price:.2f}₽")
-                    info(f"   Цена закрытия: {current_price:.2f}₽")
-                    info(f"   Время удержания: {hold_minutes:.1f} мин")
-                    info(f"{'🔔' * 40}")
-                    self._close_position(position, current_price, "трейлинг-стоп", profit_pct)
-                    return True
-
-            # ========== 4. ЛОГИРОВАНИЕ СОСТОЯНИЯ ==========
-            if hold_seconds % 60 == 0:
-                icon = "🟢" if profit_pct > 0 else "🔴" if profit_pct < 0 else "⚪"
-                info(
-                    f"   {icon} [{position.ticker}] {hold_minutes:.1f}мин | P&L={profit_pct:+.2f}% | цена={current_price:.2f}₽ | стоп={stop_loss_price:.2f}₽ | тейк={take_profit_price:.2f}₽")
-
-                if hasattr(position, 'trailing_activated'):
-                    info(
-                        f"      🔻 Трейлинг активен: стоп={position.trailing_stop:.2f}₽, максимум={position.highest_price:.2f}₽")
+                    info(f"\n🔔 ТРЕЙЛИНГ-СТОП LONG СРАБОТАЛ! {position.ticker}")
+                    return self._close_long_position_safe(position)
 
             return False
 
@@ -1081,21 +1060,102 @@ class PositionManager:
             if hasattr(position, '_in_manage'):
                 delattr(position, '_in_manage')
 
+    def _close_long_position_safe(self, position) -> bool:
+        """
+        БЕЗОПАСНОЕ ЗАКРЫТИЕ LONG ПОЗИЦИИ
+        """
+        from trading_bot.api.tbank_client import tbank
+        import time
+
+        ticker = position.ticker or position.figi[:8]
+        figi = position.figi
+        quantity = position.quantity
+        current_price = tbank.get_current_price(figi)
+
+        if not current_price:
+            error(f"❌ Не удалось получить цену для {ticker}")
+            return False
+
+        print(f"\n🔒 БЕЗОПАСНОЕ ЗАКРЫТИЕ LONG: {ticker}")
+        print(f"   Количество: {quantity} шт")
+        print(f"   Текущая цена: {current_price:.2f}₽")
+
+        # Проверяем, что позиция существует
+        broker_positions = tbank.get_positions(force_refresh=True)
+        position_exists = False
+        for pos in broker_positions:
+            if pos.get('figi') == figi and abs(pos.get('quantity', 0)) > 0:
+                position_exists = True
+                break
+
+        if not position_exists:
+            info(f"   ℹ️ Позиция {ticker} уже закрыта")
+            self.remove_position(figi)
+            return True
+
+        # Отправляем заявку на продажу
+        try:
+            success_flag = tbank.sell(figi, quantity, use_market=True)
+            if not success_flag:
+                error(f"   ❌ ЗАЯВКА НЕ ОТПРАВЛЕНА!")
+                return False
+        except Exception as e:
+            error(f"   ❌ ОШИБКА: {e}")
+            return False
+
+        # Ждём исполнения
+        for attempt in range(10):
+            time.sleep(1)
+            broker_positions = tbank.get_positions(force_refresh=True)
+            position_still_exists = False
+            for pos in broker_positions:
+                if pos.get('figi') == figi and abs(pos.get('quantity', 0)) > 0:
+                    position_still_exists = True
+                    break
+
+            if not position_still_exists:
+                success(f"\n✅ ПОЗИЦИЯ {ticker} УСПЕШНО ЗАКРЫТА!")
+                self.remove_position(figi)
+                return True
+
+        warning(f"\n⚠️ ПОЗИЦИЯ {ticker} ВСЁ ЕЩЁ СУЩЕСТВУЕТ!")
+        return False
+
     def manage_short_position(self, position: Position, current_price: float) -> bool:
         """
-        Управление SHORT позицией
+        Управление SHORT позицией с улучшенной безопасностью
         SHORT: зарабатываем на падении цены, теряем на росте
+
+        Returns:
+            bool: True если позиция закрыта, False если продолжает торговаться
         """
-        if self._trading_bot and hasattr(self._trading_bot, '_shutting_down'):
-            if self._trading_bot._shutting_down:
-                self._close_position(position, current_price, "остановка бота", 0)
-                return True
+        from trading_bot.trading.position_closer import position_closer
+        from trading_bot.api.tbank_client import tbank
+        from trading_bot.logger import info, success, error, warning, debug
+        from datetime import datetime, timedelta, timezone
+        import time
+
+        # ========== 1. ЗАЩИТА ОТ ПОВТОРНОГО ВХОДА ==========
+        if hasattr(position, '_closing'):
+            info(f"   🔒 [{position.ticker}] SHORT: уже в процессе закрытия, пропускаем")
+            return False
 
         if hasattr(position, '_in_manage') and position._in_manage:
             return False
+
+        # ========== 2. ПРОВЕРКА АВАРИЙНОГО ЗАКРЫТИЯ ==========
+        if self._trading_bot and hasattr(self._trading_bot, '_shutting_down'):
+            if self._trading_bot._shutting_down:
+                info(f"\n{'🔒' * 40}")
+                info(f"🔒 АВАРИЙНОЕ ЗАКРЫТИЕ SHORT: {position.ticker}")
+                info(f"   Причина: остановка бота")
+                info(f"{'🔒' * 40}")
+                return self._close_short_position_safe(position)
+
         position._in_manage = True
 
         try:
+            # ========== 3. РАСЧЁТ ВРЕМЕНИ УДЕРЖАНИЯ ==========
             now = datetime.now(MOSCOW_TZ)
             entry_time = position.entry_time
             if entry_time.tzinfo is None:
@@ -1104,112 +1164,575 @@ class PositionManager:
             hold_seconds = int((now - entry_time).total_seconds())
             hold_minutes = hold_seconds / 60
 
+            # ========== 4. РАСЧЁТ ПРИБЫЛИ ==========
             # Для SHORT: прибыль когда цена падает
             profit_pct = (position.avg_price - current_price) / position.avg_price * 100
+            profit_amount = (position.avg_price - current_price) * position.quantity
 
-            # ЗАЩИТА от мгновенного закрытия (60 секунд)
+            # ========== 5. ЗАЩИТА ОТ МГНОВЕННОГО ЗАКРЫТИЯ (60 секунд) ==========
             if hold_seconds < 60:
-                info(
-                    f"   🕐 [{position.ticker}] SHORT ЗАЩИТА: {hold_seconds}/60с, {profit_pct:+.2f}% | {current_price:.2f}₽ - НЕ ЗАКРЫВАЕМ")
+                info(f"\n   🕐 ЗАЩИТА SHORT [{position.ticker}]")
+                info(f"      Время удержания: {hold_seconds}/60с")
+                info(f"      Текущая прибыль: {profit_pct:+.2f}% ({profit_amount:+.2f}₽)")
+                info(f"      Цена: {current_price:.2f}₽ (вход: {position.avg_price:.2f}₽)")
+                info(f"      ⏸️ ПОЗИЦИЯ НЕ ЗАКРЫТА (защитный период)")
                 return False
 
+            # ========== 6. ОБНОВЛЕНИЕ ЭКСТРЕМУМОВ ==========
             position.update_high_low(current_price)
 
+            # ========== 7. ПОЛУЧЕНИЕ ПАРАМЕТРОВ ==========
             take_profit_pct = position.take_profit_pct if position.take_profit_pct > 0 else config.take_profit_pct
             stop_loss_pct = position.stop_loss_pct if position.stop_loss_pct > 0 else config.stop_loss_pct
 
-            # Стоп-лосс срабатывает при росте цены (убыток)
+            # ========== 8. ПРОВЕРКА СТОП-ЛОССА ==========
             stop_loss_price = position.avg_price * (1 + stop_loss_pct / 100)
+
             if current_price >= stop_loss_price:
-                info(f"\n{'🛑' * 40}")
-                info(f"🛑 СТОП-ЛОСС SHORT!")
-                info(f"   Тикер: {position.ticker}")
-                info(f"   Убыток: {profit_pct:.2f}%")
-                info(f"   Цена: {current_price:.2f}₽ (стоп {stop_loss_price:.2f}₽)")
-                info(f"   Время удержания: {hold_minutes:.1f} мин")
-                info(f"{'🛑' * 40}")
-                self._close_position(position, current_price, "стоп-лосс SHORT", profit_pct)
-                return True
+                info(f"\n{'🛑' * 60}")
+                info(f"🛑 СТОП-ЛОСС SHORT СРАБОТАЛ!")
+                info(f"{'🛑' * 60}")
+                info(f"   📊 Тикер: {position.ticker}")
+                info(f"   📉 Убыток: {profit_pct:.2f}% ({profit_amount:+.2f}₽)")
+                info(f"   💰 Цена входа: {position.avg_price:.2f}₽")
+                info(f"   💰 Текущая цена: {current_price:.2f}₽")
+                info(f"   🛑 Цена стоп-лосса: {stop_loss_price:.2f}₽")
+                info(f"   ⏱️ Время удержания: {hold_minutes:.1f} мин")
 
-            # Тейк-профит срабатывает при падении цены (прибыль)
+                # Отменяем стоп-приказы
+                self._cancel_stop_orders(position)
+
+                # Пытаемся закрыть позицию
+                closed = self._close_short_position_safe(position)
+
+                if closed:
+                    # ✅ ТОЛЬКО если успешно закрыли
+                    info(f"\n   ✅ ПОЗИЦИЯ {position.ticker} УСПЕШНО ЗАКРЫТА ПО СТОП-ЛОССУ")
+                    self.remove_position(position.figi)
+                    return True
+                else:
+                    # ❌ НЕ УДАЛЯЕМ ПОЗИЦИЮ!
+                    error(f"\n   ❌ КРИТИЧЕСКАЯ ОШИБКА: ПОЗИЦИЯ {position.ticker} НЕ ЗАКРЫТА!")
+                    error(f"   💡 Причина: недостаточно средств или ошибка API")
+                    error(f"   💡 Рекомендация: пополните счёт или закройте вручную в приложении Т-Банк")
+                    error(f"   ⚠️ ПОЗИЦИЯ ОСТАЁТСЯ В МЕНЕДЖЕРЕ ДЛЯ ПОВТОРНЫХ ПОПЫТОК")
+
+                    # Отправляем Telegram уведомление о критической ошибке
+                    try:
+                        telegram = _get_telegram()
+                        if telegram:
+                            telegram.send_error(
+                                f"🚨 **КРИТИЧЕСКАЯ ОШИБКА!**\n\n"
+                                f"❌ НЕ УДАЛОСЬ ЗАКРЫТЬ SHORT ПО СТОП-ЛОССУ!\n\n"
+                                f"📊 {position.ticker}\n"
+                                f"💰 Цена входа: {position.avg_price:.2f}₽\n"
+                                f"💰 Текущая цена: {current_price:.2f}₽\n"
+                                f"🛑 Стоп-лосс: {stop_loss_price:.2f}₽\n"
+                                f"📉 Убыток: {profit_pct:.2f}%\n\n"
+                                f"⚠️ **ПОЗИЦИЯ НЕ БЫЛА УДАЛЕНА ИЗ МЕНЕДЖЕРА!**\n"
+                                f"⚠️ Требуется ручное вмешательство!"
+                            )
+                    except Exception as e:
+                        debug(f"   ⚠️ Ошибка отправки уведомления: {e}")
+
+                    # ⚠️ НЕТ remove_position()!
+                    return False
+
+            # ========== 9. ПРОВЕРКА ТЕЙК-ПРОФИТА ==========
             take_profit_price = position.avg_price * (1 - take_profit_pct / 100)
+
             if current_price <= take_profit_price:
-                info(f"\n{'🎯' * 40}")
-                info(f"🎯 ТЕЙК-ПРОФИТ SHORT!")
-                info(f"   Тикер: {position.ticker}")
-                info(f"   Прибыль: {profit_pct:.2f}%")
-                info(f"   Цена: {current_price:.2f}₽ (тейк {take_profit_price:.2f}₽)")
-                info(f"   Время удержания: {hold_minutes:.1f} мин")
-                info(f"{'🎯' * 40}")
-                self._close_position(position, current_price, "тейк-профит SHORT", profit_pct)
-                return True
+                info(f"\n{'🎯' * 60}")
+                info(f"🎯 ТЕЙК-ПРОФИТ SHORT СРАБОТАЛ!")
+                info(f"{'🎯' * 60}")
+                info(f"   📊 Тикер: {position.ticker}")
+                info(f"   📈 Прибыль: {profit_pct:.2f}% ({profit_amount:+.2f}₽)")
+                info(f"   💰 Цена входа: {position.avg_price:.2f}₽")
+                info(f"   💰 Текущая цена: {current_price:.2f}₽")
+                info(f"   🎯 Цена тейк-профита: {take_profit_price:.2f}₽")
+                info(f"   ⏱️ Время удержания: {hold_minutes:.1f} мин")
+                info(f"   📉 Разница: {position.avg_price - current_price:+.2f}₽")
+                info(f"{'🎯' * 60}")
 
-            # Трейлинг-стоп для SHORT
-            TRAILING_ACTIVATION_PCT = 2.0
-            TRAILING_STOP_PCT = 0.5
+                # Отменяем все стоп-приказы
+                info(f"\n   🔄 Отмена стоп-приказов для {position.ticker}...")
+                self._cancel_stop_orders(position)
 
+                # Пытаемся закрыть позицию
+                info(f"\n   🔒 Попытка закрытия SHORT позиции {position.ticker}...")
+                closed = self._close_short_position_safe(position)
+
+                if closed:
+                    info(f"\n   ✅ ПОЗИЦИЯ {position.ticker} УСПЕШНО ЗАКРЫТА ПО ТЕЙК-ПРОФИТУ")
+                    self.remove_position(position.figi)
+                    return True
+                else:
+                    error(f"\n   ❌ КРИТИЧЕСКАЯ ОШИБКА: ПОЗИЦИЯ {position.ticker} НЕ ЗАКРЫТА!")
+                    error(f"   💡 Причина: недостаточно средств или ошибка API")
+                    error(f"   ⚠️ ПОЗИЦИЯ ОСТАЁТСЯ В МЕНЕДЖЕРЕ")
+                    return False
+
+            # ========== 10. ТРЕЙЛИНГ-СТОП ДЛЯ SHORT ==========
+            TRAILING_ACTIVATION_PCT = 2.0  # Активация при прибыли 2%
+            TRAILING_STOP_PCT = 0.5  # Отступ от максимума 0.5%
+
+            # Активация трейлинг-стопа
             if profit_pct > TRAILING_ACTIVATION_PCT and not hasattr(position, 'trailing_activated'):
                 position.trailing_activated = True
                 position.lowest_price = current_price
-                # Для SHORT: трейлинг-стоп следит за минимумом
                 position.trailing_stop = current_price * (1 + TRAILING_STOP_PCT / 100)
-                info(f"\n{'🔻' * 40}")
-                info(f"🔻 ТРЕЙЛИНГ-СТОП SHORT АКТИВИРОВАН!")
-                info(f"   Тикер: {position.ticker}")
-                info(f"   Прибыль: {profit_pct:.2f}%")
-                info(f"   Текущая цена: {current_price:.2f}₽")
-                info(f"   Стоп-цена: {position.trailing_stop:.2f}₽ (+{TRAILING_STOP_PCT}%)")
-                info(f"{'🔻' * 40}")
 
+                info(f"\n{'🔻' * 60}")
+                info(f"🔻 ТРЕЙЛИНГ-СТОП SHORT АКТИВИРОВАН!")
+                info(f"{'🔻' * 60}")
+                info(f"   📊 Тикер: {position.ticker}")
+                info(f"   📈 Прибыль: {profit_pct:.2f}% ({profit_amount:+.2f}₽)")
+                info(f"   💰 Текущая цена: {current_price:.2f}₽")
+                info(f"   📉 Минимум: {position.lowest_price:.2f}₽")
+                info(f"   🛡️ Стоп-цена: {position.trailing_stop:.2f}₽ (+{TRAILING_STOP_PCT}%)")
+                info(f"{'🔻' * 60}")
+
+            # Обновление трейлинг-стопа
             if hasattr(position, 'trailing_activated') and position.trailing_activated:
-                # Обновляем минимальную цену (чем ниже цена, тем лучше для SHORT)
+                # Обновляем минимум при падении цены
                 if current_price < position.lowest_price:
                     old_stop = position.trailing_stop
                     position.lowest_price = current_price
                     position.trailing_stop = current_price * (1 + TRAILING_STOP_PCT / 100)
+
+                    info(f"\n   📉 [{position.ticker}] ОБНОВЛЕНИЕ ТРЕЙЛИНГ-СТОПА:")
                     info(
-                        f"   📉 [{position.ticker}] Новый минимум: {position.lowest_price:.2f}₽, новый стоп: {position.trailing_stop:.2f}₽ (был {old_stop:.2f}₽)")
+                        f"      Новый минимум: {position.lowest_price:.2f}₽ (был {position.lowest_price if hasattr(position, 'lowest_price') else current_price:.2f}₽)")
+                    info(f"      Новый стоп: {position.trailing_stop:.2f}₽ (был {old_stop:.2f}₽)")
+                    info(f"      Прибыль: {profit_pct:.2f}%")
 
-                # Проверяем срабатывание трейлинг-стопа
+                # Проверка срабатывания трейлинг-стопа
                 if current_price >= position.trailing_stop:
-                    info(f"\n{'🔔' * 40}")
+                    info(f"\n{'🔔' * 60}")
                     info(f"🔔 ТРЕЙЛИНГ-СТОП SHORT СРАБОТАЛ!")
-                    info(f"   Тикер: {position.ticker}")
-                    info(f"   Прибыль: {profit_pct:.2f}%")
-                    info(f"   Минимум: {position.lowest_price:.2f}₽")
-                    info(f"   Цена закрытия: {current_price:.2f}₽")
-                    info(f"   Время удержания: {hold_minutes:.1f} мин")
-                    info(f"{'🔔' * 40}")
-                    self._close_position(position, current_price, "трейлинг-стоп SHORT", profit_pct)
-                    return True
+                    info(f"{'🔔' * 60}")
+                    info(f"   📊 Тикер: {position.ticker}")
+                    info(f"   📈 Прибыль: {profit_pct:.2f}% ({profit_amount:+.2f}₽)")
+                    info(f"   📉 Минимум за время удержания: {position.lowest_price:.2f}₽")
+                    info(f"   💰 Цена закрытия: {current_price:.2f}₽")
+                    info(f"   ⏱️ Время удержания: {hold_minutes:.1f} мин")
+                    info(
+                        f"   📊 Откат от минимума: {((current_price - position.lowest_price) / position.lowest_price * 100):.2f}%")
+                    info(f"{'🔔' * 60}")
 
-            # ========== ТАЙМАУТ (только если в убытке) ==========
+                    # Отменяем стоп-приказы
+                    self._cancel_stop_orders(position)
+
+                    # Закрываем позицию
+                    closed = self._close_short_position_safe(position)
+
+                    if closed:
+                        info(f"\n   ✅ ПОЗИЦИЯ {position.ticker} УСПЕШНО ЗАКРЫТА ПО ТРЕЙЛИНГ-СТОПУ")
+                        self.remove_position(position.figi)
+                        return True
+                    else:
+                        error(f"\n   ❌ НЕ УДАЛОСЬ ЗАКРЫТЬ {position.ticker} ПО ТРЕЙЛИНГ-СТОПУ!")
+                        return False
+
+            # ========== 11. ТАЙМАУТ (только если в убытке) ==========
             max_hold = config.adaptive_timeout_minutes * 2
 
             if profit_pct < 0:
-                max_hold = max_hold * 0.5
-                max_hold = max(5, max_hold)
+                max_hold = max(5, max_hold * 0.5)  # Уменьшаем время для убыточных позиций
 
                 if hold_minutes >= max_hold:
-                    info(f"⏰ ТАЙМАУТ SHORT (в убытке)! {hold_minutes:.0f} мин")
-                    self._close_position(position, current_price, "таймаут SHORT", profit_pct)
-                    return True
+                    info(f"\n{'⏰' * 60}")
+                    info(f"⏰ ТАЙМАУТ SHORT ПОЗИЦИИ!")
+                    info(f"{'⏰' * 60}")
+                    info(f"   📊 Тикер: {position.ticker}")
+                    info(f"   📉 Прибыль: {profit_pct:.2f}% ({profit_amount:+.2f}₽)")
+                    info(f"   ⏱️ Время удержания: {hold_minutes:.0f} мин > {max_hold} мин (лимит)")
+                    info(f"   💰 Текущая цена: {current_price:.2f}₽")
+                    info(f"   💡 Причина: превышен таймаут для убыточной позиции")
+                    info(f"{'⏰' * 60}")
 
-            # ========== ЛОГИРОВАНИЕ СОСТОЯНИЯ ==========
+                    closed = self._close_short_position_safe(position)
+                    if closed:
+                        info(f"\n   ✅ ПОЗИЦИЯ {position.ticker} ЗАКРЫТА ПО ТАЙМАУТУ")
+                        self.remove_position(position.figi)
+                        return True
+                    else:
+                        warning(f"\n   ⚠️ ПОЗИЦИЯ {position.ticker} НЕ ЗАКРЫТА ПО ТАЙМАУТУ! Оставляем в менеджере")
+                        return False
+
+            # ========== 12. ЛОГИРОВАНИЕ СОСТОЯНИЯ (каждую минуту) ==========
             if hold_seconds % 60 == 0:
                 icon = "🟢" if profit_pct > 0 else "🔴" if profit_pct < 0 else "⚪"
-                info(
-                    f"   {icon} [{position.ticker}] SHORT {hold_minutes:.1f}мин | P&L={profit_pct:+.2f}% | цена={current_price:.2f}₽ | стоп={stop_loss_price:.2f}₽ | тейк={take_profit_price:.2f}₽")
+                info(f"\n   {icon} [{position.ticker}] SHORT СТАТУС:")
+                info(f"      ⏱️ Время: {hold_minutes:.1f} мин")
+                info(f"      📊 P&L: {profit_pct:+.2f}% ({profit_amount:+.2f}₽)")
+                info(f"      💰 Цена: {current_price:.2f}₽ (вход: {position.avg_price:.2f}₽)")
+                info(f"      🛑 Стоп-лосс: {stop_loss_price:.2f}₽ (+{stop_loss_pct}%)")
+                info(f"      🎯 Тейк-профит: {take_profit_price:.2f}₽ (-{take_profit_pct}%)")
 
                 if hasattr(position, 'trailing_activated'):
                     info(
                         f"      🔻 Трейлинг активен: стоп={position.trailing_stop:.2f}₽, минимум={position.lowest_price:.2f}₽")
 
+            return False  # Позиция продолжает торговаться
+
+        except Exception as e:
+            error(f"\n❌ КРИТИЧЕСКАЯ ОШИБКА В manage_short_position для {getattr(position, 'ticker', 'unknown')}:")
+            error(f"   {type(e).__name__}: {e}")
+            import traceback
+            error(f"   {traceback.format_exc()}")
             return False
 
         finally:
             if hasattr(position, '_in_manage'):
                 delattr(position, '_in_manage')
+
+    def retry_stuck_short_positions(self):
+        """Повторные попытки закрытия зависших SHORT позиций"""
+        from trading_bot.api.tbank_client import tbank
+
+        for figi, position in list(self._positions.items()):
+            if position.side != OrderSide.SHORT:
+                continue
+
+            # Проверяем, есть ли позиция у брокера
+            broker_positions = tbank.get_positions(force_refresh=True)
+            exists = any(p.get('figi') == figi and abs(p.get('quantity', 0)) > 0
+                         for p in broker_positions)
+
+            if not exists:
+                # Позиция уже закрыта, просто удаляем из менеджера
+                info(f"🧹 Очистка: позиция {position.ticker} уже закрыта у брокера")
+                self.remove_position(figi)
+                continue
+
+            # Проверяем, не пора ли повторить попытку
+            last_attempt = self._last_close_attempt.get(figi)
+            if last_attempt:
+                minutes_since_attempt = (datetime.now(MOSCOW_TZ) - last_attempt).total_seconds() / 60
+                if minutes_since_attempt < 5:  # Не чаще 1 раза в 5 минут
+                    continue
+
+            # Повторяем попытку закрытия
+            attempts = self._close_attempts.get(figi, 0)
+            if attempts < 3:  # Максимум 3 попытки
+                info(f"🔄 Повторная попытка {attempts + 1}/3 закрытия SHORT {position.ticker}")
+                self._close_attempts[figi] = attempts + 1
+                self._last_close_attempt[figi] = datetime.now(MOSCOW_TZ)
+
+                closed = self._close_short_position_safe(position)
+                if closed:
+                    self.remove_position(figi)
+
+    def _close_short_position_safe(self, position) -> bool:
+        """
+        БЕЗОПАСНОЕ ЗАКРЫТИЕ SHORT ПОЗИЦИИ
+
+        ВАЖНО:
+        - Возвращает True ТОЛЬКО если позиция реально закрыта у брокера!
+        - НИКОГДА не удаляет позицию при ошибке!
+        - Проверяет наличие средств перед закрытием!
+
+        Returns:
+            bool: True - позиция закрыта, False - не закрыта (ошибка или недостаточно средств)
+        """
+        from trading_bot.api.tbank_client import tbank
+        from trading_bot.logger import info, success, error, warning, debug
+        import time
+        from datetime import datetime
+
+        # ========== 0. ПРОВЕРКА OTC (нельзя закрыть через API) ==========
+        if tbank.is_confirmation_required(figi):
+            warning(f"\n🔐 {ticker} - OTC ИНСТРУМЕНТ! НЕВОЗМОЖНО ЗАКРЫТЬ АВТОМАТИЧЕСКИ!")
+            warning(f"   📱 Закройте позицию ВРУЧНУЮ в приложении Т-Банк!")
+            # Отправляем Telegram уведомление
+            try:
+                telegram = _get_telegram()
+                if telegram:
+                    telegram.send_error(
+                        f"🚨 **OTC ИНСТРУМЕНТ!**\n\n"
+                        f"Инструмент {ticker} требует РУЧНОГО закрытия!\n"
+                        f"📊 SHORT {quantity} шт по ~{current_price:.2f}₽\n\n"
+                        f"**Закройте вручную в приложении Т-Банк!**"
+                    )
+            except Exception:
+                pass
+            # НЕ удаляем позицию из менеджера! Она остаётся для ручного закрытия.
+            # Возвращаем False, чтобы позиция не удалялась.
+            return False
+
+        # ========== 1. ЗАЩИТА ОТ ПОВТОРНОГО ВЫЗОВА ==========
+        if hasattr(position, '_closing'):
+            warning(f"   🔒 SHORT {position.ticker}: уже в процессе закрытия, пропускаем")
+            return False
+
+        position._closing = True
+
+        try:
+            ticker = position.ticker or position.figi[:8]
+            figi = position.figi
+            quantity = position.quantity
+
+            info(f"\n{'🔒' * 60}")
+            info(f"🔒 НАЧАЛО БЕЗОПАСНОГО ЗАКРЫТИЯ SHORT ПОЗИЦИИ")
+            info(f"{'🔒' * 60}")
+            info(f"   📊 Тикер: {ticker}")
+            info(f"   🔢 Количество: {quantity} шт")
+            info(f"   💰 Цена входа: {position.avg_price:.2f}₽")
+            info(f"   ⏰ Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+            # ========== 2. ПОЛУЧАЕМ ТЕКУЩУЮ ЦЕНУ ==========
+            info(f"\n📡 [1/7] ПОЛУЧЕНИЕ ТЕКУЩЕЙ ЦЕНЫ...")
+            current_price = tbank.get_current_price(figi)
+
+            if not current_price or current_price <= 0:
+                error(f"   ❌ НЕ УДАЛОСЬ ПОЛУЧИТЬ ЦЕНУ для {ticker}!")
+                error(f"   💡 Возвращаем False, позиция НЕ УДАЛЕНА")
+                return False
+
+            info(f"   ✅ Текущая цена: {current_price:.4f}₽")
+
+            # ========== 3. РАСЧЁТ НЕОБХОДИМЫХ СРЕДСТВ ==========
+            buy_back_cost = quantity * current_price * 1.05
+            info(f"\n💰 [2/7] РАСЧЁТ НЕОБХОДИМЫХ СРЕДСТВ:")
+            info(f"   Количество: {quantity} шт")
+            info(f"   Цена: {current_price:.2f}₽")
+            info(f"   Стоимость выкупа: {quantity * current_price:.2f}₽")
+            info(f"   С запасом (5%): {buy_back_cost:.2f}₽")
+
+            # ========== 4. ПРОВЕРКА, ЧТО ПОЗИЦИЯ СУЩЕСТВУЕТ ==========
+            info(f"\n🔍 [3/7] ПРОВЕРКА СУЩЕСТВОВАНИЯ ПОЗИЦИИ У БРОКЕРА...")
+
+            broker_positions = tbank.get_positions(force_refresh=True)
+            position_exists = False
+            actual_qty = 0
+            actual_avg_price = 0
+
+            for pos in broker_positions:
+                if pos.get('figi') == figi:
+                    actual_qty = abs(pos.get('quantity', 0))
+                    actual_avg_price = pos.get('avg_price', 0)
+                    if actual_qty > 0:
+                        position_exists = True
+                    break
+
+            if not position_exists:
+                info(f"   ℹ️ Позиция {ticker} уже закрыта у брокера")
+                info(f"   ✅ Возвращаем True, позицию МОЖНО УДАЛИТЬ из менеджера")
+                return True
+
+            info(f"   ✅ Позиция существует у брокера:")
+            info(f"      Количество: {actual_qty} шт")
+            info(f"      Средняя цена: {actual_avg_price:.2f}₽")
+
+            if actual_qty != quantity:
+                warning(f"   ⚠️ Количество изменилось: {quantity} → {actual_qty} шт")
+                quantity = actual_qty
+                buy_back_cost = quantity * current_price * 1.05
+                info(f"   🔄 Пересчитана стоимость выкупа: {buy_back_cost:.2f}₽")
+
+            # ========== 5. ПРОВЕРКА СРЕДСТВ ==========
+            info(f"\n💰 [4/7] ПРОВЕРКА ДОСТУПНОСТИ СРЕДСТВ...")
+
+            available, total_capital, blocked = tbank.get_available_funds()
+            margin_info = tbank.get_margin_info()
+            margin_rate = margin_info.get('margin_rate', 0)
+
+            info(f"   📊 Финансовое состояние:")
+            info(f"      Доступно средств: {available:.2f}₽")
+            info(f"      Общий капитал: {total_capital:.2f}₽")
+            info(f"      Заблокировано: {blocked:.2f}₽")
+            info(f"      Маржа: {margin_rate:.1f}%")
+
+            if available < buy_back_cost:
+                deficit = buy_back_cost - available
+                error(f"\n   ❌ НЕДОСТАТОЧНО СРЕДСТВ ДЛЯ ЗАКРЫТИЯ SHORT {ticker}!")
+                error(f"      Нужно: {buy_back_cost:.0f}₽")
+                error(f"      Доступно: {available:.0f}₽")
+                error(f"      Дефицит: {deficit:.0f}₽")
+
+                # Пытаемся освободить средства
+                info(f"\n   🔄 ПЫТАЕМСЯ ОСВОБОДИТЬ СРЕДСТВА...")
+                freed = self._try_free_funds_for_short(deficit, ticker)
+
+                if freed > 0:
+                    info(f"   ✅ Освобождено {freed:.0f}₽")
+                    time.sleep(2)
+                    available, _, _ = tbank.get_available_funds()
+                    info(f"   💰 После освобождения доступно: {available:.2f}₽")
+
+                    if available >= buy_back_cost:
+                        info(f"   ✅ ТЕПЕРЬ СРЕДСТВ ДОСТАТОЧНО!")
+                    else:
+                        new_deficit = buy_back_cost - available
+                        error(f"   ❌ ВСЁ ЕЩЁ НЕДОСТАТОЧНО! Дефицит: {new_deficit:.0f}₽")
+                        warning(f"\n   ⚠️ ПОЗИЦИЯ {ticker} НЕ БУДЕТ УДАЛЕНА ИЗ МЕНЕДЖЕРА!")
+                        return False
+                else:
+                    error(f"   ❌ НЕ УДАЛОСЬ ОСВОБОДИТЬ СРЕДСТВА!")
+                    warning(f"\n   ⚠️ ПОЗИЦИЯ {ticker} НЕ БУДЕТ УДАЛЕНА ИЗ МЕНЕДЖЕРА!")
+
+                    # Отправляем Telegram уведомление
+                    try:
+                        telegram = _get_telegram()
+                        if telegram:
+                            telegram.send_error(
+                                f"🚨 **КРИТИЧЕСКАЯ ОШИБКА!**\n\n"
+                                f"❌ НЕДОСТАТОЧНО СРЕДСТВ ДЛЯ ЗАКРЫТИЯ SHORT!\n\n"
+                                f"📊 {ticker}\n"
+                                f"💰 Нужно: {buy_back_cost:.0f}₽\n"
+                                f"💰 Доступно: {available:.0f}₽\n"
+                                f"📉 Дефицит: {deficit:.0f}₽\n\n"
+                                f"⚠️ ПОЗИЦИЯ НЕ БУДЕТ ЗАКРЫТА!\n"
+                                f"⚠️ ПОЗИЦИЯ НЕ УДАЛЕНА ИЗ МЕНЕДЖЕРА!\n\n"
+                                f"💡 РЕКОМЕНДАЦИИ:\n"
+                                f"   1. Пополните счёт\n"
+                                f"   2. Или закройте позицию вручную в приложении Т-Банк"
+                            )
+                    except Exception as e:
+                        debug(f"   ⚠️ Ошибка отправки уведомления: {e}")
+
+                    return False
+            else:
+                info(f"   ✅ СРЕДСТВ ДОСТАТОЧНО для закрытия!")
+
+            # ========== 6. ОТМЕНА СТОП-ПРИКАЗОВ ==========
+            info(f"\n📋 [5/7] ОТМЕНА СТОП-ПРИКАЗОВ...")
+            try:
+                self._cancel_stop_orders(position)
+                info(f"   ✅ Стоп-приказы отменены")
+            except Exception as e:
+                warning(f"   ⚠️ Ошибка при отмене стоп-приказов: {e}")
+
+            # ========== 7. ОТПРАВКА ЗАЯВКИ НА ЗАКРЫТИЕ ==========
+            info(f"\n📡 [6/7] ОТПРАВКА ЗАЯВКИ НА ПОКУПКУ {quantity} шт {ticker}...")
+
+            success_flag = False
+            try:
+                info(f"   📍 Тип заявки: РЫНОЧНАЯ (MARKET)")
+                success_flag = tbank.buy(figi, quantity, use_market=True)
+
+                if not success_flag:
+                    error(f"   ❌ ЗАЯВКА НЕ ОТПРАВЛЕНА!")
+                    info(f"   🔄 Пробуем лимитную заявку...")
+                    limit_price = current_price * 1.02
+                    info(f"   📍 Тип заявки: ЛИМИТНАЯ по {limit_price:.2f}₽ (+2%)")
+                    success_flag = tbank.buy(figi, quantity, price=limit_price)
+
+                    if not success_flag:
+                        error(f"   ❌ И ЛИМИТНАЯ ЗАЯВКА НЕ ОТПРАВЛЕНА!")
+                        warning(f"\n   ⚠️ ПОЗИЦИЯ {ticker} НЕ БУДЕТ УДАЛЕНА ИЗ МЕНЕДЖЕРА!")
+                        return False
+                    else:
+                        info(f"   ✅ ЛИМИТНАЯ ЗАЯВКА ОТПРАВЛЕНА")
+                else:
+                    info(f"   ✅ РЫНОЧНАЯ ЗАЯВКА ОТПРАВЛЕНА")
+
+            except Exception as e:
+                error(f"   ❌ ОШИБКА ПРИ ОТПРАВКЕ ЗАЯВКИ: {e}")
+                error_msg = str(e)
+                if "30049" in error_msg:
+                    error(f"   🔍 ОШИБКА 30049: недостаточно средств для маржинальной сделки")
+                    error(f"   💡 Рекомендация: пополните счёт или закройте другие позиции")
+                elif "30240" in error_msg:
+                    error(f"   🔍 ОШИБКА 30240: инструмент требует подтверждения сделок (OTC)")
+                    error(f"   💡 Рекомендация: закройте позицию вручную в приложении Т-Банк")
+                else:
+                    error(f"   🔍 Код ошибки: {error_msg[:100]}")
+
+                warning(f"\n   ⚠️ ПОЗИЦИЯ {ticker} НЕ БУДЕТ УДАЛЕНА ИЗ МЕНЕДЖЕРА!")
+                return False
+
+            # ========== 8. ОЖИДАНИЕ ИСПОЛНЕНИЯ ==========
+            info(f"\n⏳ [7/7] ОЖИДАНИЕ ИСПОЛНЕНИЯ ЗАЯВКИ (до 15 секунд)...")
+
+            for attempt in range(15):
+                time.sleep(1)
+                debug(f"   Попытка {attempt + 1}/15...")
+
+                try:
+                    broker_positions = tbank.get_positions(force_refresh=True)
+                    still_exists = False
+                    remaining_qty = 0
+
+                    for pos in broker_positions:
+                        if pos.get('figi') == figi:
+                            remaining_qty = abs(pos.get('quantity', 0))
+                            if remaining_qty > 0:
+                                still_exists = True
+                            break
+
+                    if not still_exists:
+                        success(f"\n{'✅' * 60}")
+                        success(f"✅ ПОЗИЦИЯ {ticker} УСПЕШНО ЗАКРЫТА!")
+                        success(f"   Время исполнения: {attempt + 1} сек")
+                        success(f"   Количество: {quantity} шт")
+                        success(f"   Цена закрытия: ~{current_price:.2f}₽")
+                        success(f"{'✅' * 60}")
+
+                        try:
+                            telegram = _get_telegram()
+                            if telegram:
+                                profit_pct = position.current_profit_pct(current_price)
+                                profit_amount = position.current_profit_amount(current_price)
+                                telegram.send_trade_closed(
+                                    side="SHORT",
+                                    reason="ЗАКРЫТО",
+                                    profit_pct=profit_pct,
+                                    profit_amount=profit_amount,
+                                    ticker=ticker,
+                                    quantity=quantity
+                                )
+                        except Exception as e:
+                            debug(f"   ⚠️ Ошибка отправки уведомления: {e}")
+
+                        return True
+                    else:
+                        debug(f" ⏳ Всё ещё существует ({remaining_qty} шт)")
+
+                except Exception as e:
+                    debug(f" ⚠️ Ошибка проверки: {e}")
+
+            # ========== 9. НЕ ДОЖДАЛИСЬ ИСПОЛНЕНИЯ ==========
+            warning(f"\n{'⚠️' * 60}")
+            warning(f"⚠️ ЗАЯВКА ОТПРАВЛЕНА, НО ПОЗИЦИЯ {ticker} ВСЁ ЕЩЁ СУЩЕСТВУЕТ!")
+            warning(f"{'⚠️' * 60}")
+            warning(f"   📊 Количество: {quantity} шт")
+            warning(f"   💰 Текущая цена: {current_price:.2f}₽")
+            warning(f"   ⏰ Время ожидания: 15 секунд")
+            warning(f"\n   💡 ЗАЯВКА МОЖЕТ ИСПОЛНИТЬСЯ ПОЗЖЕ!")
+            warning(f"   💡 Рекомендация: проверьте статус в приложении Т-Банк")
+            warning(f"\n   ⚠️ ПОЗИЦИЯ НЕ БУДЕТ УДАЛЕНА из менеджера!")
+            warning(f"   ⚠️ Будет выполнена повторная попытка в следующем цикле")
+
+            try:
+                telegram = _get_telegram()
+                if telegram:
+                    telegram.send_warning(
+                        f"⚠️ **ЗАВИСШАЯ ЗАЯВКА!**\n\n"
+                        f"📊 {ticker} (SHORT)\n"
+                        f"🔢 Количество: {quantity} шт\n"
+                        f"💰 Цена: {current_price:.2f}₽\n\n"
+                        f"Заявка на покупку отправлена,\n"
+                        f"но позиция всё ещё существует!\n\n"
+                        f"💡 Проверьте статус в приложении Т-Банк.\n"
+                        f"⚠️ Позиция НЕ УДАЛЕНА из менеджера."
+                    )
+            except Exception as e:
+                debug(f"   ⚠️ Ошибка отправки уведомления: {e}")
+
+            return False
+
+        except Exception as e:
+            error(f"\n❌ КРИТИЧЕСКАЯ ОШИБКА В _close_short_position_safe:")
+            error(f"   {type(e).__name__}: {e}")
+            import traceback
+            error(f"   {traceback.format_exc()}")
+            return False
+
+        finally:
+            if hasattr(position, '_closing'):
+                delattr(position, '_closing')
 
     def _get_timeout_for_position(self, position: Position, profit_pct: float) -> int:
         """Рассчитывает таймаут для позиции в зависимости от прибыли и типа"""
@@ -1505,53 +2028,6 @@ class PositionManager:
             error(f"❌ Ошибка в _close_worst_positions: {e}")
             return 0
 
-    # def emergency_close_worst_positions(self, max_to_close: int = 2) -> int:
-    #     """Аварийное закрытие самых убыточных позиций с использованием умного закрытия"""
-    #     from trading_bot.api.tbank_client import tbank
-    #     from trading_bot.core.blacklist_manager import blacklist_manager
-    #
-    #     self.sync_and_cleanup()
-    #
-    #     if not self._positions:
-    #         return 0
-    #
-    #     positions_with_pnl = self._get_positions_with_pnl()
-    #     positions_with_pnl.sort(key=lambda x: x['profit_pct'])
-    #
-    #     closed = 0
-    #     for item in positions_with_pnl[:max_to_close]:
-    #         figi = item['figi']
-    #         position = item['position']
-    #         profit_pct = item['profit_pct']
-    #         ticker = position.ticker or figi[:8]
-    #
-    #         warning(f"🚨 АВАРИЙНОЕ закрытие {ticker} (P&L: {profit_pct:+.2f}%)")
-    #
-    #         # Определяем направление
-    #         if position.side == OrderSide.LONG:
-    #             direction = "SELL"
-    #         else:
-    #             direction = "BUY"
-    #
-    #         result = tbank.close_position_with_retry(
-    #             figi=figi,
-    #             quantity=position.quantity,
-    #             direction=direction,
-    #             max_attempts=10,
-    #             emergency_slippage=0.10
-    #         )
-    #
-    #         if result.get('success'):
-    #             self.remove_position(figi)
-    #             closed += 1
-    #             success(f"   ✅ Позиция {ticker} аварийно закрыта")
-    #         else:
-    #             error(f"   ❌ Не удалось аварийно закрыть {ticker}")
-    #             # Добавляем в чёрный список
-    #             blacklist_manager.add_temporary(ticker, ttl_minutes=60)
-    #
-    #     return closed
-
     def emergency_close_by_symbol(self, ticker: str) -> bool:
         """
         Экстренное закрытие позиции по тикеру (ручной вызов)
@@ -1802,29 +2278,81 @@ class PositionManager:
         """
         from trading_bot.api.tbank_client import tbank
         from trading_bot.models import Position, OrderSide
+        from trading_bot.logger import info, success, error, warning, debug
 
+        print("\n" + "=" * 80)
+        print("🔄 СИНХРОНИЗАЦИЯ И ВОССТАНОВЛЕНИЕ ПОЗИЦИЙ")
+        print("=" * 80)
         info("🔄 СИНХРОНИЗАЦИЯ ПОЗИЦИЙ С БРОКЕРОМ...")
 
         try:
-            broker_positions = tbank.get_positions()
-            restored = 0
+            # ========== 1. ПОЛУЧАЕМ ПОЗИЦИИ ОТ БРОКЕРА ==========
+            print("\n📡 [1/6] ПОЛУЧЕНИЕ ПОЗИЦИЙ ОТ БРОКЕРА...")
+            broker_positions = tbank.get_positions(force_refresh=True)
 
-            for pos in broker_positions:
+            if not broker_positions:
+                print("   📭 Нет открытых позиций у брокера")
+                info("   📭 Нет открытых позиций для синхронизации")
+                return 0
+
+            print(f"   ✅ Найдено {len(broker_positions)} позиций у брокера")
+            info(f"📊 Получено {len(broker_positions)} позиций от брокера")
+
+            # ========== 2. ЛОГИРУЕМ ТЕКУЩИЕ ПОЗИЦИИ В МЕНЕДЖЕРЕ ==========
+            print(f"\n📊 [2/6] ТЕКУЩИЕ ПОЗИЦИИ В МЕНЕДЖЕРЕ: {len(self._positions)}")
+            for figi, existing_pos in self._positions.items():
+                print(
+                    f"   - {existing_pos.ticker}: {existing_pos.side.value} {existing_pos.quantity}шт по {existing_pos.avg_price:.2f}₽")
+
+            restored = 0
+            recovered_orders = 0
+            updated_count = 0
+
+            # ✅ СПИСОК OTC ПОЗИЦИЙ ДЛЯ ОЧИСТКИ
+            otc_figis_to_cleanup = []
+
+            # ========== 3. ВОССТАНАВЛИВАЕМ ПОЗИЦИИ ==========
+            print("\n🔄 [3/6] ВОССТАНОВЛЕНИЕ ПОЗИЦИЙ...")
+
+            for idx, pos in enumerate(broker_positions, 1):
                 figi = pos['figi']
                 quantity = abs(pos['quantity'])
 
                 if quantity == 0:
                     continue
 
+                # Определяем avg_price (внутри цикла, для каждой позиции)
+                avg_price = pos['avg_price']
+
+                print(f"\n   [{idx}/{len(broker_positions)}] Обработка FIGI: {figi[:12]}...")
+
+                # ✅ ПРОВЕРКА OTC ПРИ ВОССТАНОВЛЕНИИ
+                if tbank.is_confirmation_required(figi):
+                    ticker = tbank._get_ticker_by_figi(figi) or figi[:8]
+                    warning(f"⚠️ {ticker} - OTC ИНСТРУМЕНТ! НЕВОЗМОЖНО УПРАВЛЯТЬ ЧЕРЕЗ API!")
+                    warning(f"   Пропускаем восстановление")
+                    otc_figis_to_cleanup.append(figi)
+                    continue  # Переходим к следующей позиции
+
                 # Если позиции нет в менеджере, но есть у брокера - восстанавливаем
                 if figi not in self._positions:
-                    # ✅ ИСПРАВЛЕНО: используем прямой вызов tbank
                     ticker = tbank._get_ticker_by_figi(figi) or figi[:8]
                     side = OrderSide.SHORT if pos['quantity'] < 0 else OrderSide.LONG
-                    avg_price = pos['avg_price']
+
+                    print(f"   🆕 НОВАЯ ПОЗИЦИЯ: {ticker}")
+                    print(f"      Сторона: {side.value}")
+                    print(f"      Количество: {quantity} шт")
+                    print(f"      Средняя цена: {avg_price:.4f}₽")
+                    print(f"      Текущая позиция у брокера: {pos['quantity']} шт")
 
                     info(f"🔄 Восстановление позиции {ticker}: {side.value} {quantity} шт по {avg_price:.2f}₽")
 
+                    # Получаем текущую цену для установки максимума/минимума
+                    current_price = tbank.get_current_price(figi)
+                    print(
+                        f"      Текущая цена: {current_price:.4f}₽" if current_price else "      ⚠️ Не удалось получить текущую цену")
+
+                    # Создаём объект позиции
                     position = Position(
                         figi=figi,
                         ticker=ticker,
@@ -1834,30 +2362,266 @@ class PositionManager:
                         entry_time=datetime.now(MOSCOW_TZ)
                     )
 
-                    # Получаем текущую цену
-                    current_price = tbank.get_current_price(figi)
+                    # Устанавливаем начальные значения для трейлинг-стопа
                     if current_price:
                         if side == OrderSide.LONG:
                             position.highest_price = current_price
+                            position.lowest_price = current_price
+                            print(f"      📈 LONG: установлен максимум = {current_price:.4f}₽")
                         else:
                             position.lowest_price = current_price
+                            position.highest_price = current_price
+                            print(f"      📉 SHORT: установлен минимум = {current_price:.4f}₽")
 
+                    # Сохраняем в менеджер
                     self._positions[figi] = position
-
-                    # Устанавливаем защитные ордера для восстановленной позиции
-                    self._place_protective_orders_for_position(position)
-
                     restored += 1
+                    print(f"   ✅ Позиция {ticker} добавлена в менеджер")
+
+                    # Восстанавливаем защитные ордера
+                    print(f"\n   🛡️ [4/6] ВОССТАНОВЛЕНИЕ ЗАЩИТНЫХ ОРДЕРОВ ДЛЯ {ticker}...")
+                    orders_recovered = self._restore_protective_orders_for_position(position)
+                    recovered_orders += orders_recovered
+                    print(f"   ✅ Восстановлено ордеров: {orders_recovered}")
+
+                else:
+                    # Позиция уже есть в менеджере - обновляем данные
+                    existing = self._positions[figi]
+                    print(f"   📍 Существующая позиция: {existing.ticker}")
+                    print(f"      Текущее количество в менеджере: {existing.quantity} шт")
+                    print(f"      Количество у брокера: {quantity} шт")
+
+                    if existing.quantity != quantity:
+                        print(f"      🔄 Обновляем количество: {existing.quantity} → {quantity}")
+                        existing.quantity = quantity
+                        updated_count += 1
+
+                    if abs(existing.avg_price - avg_price) > 0.01:
+                        print(f"      🔄 Обновляем среднюю цену: {existing.avg_price:.4f} → {avg_price:.4f}₽")
+                        existing.avg_price = avg_price
+                        updated_count += 1
+
+            # ========== 4. УДАЛЯЕМ МЁРТВЫЕ ПОЗИЦИИ ==========
+            print("\n🗑️ [5/6] УДАЛЕНИЕ МЁРТВЫХ ПОЗИЦИЙ...")
+            broker_figis = {p['figi'] for p in broker_positions}
+            removed = 0
+
+            for figi in list(self._positions.keys()):
+                if figi not in broker_figis:
+                    ticker = self._positions[figi].ticker
+                    print(f"   🗑️ Удаляем мёртвую позицию: {ticker}")
+                    info(f"🧹 Удалена мёртвая позиция {ticker}")
+                    del self._positions[figi]
+                    removed += 1
+
+            if removed > 0:
+                print(f"   ✅ Удалено мёртвых позиций: {removed}")
+            else:
+                print("   ✅ Нет мёртвых позиций для удаления")
+
+            # ✅ ОЧИСТКА OTC-ПОЗИЦИЙ ИЗ БД
+            if otc_figis_to_cleanup and self.db:
+                try:
+                    print(f"\n🗑️ [6/6] ОЧИСТКА OTC ПОЗИЦИЙ ИЗ БД...")
+                    for figi in otc_figis_to_cleanup:
+                        ticker = tbank._get_ticker_by_figi(figi) or figi[:8]
+                        print(f"   🧹 Удаляем OTC позицию {ticker} из БД")
+                        warning(f"🧹 Удаление OTC позиции {ticker} из базы данных")
+
+                    cleaned = self.db.cleanup_otc_positions(otc_figis_to_cleanup)
+                    print(f"   ✅ Очищено OTC позиций из БД: {cleaned}")
+                    info(f"✅ Очищено {cleaned} OTC позиций из базы данных")
+                except Exception as e:
+                    error(f"   ❌ Ошибка очистки OTC позиций из БД: {e}")
+
+            # ========== 5. ИТОГИ ==========
+            print("\n" + "=" * 80)
+            print("📊 ИТОГИ СИНХРОНИЗАЦИИ")
+            print("=" * 80)
+            print(f"   🔄 Восстановлено позиций: {restored}")
+            print(f"   🛡️ Восстановлено защитных ордеров: {recovered_orders}")
+            print(f"   📝 Обновлено позиций: {updated_count}")
+            print(f"   🗑️ Удалено мёртвых позиций: {removed}")
+            print(f"   🚫 OTC позиций пропущено: {len(otc_figis_to_cleanup)}")
+            print(f"   📊 Всего позиций в менеджере: {len(self._positions)}")
+            print("=" * 80)
 
             if restored > 0:
                 success(f"✅ Восстановлено {restored} позиций из брокера")
+                success(f"✅ Восстановлено {recovered_orders} защитных ордеров")
             else:
-                info("   Все позиции синхронизированы")
+                info("   ✅ Все позиции синхронизированы")
 
             return restored
 
         except Exception as e:
             error(f"❌ Ошибка синхронизации: {e}")
+            import traceback
+            error(f"   {traceback.format_exc()}")
+            return 0
+
+    def _restore_protective_orders_for_position(self, position) -> int:
+        """
+        ВОССТАНОВЛЕНИЕ ЗАЩИТНЫХ ОРДЕРОВ (TP/SL) ДЛЯ ПОЗИЦИИ
+        Проверяет активные заявки у брокера и восстанавливает их в менеджере
+
+        Args:
+            position: Объект позиции
+
+        Returns:
+            int: Количество восстановленных ордеров
+        """
+        from trading_bot.api.tbank_client import tbank
+        from trading_bot.logger import info, warning, debug, success
+
+        ticker = position.ticker or position.figi[:8]
+        recovered = 0
+
+        print(f"\n   🔍 ПРОВЕРКА АКТИВНЫХ ЗАЯВОК ДЛЯ {ticker}:")
+
+        try:
+            # Получаем активные заявки от брокера
+            active_orders = tbank.get_active_orders()
+
+            if not active_orders:
+                print(f"      📭 Нет активных заявок у брокера для {ticker}")
+                debug(f"   📭 Нет активных заявок для {ticker}")
+                return 0
+
+            # Фильтруем заявки по FIGI
+            position_orders = [o for o in active_orders if o.get('figi') == position.figi]
+
+            if not position_orders:
+                print(f"      📭 Нет активных заявок для {ticker} (другие инструменты есть)")
+                debug(f"   📭 Нет активных заявок для {ticker}")
+                return 0
+
+            print(f"      📋 Найдено {len(position_orders)} активных заявок для {ticker}")
+            info(f"   📋 Найдено {len(position_orders)} активных заявок для {ticker}")
+
+            for order in position_orders:
+                direction = order.get('direction')
+                price = order.get('price', 0)
+                quantity = order.get('quantity', 0)
+                order_id = order.get('order_id', 'unknown')[:8]
+
+                print(f"\n      📍 ЗАЯВКА {order_id}: {direction} {quantity}шт по {price:.2f}₽")
+
+                # Определяем тип заявки (TP или SL) в зависимости от стороны позиции
+                if position.side == OrderSide.LONG:
+                    if direction == "SELL":
+                        if price > position.avg_price:
+                            # Это тейк-профит (цена выше входа)
+                            position.take_profit_price = price
+                            position.take_profit_order_id = order.get('order_id')
+                            recovered += 1
+                            print(
+                                f"         ✅ ВОССТАНОВЛЕН TP: {price:.2f}₽ (выше входа на {((price - position.avg_price) / position.avg_price * 100):.2f}%)")
+                            success(f"   ✅ Восстановлен TP для {ticker}: {price:.2f}₽")
+                        elif price < position.avg_price:
+                            # Это стоп-лосс (цена ниже входа)
+                            position.stop_order_price = price
+                            position.stop_order_placed = True
+                            recovered += 1
+                            print(
+                                f"         ✅ ВОССТАНОВЛЕН SL: {price:.2f}₽ (ниже входа на {((position.avg_price - price) / position.avg_price * 100):.2f}%)")
+                            success(f"   ✅ Восстановлен SL для {ticker}: {price:.2f}₽")
+                        else:
+                            print(f"         ⚠️ НЕИЗВЕСТНЫЙ ТИП: цена равна цене входа")
+                    else:
+                        print(f"         ⚠️ НЕИЗВЕСТНОЕ НАПРАВЛЕНИЕ: {direction} для LONG позиции")
+
+                elif position.side == OrderSide.SHORT:
+                    if direction == "BUY":
+                        if price < position.avg_price:
+                            # Для SHORT: тейк-профит (цена ниже входа)
+                            position.take_profit_price = price
+                            position.take_profit_order_id = order.get('order_id')
+                            recovered += 1
+                            print(
+                                f"         ✅ ВОССТАНОВЛЕН TP: {price:.2f}₽ (ниже входа на {((position.avg_price - price) / position.avg_price * 100):.2f}%)")
+                            success(f"   ✅ Восстановлен TP для {ticker}: {price:.2f}₽")
+                        elif price > position.avg_price:
+                            # Для SHORT: стоп-лосс (цена выше входа)
+                            position.stop_order_price = price
+                            position.stop_order_placed = True
+                            recovered += 1
+                            print(
+                                f"         ✅ ВОССТАНОВЛЕН SL: {price:.2f}₽ (выше входа на {((price - position.avg_price) / position.avg_price * 100):.2f}%)")
+                            success(f"   ✅ Восстановлен SL для {ticker}: {price:.2f}₽")
+                        else:
+                            print(f"         ⚠️ НЕИЗВЕСТНЫЙ ТИП: цена равна цене входа")
+                    else:
+                        print(f"         ⚠️ НЕИЗВЕСТНОЕ НАПРАВЛЕНИЕ: {direction} для SHORT позиции")
+
+            # Если не нашли защитных ордеров, создаём новые
+            if recovered == 0:
+                print(f"\n      ⚠️ Не найдено защитных ордеров для {ticker}")
+                print(f"      🔄 СОЗДАЁМ НОВЫЕ ЗАЩИТНЫЕ ОРДЕРА...")
+
+                # Рассчитываем TP/SL на основе конфига
+                from trading_bot.config import config
+                current_price = tbank.get_current_price(position.figi) or position.avg_price
+
+                if position.side == OrderSide.LONG:
+                    take_profit_price = position.avg_price * (1 + config.take_profit_pct / 100)
+                    stop_loss_price = position.avg_price * (1 - config.stop_loss_pct / 100)
+
+                    print(f"         📈 LONG: TP={take_profit_price:.2f}₽ (+{config.take_profit_pct}%)")
+                    print(f"         📉 SL={stop_loss_price:.2f}₽ (-{config.stop_loss_pct}%)")
+
+                    # Создаём тейк-профит
+                    if tbank.place_limit_order(position.figi, position.quantity, "SELL", take_profit_price):
+                        position.take_profit_price = take_profit_price
+                        recovered += 1
+                        success(f"   ✅ Создан новый TP для {ticker}: {take_profit_price:.2f}₽")
+
+                    # Создаём стоп-лосс (если поддерживается)
+                    if tbank.supports_stop_orders(position.figi):
+                        if tbank.place_stop_loss_order(position.figi, position.quantity, stop_loss_price, "LONG"):
+                            position.stop_order_price = stop_loss_price
+                            position.stop_order_placed = True
+                            recovered += 1
+                            success(f"   ✅ Создан новый SL для {ticker}: {stop_loss_price:.2f}₽")
+                    else:
+                        print(f"         ⚠️ Стоп-ордера не поддерживаются, используем программный трейлинг")
+                        warning(f"   ⚠️ Стоп-ордера не поддерживаются для {ticker}")
+
+                else:  # SHORT
+                    take_profit_price = position.avg_price * (1 - config.take_profit_pct / 100)
+                    stop_loss_price = position.avg_price * (1 + config.stop_loss_pct / 100)
+
+                    print(f"         📉 SHORT: TP={take_profit_price:.2f}₽ (-{config.take_profit_pct}%)")
+                    print(f"         📈 SL={stop_loss_price:.2f}₽ (+{config.stop_loss_pct}%)")
+
+                    # Создаём тейк-профит
+                    if tbank.place_limit_order(position.figi, position.quantity, "BUY", take_profit_price):
+                        position.take_profit_price = take_profit_price
+                        recovered += 1
+                        success(f"   ✅ Создан новый TP для {ticker}: {take_profit_price:.2f}₽")
+
+                    # Создаём стоп-лосс (если поддерживается)
+                    if tbank.supports_stop_orders(position.figi):
+                        if tbank.place_stop_loss_order(position.figi, position.quantity, stop_loss_price, "SHORT"):
+                            position.stop_order_price = stop_loss_price
+                            position.stop_order_placed = True
+                            recovered += 1
+                            success(f"   ✅ Создан новый SL для {ticker}: {stop_loss_price:.2f}₽")
+                    else:
+                        print(f"         ⚠️ Стоп-ордера не поддерживаются, используем программный трейлинг")
+                        warning(f"   ⚠️ Стоп-ордера не поддерживаются для {ticker}")
+
+            # Настраиваем трейлинг-стоп (всегда программный)
+            if hasattr(self, '_setup_trailing_stop'):
+                self._setup_trailing_stop(position)
+                print(f"      🔻 Настроен программный трейлинг-стоп")
+
+            return recovered
+
+        except Exception as e:
+            error(f"   ❌ Ошибка восстановления ордеров для {ticker}: {e}")
+            import traceback
+            debug(f"      {traceback.format_exc()}")
             return 0
 
     # ========== МЕТОД: УСТАНОВКА ЗАЩИТНЫХ ОРДЕРОВ ==========
@@ -2061,21 +2825,35 @@ class PositionManager:
             return True, f"Ошибка проверки: {e}"
 
     def cleanup_stuck_positions(self, max_stuck_minutes: int = 10) -> int:
-        """
-        Периодическая очистка "застрявших" позиций
-        Вызывается из trading_loop
-        """
+        """Периодическая очистка "застрявших" позиций"""
         now = datetime.now(MOSCOW_TZ)
         cleaned = 0
 
         for figi, last_attempt in list(self._last_close_attempt.items()):
             if (now - last_attempt).total_seconds() > max_stuck_minutes * 60:
                 ticker = self._get_trading_bot()._get_ticker_by_figi(figi) or figi[:8]
-                warning(f"🧹 Очистка застрявшей позиции {ticker} (не закрывается >{max_stuck_minutes} мин)")
-                self.remove_position(figi)
-                del self._close_attempts[figi]
-                del self._last_close_attempt[figi]
-                cleaned += 1
+
+                # ⚠️ ПРОВЕРЯЕМ, ДЕЙСТВИТЕЛЬНО ЛИ ПОЗИЦИЯ ЗАКРЫТА У БРОКЕРА!
+                from trading_bot.api.tbank_client import tbank
+                broker_positions = tbank.get_positions(force_refresh=True)
+                still_exists = False
+                for pos in broker_positions:
+                    if pos.get('figi') == figi and abs(pos.get('quantity', 0)) > 0:
+                        still_exists = True
+                        break
+
+                if not still_exists:
+                    # Позиции нет у брокера - можно удалять
+                    warning(
+                        f"🧹 Очистка застрявшей позиции {ticker} (не закрывается >{max_stuck_minutes} мин, но у брокера уже нет)")
+                    self.remove_position(figi)
+                    cleaned += 1
+                else:
+                    # Позиция ВСЁ ЕЩЁ существует у брокера - НЕ УДАЛЯЕМ!
+                    warning(f"⚠️ Позиция {ticker} застряла, но ВСЁ ЕЩЁ существует у брокера! НЕ УДАЛЯЕМ из менеджера")
+                    # Сбрасываем счётчик попыток, чтобы попробовать снова
+                    self._close_attempts[figi] = 0
+                    self._last_close_attempt[figi] = now
 
         if cleaned > 0:
             info(f"🧹 Очищено {cleaned} застрявших позиций")
@@ -2084,6 +2862,8 @@ class PositionManager:
 
     def check_eternal_positions(self, max_hold_minutes: int = 120):
         """Проверка позиций, которые висят слишком долго"""
+        from trading_bot.trading.position_closer import position_closer
+
         now = datetime.now(MOSCOW_TZ)
 
         for figi, position in list(self._positions.items()):
@@ -2095,10 +2875,12 @@ class PositionManager:
                 warning(f"⏰ Позиция {ticker} висит {hold_minutes:.0f} мин > {max_hold_minutes} мин")
                 warning(f"   Принудительное закрытие по таймауту")
 
-                current_price = _get_tbank().get_current_price(figi)
-                if current_price:
-                    profit_pct = position.current_profit_pct(current_price)
-                    self._close_position(position, current_price, f"таймаут {max_hold_minutes} мин", profit_pct)
+                # ✅ ИСПРАВЛЕНО: используем position_closer
+                success = position_closer.close_position_smart(figi, ticker)
+                if success:
+                    info(f"   ✅ Позиция {ticker} закрыта по таймауту")
+                else:
+                    error(f"   ❌ Не удалось закрыть {ticker} по таймауту")
 
     def calculate_overnight_fee(self, uncovered_amount: float, days_open: int = 1) -> float:
         """
@@ -2208,18 +2990,22 @@ class PositionManager:
 
     def close_position_smart(self, position, max_attempts: int = 3) -> bool:
         """
-        УМНОЕ ЗАКРЫТИЕ ПОЗИЦИИ с анализом стакана
+        УМНОЕ ЗАКРЫТИЕ ПОЗИЦИИ с анализом стакана и ПРОВЕРКОЙ СРЕДСТВ
         """
         from trading_bot.api.tbank_client import tbank
+        from trading_bot.logger import info, success, error, warning, debug
+        import time
 
         self.sync_and_cleanup()
 
-        # Получаем данные о позиции
+        # ========== 1. ПОЛУЧАЕМ ДАННЫЕ О ПОЗИЦИИ ==========
         if hasattr(position, 'figi'):
             figi = position.figi
             quantity = position.quantity
             ticker = getattr(position, 'ticker', figi[:8])
-            direction = "SELL" if position.side.value == "LONG" else "BUY"
+            side = position.side.value  # LONG или SHORT
+            direction = "SELL" if side == "LONG" else "BUY"
+            avg_price = position.avg_price
 
             if hasattr(position, 'blocked') and position.blocked:
                 error(f"❌ НЕВОЗМОЖНО ЗАКРЫТЬ {ticker}: позиция ЗАБЛОКИРОВАНА!")
@@ -2228,25 +3014,120 @@ class PositionManager:
             figi = position.get('figi')
             quantity = abs(position.get('quantity', 0))
             ticker = position.get('ticker', figi[:8])
-            direction = "SELL" if position.get('quantity', 0) > 0 else "BUY"
+            side = "LONG" if position.get('quantity', 0) > 0 else "SHORT"
+            direction = "SELL" if side == "LONG" else "BUY"
+            avg_price = position.get('avg_price', 0)
 
         if quantity == 0:
             warning(f"⚠️ Нулевое количество для {ticker}, пропускаем")
             return False
 
-        info(f"\n🔍 УМНОЕ ЗАКРЫТИЕ {ticker}")
-        info(f"   Сторона: {direction}, Количество: {quantity} шт")
+        print(f"\n{'🔍' * 40}")
+        print(f"🔍 УМНОЕ ЗАКРЫТИЕ ПОЗИЦИИ: {ticker}")
+        print(f"   Сторона: {side}")
+        print(f"   Направление: {direction}")
+        print(f"   Количество: {quantity} шт")
+        print(f"   Средняя цена: {avg_price:.2f}₽" if avg_price else "")
+        print(f"{'🔍' * 40}")
 
-        # СТРАТЕГИЯ 1: Анализ стакана (умная заявка)
+        # ========== 2. ПОЛУЧАЕМ ТЕКУЩУЮ ЦЕНУ ==========
+        current_price = tbank.get_current_price(figi)
+        if not current_price:
+            error(f"❌ Не удалось получить текущую цену для {ticker}")
+            return False
+
+        print(f"\n💰 Текущая цена: {current_price:.2f}₽")
+
+        # ========== 3. ПРОВЕРКА СРЕДСТВ ДЛЯ SHORT ПОЗИЦИИ ==========
+        if side == "SHORT":
+            needed_funds = quantity * current_price * 1.05  # +5% запас
+            available, total_capital, _ = tbank.get_available_funds()
+
+            print(f"\n💰 ПРОВЕРКА СРЕДСТВ ДЛЯ ЗАКРЫТИЯ SHORT:")
+            print(f"   Нужно для выкупа: {needed_funds:.2f}₽")
+            print(f"   Доступно средств: {available:.2f}₽")
+            print(f"   Капитал: {total_capital:.2f}₽")
+
+            if available < needed_funds:
+                error(f"\n❌ НЕДОСТАТОЧНО СРЕДСТВ ДЛЯ ЗАКРЫТИЯ SHORT {ticker}!")
+                error(f"   Дефицит: {needed_funds - available:.2f}₽")
+
+                # Пытаемся освободить средства, закрыв убыточные LONG
+                print(f"\n🔄 ПОПЫТКА ОСВОБОДИТЬ СРЕДСТВА...")
+                freed = self._try_free_funds_for_short(needed_funds - available, ticker)
+
+                if freed > 0:
+                    time.sleep(2)
+                    available, _, _ = tbank.get_available_funds()
+                    print(f"   💰 После освобождения доступно: {available:.2f}₽")
+
+                    if available >= needed_funds:
+                        success(f"   ✅ Средств достаточно после освобождения!")
+                    else:
+                        error(f"   ❌ Всё ещё недостаточно средств!")
+                        return False
+                else:
+                    error(f"   ❌ Не удалось освободить средства!")
+
+                    # Отправляем Telegram уведомление
+                    try:
+                        telegram = _get_telegram()
+                        if telegram:
+                            telegram.send_error(
+                                f"🚨 **НЕДОСТАТОЧНО СРЕДСТВ!**\n\n"
+                                f"Тикер: {ticker} (SHORT)\n"
+                                f"Нужно для выкупа: {needed_funds:.0f}₽\n"
+                                f"Доступно: {available:.0f}₽\n"
+                                f"Дефицит: {needed_funds - available:.0f}₽\n\n"
+                                f"⚠️ Позиция НЕ МОЖЕТ БЫТЬ ЗАКРЫТА!\n"
+                                f"💡 Пополните счёт или закройте вручную!"
+                            )
+                    except Exception as e:
+                        debug(f"Ошибка отправки уведомления: {e}")
+
+                    return False
+
+        # ========== 4. ПРОВЕРКА, ЧТО ПОЗИЦИЯ ВООБЩЕ СУЩЕСТВУЕТ ==========
+        print(f"\n📋 ПРОВЕРКА СУЩЕСТВОВАНИЯ ПОЗИЦИИ У БРОКЕРА...")
+        broker_positions = tbank.get_positions(force_refresh=True)
+        position_exists = False
+        actual_quantity = 0
+        for pos in broker_positions:
+            if pos.get('figi') == figi and abs(pos.get('quantity', 0)) > 0:
+                position_exists = True
+                actual_quantity = abs(pos.get('quantity', 0))
+                print(f"   ✅ Позиция существует: {actual_quantity} шт")
+                break
+
+        if not position_exists:
+            info(f"   ℹ️ Позиция {ticker} уже закрыта у брокера")
+            self.remove_position(figi)
+            return True
+
+        # Если количество изменилось, используем актуальное
+        if actual_quantity != quantity:
+            warning(f"   ⚠️ Количество изменилось: {quantity} → {actual_quantity} шт")
+            quantity = actual_quantity
+
+        # ========== 5. СТРАТЕГИЯ 1: Анализ стакана (умная заявка) ==========
+        print(f"\n📡 СТРАТЕГИЯ 1: Анализ стакана")
         for attempt in range(max_attempts):
             try:
-                info(f"   📍 Попытка {attempt + 1}/{max_attempts} (стакан)")
+                print(f"   📍 Попытка {attempt + 1}/{max_attempts} (стакан)")
                 result = tbank.place_smart_order(figi, quantity, direction)
 
                 if result.get('success'):
-                    success(f"✅ {ticker} закрыт через анализ стакана!")
-                    self.remove_position(figi)
-                    return True
+                    success(f"\n✅ {ticker} закрыт через анализ стакана!")
+                    # Проверяем, что позиция действительно закрыта
+                    time.sleep(2)
+                    broker_positions = tbank.get_positions(force_refresh=True)
+                    still_exists = any(
+                        p.get('figi') == figi and abs(p.get('quantity', 0)) > 0 for p in broker_positions)
+                    if not still_exists:
+                        self.remove_position(figi)
+                        return True
+                    else:
+                        warning(f"   ⚠️ Заявка отправлена, но позиция всё ещё существует")
                 else:
                     reason = result.get('reason', 'неизвестная причина')
                     warning(f"   ❌ Не удалось: {reason}")
@@ -2255,8 +3136,8 @@ class PositionManager:
                 warning(f"   ❌ Ошибка: {e}")
                 time.sleep(1)
 
-        # СТРАТЕГИЯ 2: Основной метод с прогрессивным проскальзыванием
-        info(f"   🔄 Переход к основному методу close_position_with_retry")
+        # ========== 6. СТРАТЕГИЯ 2: Основной метод с прогрессивным проскальзыванием ==========
+        print(f"\n📡 СТРАТЕГИЯ 2: close_position_with_retry")
         result = tbank.close_position_with_retry(
             figi=figi,
             quantity=quantity,
@@ -2266,58 +3147,170 @@ class PositionManager:
         )
 
         if result.get('success'):
-            success(f"✅ {ticker} закрыт основным методом!")
-            self.remove_position(figi)
-            return True
+            success(f"\n✅ {ticker} закрыт основным методом!")
+            # Проверяем закрытие
+            time.sleep(2)
+            broker_positions = tbank.get_positions(force_refresh=True)
+            still_exists = any(p.get('figi') == figi and abs(p.get('quantity', 0)) > 0 for p in broker_positions)
+            if not still_exists:
+                self.remove_position(figi)
+                return True
+            else:
+                warning(f"   ⚠️ Заявка отправлена, но позиция всё ещё существует")
 
-        error(f"❌ НЕ УДАЛОСЬ ЗАКРЫТЬ {ticker}!")
+        # ========== 7. ВСЁ НЕ УДАЛОСЬ ==========
+        error(f"\n❌ НЕ УДАЛОСЬ ЗАКРЫТЬ {ticker} после всех попыток!")
+        error(f"   💡 Рекомендация: закройте позицию вручную в приложении Т-Банк")
+
+        # Отправляем Telegram уведомление
+        try:
+            telegram = _get_telegram()
+            if telegram:
+                telegram.send_error(
+                    f"🚨 **НЕ УДАЛОСЬ ЗАКРЫТЬ ПОЗИЦИЮ!**\n\n"
+                    f"📊 {ticker} ({side})\n"
+                    f"🔢 Количество: {quantity} шт\n"
+                    f"💰 Цена: {current_price:.2f}₽\n\n"
+                    f"⚠️ Закройте позицию ВРУЧНУЮ в приложении Т-Банк!"
+                )
+        except Exception as e:
+            debug(f"Ошибка отправки уведомления: {e}")
+
         return False
 
-    # def close_all_positions_smart(self, reason: str = "manual") -> Dict[str, bool]:
-    #     """
-    #     Закрыть ВСЕ позиции с умным закрытием
-    #
-    #     Args:
-    #         reason: Причина закрытия
-    #
-    #     Returns:
-    #         Dict[figi, success]
-    #     """
-    #     from trading_bot.api.tbank_client import tbank
-    #
-    #     info(f"\n{'🔒' * 40}")
-    #     info(f"🔒 ЗАКРЫТИЕ ВСЕХ ПОЗИЦИЙ (причина: {reason})")
-    #     info(f"{'🔒' * 40}")
-    #
-    #     self.sync_and_cleanup()
-    #
-    #     results = {}
-    #     positions = list(self._positions.values())
-    #
-    #     for position in positions:
-    #         ticker = getattr(position, 'ticker', position.figi[:8])
-    #         info(f"\n📊 Закрытие {ticker}...")
-    #
-    #         success_flag = self.close_position_smart(position, max_attempts=3)
-    #         results[position.figi] = success_flag
-    #
-    #         if success_flag:
-    #             info(f"   ✅ {ticker} закрыт")
-    #         else:
-    #             error(f"   ❌ {ticker} НЕ закрыт")
-    #
-    #         # Небольшая пауза между закрытиями
-    #         time.sleep(0.5)
-    #
-    #     # Финальный отчёт
-    #     closed = sum(1 for s in results.values() if s)
-    #     total = len(results)
-    #
-    #     info(f"\n{'=' * 40}")
-    #     info(f"📊 ИТОГ ЗАКРЫТИЯ: {closed}/{total} позиций закрыто")
-    #     info(f"{'=' * 40}")
-    #
-    #     return results
+    def _try_free_funds_for_short(self, needed_deficit: float, current_ticker: str) -> float:
+        """
+        ПОПЫТКА ОСВОБОДИТЬ СРЕДСТВА ДЛЯ ЗАКРЫТИЯ SHORT
+        Закрывает самые убыточные LONG позиции
+
+        Args:
+            needed_deficit: Необходимая сумма (дефицит)
+            current_ticker: Тикер текущей позиции (чтобы не закрывать её)
+
+        Returns:
+            float: Сумма освобождённых средств
+        """
+        from trading_bot.api.tbank_client import tbank
+        from trading_bot.logger import info, success, error, warning
+        import time
+
+        info(f"\n🔄 ПОПЫТКА ОСВОБОДИТЬ {needed_deficit:.0f}₽ для закрытия SHORT {current_ticker}")
+
+        freed_funds = 0
+        closed_positions = []
+
+        try:
+            # Получаем все позиции
+            broker_positions = tbank.get_positions(force_refresh=True)
+
+            if not broker_positions:
+                info("   📭 Нет позиций для закрытия")
+                return 0
+
+            # Находим убыточные LONG позиции
+            long_positions = []
+            for pos in broker_positions:
+                pos_ticker = tbank._get_ticker_by_figi(pos.get('figi')) or pos.get('figi', '')[:8]
+
+                if pos_ticker == current_ticker:
+                    continue  # Пропускаем текущий тикер
+
+                if pos.get('quantity', 0) > 0:  # LONG
+                    pos_figi = pos.get('figi')
+                    pos_qty = abs(pos.get('quantity', 0))
+                    pos_avg = pos.get('avg_price', 0)
+                    pos_current = tbank.get_current_price(pos_figi)
+
+                    if pos_current:
+                        pos_pnl = (pos_current - pos_avg) * pos_qty
+                        long_positions.append({
+                            'figi': pos_figi,
+                            'ticker': pos_ticker,
+                            'qty': pos_qty,
+                            'pnl': pos_pnl,
+                            'pnl_pct': (pos_current - pos_avg) / pos_avg * 100 if pos_avg > 0 else 0,
+                            'avg_price': pos_avg,
+                            'current_price': pos_current,
+                            'value': pos_qty * pos_current
+                        })
+
+            if not long_positions:
+                info("   📭 Нет LONG позиций для закрытия")
+                return 0
+
+            # Сортируем по убытку (самые убыточные первые)
+            long_positions.sort(key=lambda x: x['pnl'])
+
+            losing_positions = [p for p in long_positions if p['pnl'] < 0]
+            info(f"   📊 Найдено убыточных LONG позиций: {len(losing_positions)}")
+
+            if not losing_positions:
+                info("   ✅ Нет убыточных LONG позиций")
+                return 0
+
+            # Закрываем убыточные позиции, пока не наберём нужную сумму
+            for pos in losing_positions:
+                if freed_funds >= needed_deficit:
+                    break
+
+                info(f"\n   📍 ЗАКРЫТИЕ УБЫТОЧНОЙ LONG: {pos['ticker']}")
+                info(f"      Текущий P&L: {pos['pnl']:+.2f}₽ ({pos['pnl_pct']:+.2f}%)")
+                info(f"      Количество: {pos['qty']} шт")
+                info(f"      Цена входа: {pos['avg_price']:.2f}₽")
+                info(f"      Текущая цена: {pos['current_price']:.2f}₽")
+                info(f"      Стоимость позиции: {pos['value']:.2f}₽")
+
+                try:
+                    # Отправляем рыночную заявку на продажу
+                    result = tbank.sell(pos['figi'], pos['qty'], use_market=True)
+
+                    if result:
+                        freed_funds += pos['value']
+                        closed_positions.append(pos['ticker'])
+                        success(f"      ✅ {pos['ticker']} закрыт, освобождено {pos['value']:.0f}₽")
+                        time.sleep(1)  # Пауза между закрытиями
+                    else:
+                        error(f"      ❌ Не удалось закрыть {pos['ticker']}")
+
+                        # Пробуем лимитную заявку
+                        info(f"      🔄 Пробуем лимитную заявку...")
+                        limit_price = pos['current_price'] * 0.98  # -2% для быстрого исполнения
+                        result2 = tbank.sell(pos['figi'], pos['qty'], price=limit_price)
+
+                        if result2:
+                            freed_funds += pos['value']
+                            closed_positions.append(pos['ticker'])
+                            success(f"      ✅ {pos['ticker']} закрыт лимитной заявкой, освобождено {pos['value']:.0f}₽")
+                            time.sleep(1)
+                        else:
+                            error(f"      ❌ Не удалось закрыть {pos['ticker']} ни одним способом")
+
+                except Exception as e:
+                    error(f"      ❌ Ошибка при закрытии {pos['ticker']}: {e}")
+
+            # Итоги освобождения средств
+            if closed_positions:
+                info(f"\n   {'=' * 50}")
+                info(f"   ✅ ОСВОБОЖДЕНИЕ СРЕДСТВ ЗАВЕРШЕНО")
+                info(f"   {'=' * 50}")
+                info(f"   📊 Освобождено средств: {freed_funds:.0f}₽")
+                info(f"   📋 Закрытые позиции: {', '.join(closed_positions)}")
+                info(f"   🎯 Требовалось: {needed_deficit:.0f}₽")
+
+                if freed_funds >= needed_deficit:
+                    info(f"   ✅ ДЕФИЦИТ ПОКРЫТ!")
+                else:
+                    info(f"   ⚠️ ПОКРЫТО ТОЛЬКО {freed_funds / needed_deficit * 100:.0f}% дефицита")
+            else:
+                info(f"\n   ⚠️ НЕ УДАЛОСЬ ОСВОБОДИТЬ СРЕДСТВА")
+
+            return freed_funds
+
+        except Exception as e:
+            error(f"   ❌ Ошибка при освобождении средств: {e}")
+            import traceback
+            error(f"   {traceback.format_exc()}")
+            return 0
 
     def _check_reversal_profit(self, position: Position, current_price: float) -> bool:
         """

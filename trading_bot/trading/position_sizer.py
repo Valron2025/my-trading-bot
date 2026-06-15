@@ -393,7 +393,8 @@ class PositionSizer:
         """Расчёт размера SHORT позиции с автоматической блокировкой недоступных инструментов"""
         from trading_bot.core.settings_manager import settings_manager
         import time
-        from trading_bot.utils.time_utils import is_trading_time, is_weekend_trading_time, is_otc_trading_time, get_moscow_time
+        from trading_bot.utils.time_utils import is_trading_time, is_weekend_trading_time, is_otc_trading_time, \
+            get_moscow_time
 
         price = stock.price
         if price <= 0:
@@ -413,10 +414,303 @@ class PositionSizer:
         info(f"      💵 Доступно средств: {available_funds:.2f}₽")
         info(f"{'─' * 70}")
 
-        # Здесь продолжается полная версия _calculate_short
-        # Для краткости, но с правильными отступами
+        # ========== 1. ПРОВЕРКА SHORT ДОСТУПНОСТИ ==========
+        info(f"\n   🔻 [ШАГ 1/12] ПРОВЕРКА SHORT ДОСТУПНОСТИ:")
 
-        return 1  # Временное значение
+        if not hasattr(self, '_short_blocked_until'):
+            self._short_blocked_until = {}
+            info(f"      📦 Инициализирован кэш блокировок SHORT")
+
+        if ticker in self._short_blocked_until:
+            if time.time() < self._short_blocked_until[ticker]:
+                remaining = int(self._short_blocked_until[ticker] - time.time())
+                info(f"      ⛔ {ticker} В ЧЁРНОМ СПИСКЕ SHORT (ещё {remaining // 60} мин)")
+                return 0
+            else:
+                del self._short_blocked_until[ticker]
+                info(f"      🔓 {ticker} ВЫШЕЛ из чёрного списка SHORT")
+        else:
+            info(f"      ✅ {ticker} НЕ в чёрном списке SHORT")
+
+        # Проверяем, можно ли шортить
+        try:
+            from trading_bot.risk.short_controller import short_controller
+            can_short, reason = short_controller.can_short(ticker, stock.figi)
+            if not can_short:
+                info(f"      ❌ SHORT НЕДОСТУПЕН: {reason}")
+                return 0
+            info(f"      ✅ SHORT ДОСТУПЕН")
+        except Exception as e:
+            info(f"      ⚠️ Ошибка проверки SHORT: {e}")
+
+        # ========== 2. ПРОВЕРКА ВРЕМЕНИ ТОРГОВ ==========
+        info(f"\n   ⏰ [ШАГ 2/12] ПРОВЕРКА ВРЕМЕНИ ТОРГОВ:")
+        now = get_moscow_time()
+        is_trading = is_trading_time()
+        is_weekend = is_weekend_trading_time()
+        is_otc = is_otc_trading_time()
+
+        info(f"      🕐 Текущее время: {now.strftime('%H:%M:%S')}")
+        info(f"      🏛️ Основная сессия: {'✅ ДА' if is_trading else '❌ НЕТ'}")
+        info(f"      🌙 Выходные (ДСВД): {'✅ ДА' if is_weekend else '❌ НЕТ'}")
+        info(f"      📞 OTC режим: {'✅ ДА' if is_otc else '❌ НЕТ'}")
+
+        can_trade = is_trading or is_weekend or is_otc
+        if not can_trade:
+            info(f"      ⏸️ РЕЗУЛЬТАТ: ТОРГИ ЗАКРЫТЫ → возвращаем 0")
+            return 0
+        info(f"      ✅ РЕЗУЛЬТАТ: ТОРГИ ОТКРЫТЫ → продолжаем")
+
+        # ========== 3. ПРОВЕРКА ДОСТУПНОСТИ ИНСТРУМЕНТА ==========
+        info(f"\n   🔍 [ШАГ 3/12] ПРОВЕРКА ДОСТУПНОСТИ ИНСТРУМЕНТА:")
+
+        try:
+            trading_status = _get_tbank().get_trading_status(stock.figi)
+            info(f"      📊 Статус торгов:")
+            info(f"         🔌 API торговля: {'✅' if trading_status.get('api_trade_available', False) else '❌'}")
+            info(f"         🏷️ Рыночные заявки: {'✅' if trading_status.get('market_order_available', False) else '❌'}")
+            info(f"         📋 Лимитные заявки: {'✅' if trading_status.get('limit_order_available', False) else '❌'}")
+
+            if not trading_status.get('api_trade_available', False):
+                info(f"      ❌ API торговля НЕДОСТУПНА → блокируем SHORT на 1 час")
+                self._short_blocked_until[ticker] = time.time() + 3600
+                return 0
+
+            # Проверяем OTC
+            is_otc_instrument = _get_tbank().is_confirmation_required(stock.figi)
+            if is_otc_instrument:
+                info(f"      ⚠️ OTC ИНСТРУМЕНТ (требует подтверждения) → SHORT невозможен")
+                self._short_blocked_until[ticker] = time.time() + 3600
+                return 0
+            else:
+                info(f"      ✅ НЕ OTC инструмент")
+
+        except Exception as e:
+            info(f"      ❌ Ошибка проверки: {e}")
+            return 0
+
+        # ========== 4. ПОЛУЧЕНИЕ КАПИТАЛА И МАРЖИ ==========
+        info(f"\n   💰 [ШАГ 4/12] ПОЛУЧЕНИЕ КАПИТАЛА И МАРЖИ:")
+
+        try:
+            _, total, _ = _get_tbank().get_available_funds()
+            info(f"      📊 Общий капитал: {total:.2f}₽")
+
+            margin_info = _get_tbank().get_margin_info()
+            margin_rate = margin_info.get('margin_rate', 0)
+            info(f"      📈 Маржа: {margin_rate:.1f}%")
+
+            if self.capital_manager:
+                self.capital_manager.update_margin_rate(margin_rate)
+        except Exception as e:
+            info(f"      ⚠️ Ошибка получения капитала: {e}")
+            total = available_funds
+            margin_rate = 0
+
+        # ========== 5. РАСЧЁТ РЕЗЕРВОВ ==========
+        info(f"\n   💰 [ШАГ 5/12] РАСЧЁТ РЕЗЕРВОВ:")
+
+        cash_reserve_pct = getattr(config, 'cash_reserve_pct', 0.20)
+        min_cash_balance = getattr(config, 'min_cash_balance', 500.0)
+        reserved_amount = max(total * cash_reserve_pct, min_cash_balance)
+        available_for_trading = max(0, total - reserved_amount)
+
+        info(f"      🔒 Резерв: {cash_reserve_pct * 100:.0f}% = {reserved_amount:.2f}₽")
+        info(f"      💵 Доступно для торговли: {available_for_trading:.2f}₽")
+
+        use_margin = settings_manager.get('use_margin', False)
+        info(f"      💳 Маржинальная торговля: {'✅ ВКЛЮЧЕНА' if use_margin else '❌ ВЫКЛЮЧЕНА'}")
+
+        # Для SHORT требуется больше средств (маржа)
+        if use_margin:
+            total_available = available_for_trading * 2  # Плечо 2:1 для SHORT
+            info(f"      💰 С учётом маржи (x2): {total_available:.2f}₽")
+        else:
+            total_available = available_for_trading
+            info(f"      💰 Доступно для SHORT: {total_available:.2f}₽")
+
+        # ========== 6. РАСЧЁТ ВОЛАТИЛЬНОСТИ ==========
+        info(f"\n   📊 [ШАГ 6/12] РАСЧЁТ ВОЛАТИЛЬНОСТИ:")
+        volatility = self._get_volatility(ticker)
+        info(f"      📈 Волатильность: {volatility:.2%}")
+
+        # ========== 7. БАЗОВЫЙ ПРОЦЕНТ ПОД КАПИТАЛ ==========
+        info(f"\n   📐 [ШАГ 7/12] БАЗОВЫЙ ПРОЦЕНТ ПОД КАПИТАЛ:")
+
+        if total < 10000:
+            base_pct = 0.03  # SHORT меньший процент
+            max_pct = 0.10
+            mode = "микро"
+        elif total < 20000:
+            base_pct = 0.05
+            max_pct = 0.15
+            mode = "малый"
+        elif total < 50000:
+            base_pct = 0.07
+            max_pct = 0.20
+            mode = "средний"
+        else:
+            base_pct = 0.10
+            max_pct = 0.25
+            mode = "крупный"
+
+        info(f"      📊 Режим капитала: {mode} ({total:.0f}₽)")
+        info(f"      📐 Базовый процент: {base_pct * 100:.1f}%")
+        info(f"      📈 Максимальный процент: {max_pct * 100:.1f}%")
+
+        # ========== 8. МНОЖИТЕЛЬ СИГНАЛА ==========
+        info(f"\n   🎯 [ШАГ 8/12] МНОЖИТЕЛЬ СИГНАЛА:")
+
+        abs_score = abs(score)
+        if abs_score >= 6:
+            score_multiplier = 1.5
+            signal_strength = "ЭКСТРЕМАЛЬНО СИЛЬНЫЙ"
+        elif abs_score >= 4:
+            score_multiplier = 1.3
+            signal_strength = "ОЧЕНЬ СИЛЬНЫЙ"
+        elif abs_score >= 2:
+            score_multiplier = 1.1
+            signal_strength = "СИЛЬНЫЙ"
+        elif abs_score >= 1:
+            score_multiplier = 1.0
+            signal_strength = "НОРМАЛЬНЫЙ"
+        else:
+            score_multiplier = 0.7
+            signal_strength = "СЛАБЫЙ"
+
+        info(f"      📈 Score: {score} (абс:{abs_score})")
+        info(f"      💪 Сила сигнала: {signal_strength}")
+        info(f"      🔢 Множитель: {score_multiplier}")
+
+        # ========== 9. ИТОГОВЫЙ ПРОЦЕНТ ПОЗИЦИИ ==========
+        info(f"\n   📐 [ШАГ 9/12] ИТОГОВЫЙ ПРОЦЕНТ ПОЗИЦИИ:")
+
+        position_pct = base_pct * score_multiplier
+        info(f"      📊 Начальный процент: {position_pct * 100:.2f}%")
+
+        # Корректировка по волатильности
+        if volatility > 0.02:
+            old_pct = position_pct
+            position_pct *= 0.6
+            info(f"      📉 Высокая волатильность → ×0.6: {old_pct * 100:.2f}% → {position_pct * 100:.2f}%")
+
+        # Корректировка по марже
+        if margin_rate > 70:
+            old_pct = position_pct
+            position_pct *= 0.5
+            info(f"      🔴 Высокая маржа {margin_rate:.0f}% → ×0.5: {old_pct * 100:.2f}% → {position_pct * 100:.2f}%")
+        elif margin_rate > 50:
+            old_pct = position_pct
+            position_pct *= 0.7
+            info(f"      🟡 Средняя маржа {margin_rate:.0f}% → ×0.7: {old_pct * 100:.2f}% → {position_pct * 100:.2f}%")
+
+        position_pct = min(position_pct, max_pct)
+        info(f"      🎯 ИТОГОВЫЙ ПРОЦЕНТ: {position_pct * 100:.2f}% (макс {max_pct * 100:.0f}%)")
+
+        # ========== 10. РАСЧЁТ МАКСИМАЛЬНОЙ СУММЫ ==========
+        info(f"\n   💰 [ШАГ 10/12] РАСЧЁТ МАКСИМАЛЬНОЙ СУММЫ ПОЗИЦИИ:")
+
+        max_position_value = total_available * position_pct
+        info(f"      📊 По проценту: {max_position_value:.2f}₽")
+
+        # Ограничение максимальной суммы SHORT
+        if total < 15000:
+            MAX_SHORT_AMOUNT = 5000
+        elif total < 30000:
+            MAX_SHORT_AMOUNT = 8000
+        else:
+            MAX_SHORT_AMOUNT = 10000
+
+        if max_position_value > MAX_SHORT_AMOUNT:
+            info(f"      ⚠️ Ограничение MAX_SHORT_AMOUNT: {MAX_SHORT_AMOUNT}₽")
+            max_position_value = MAX_SHORT_AMOUNT
+
+        info(f"      💰 ИТОГО МАКСИМУМ: {max_position_value:.2f}₽")
+
+        # ========== 11. РАСЧЁТ КОЛИЧЕСТВА ==========
+        info(f"\n   🔢 [ШАГ 11/12] РАСЧЁТ КОЛИЧЕСТВА:")
+
+        quantity = int(max_position_value / price)
+        original_quantity = quantity
+        info(f"      🔢 Расчётное количество: {quantity} шт")
+
+        # ✅ ИСПРАВЛЕННАЯ КОРРЕКТИРОВКА ПО ЛОТНОСТИ
+        if lot > 1:
+            old_qty = quantity
+            # Округляем ДО ближайшего кратного лоту (вниз)
+            quantity = (quantity // lot) * lot
+
+            # Если после округления получили 0, пробуем взять 1 лот
+            if quantity == 0:
+                lot_cost = lot * price
+                # Проверяем, что 1 лот не превышает 50% доступных средств
+                if lot_cost <= total_available * 0.5:
+                    quantity = lot
+                    info(f"      🔄 Минимальный лот {lot}: {old_qty} → {quantity} шт")
+                else:
+                    info(f"      ❌ Даже 1 лот ({lot} шт) стоит {lot_cost:.2f}₽ > 50% доступных средств")
+                    return 0
+            else:
+                info(f"      🔄 Корректировка по лоту {lot}: {old_qty} → {quantity} шт")
+        else:
+            # Для лота 1 просто округляем до целого
+            quantity = max(1, quantity)
+
+        # Проверка, что количество положительное
+        if quantity <= 0:
+            info(f"      ❌ Количество = {quantity} → возвращаем 0")
+            return 0
+
+        total_cost = quantity * price
+        info(f"      💰 Стоимость позиции: {total_cost:.2f}₽")
+
+        # Проверка, не превышает ли стоимость доступные средства
+        if total_cost > total_available:
+            info(f"      ⚠️ Стоимость превышает доступные средства")
+            # Пробуем уменьшить на 1 лот
+            if lot > 1 and quantity > lot:
+                new_quantity = quantity - lot
+                new_cost = new_quantity * price
+                if new_cost <= total_available:
+                    quantity = new_quantity
+                    total_cost = new_cost
+                    info(f"      🔧 Уменьшено до {quantity} шт (стоимость {total_cost:.2f}₽)")
+                else:
+                    info(f"      ❌ Не удалось подобрать размер")
+                    return 0
+            else:
+                return 0
+
+        info(f"      ✅ Количество корректно: {quantity} шт")
+
+        # ========== 12. ПРОВЕРКА СТОП-ЛОССА ДЛЯ SHORT ==========
+        info(f"\n   🛡️ [ШАГ 12/12] ПРОВЕРКА СТОП-ЛОССА:")
+
+        stop_loss_pct = settings_manager.get('stop_loss_pct', 0.5)
+        # Для SHORT стоп-лосс выше цены входа
+        stop_loss_price = price * (1 + stop_loss_pct / 100)
+
+        info(f"      🛑 Стоп-лосс: {stop_loss_pct}% = {stop_loss_price:.2f}₽")
+        info(f"      💰 Потенциальный убыток: {(stop_loss_price - price) * quantity:.2f}₽")
+
+        # Финальная проверка
+        position_percent = (total_cost / total * 100) if total > 0 else 0
+        info(f"      📊 Итоговый процент портфеля: {position_percent:.1f}%")
+
+        final_result = quantity if quantity >= lot else 0
+
+        # ========== ИТОГОВЫЙ ОТЧЁТ ==========
+        info(f"\n{'═' * 70}")
+        if final_result > 0:
+            info(f"✅ [SHORT] {ticker}: РАЗМЕР ПОЗИЦИИ = {final_result} шт")
+            info(f"   💰 Сумма: {total_cost:.2f}₽")
+            info(f"   📊 Процент капитала: {position_pct * 100:.1f}%")
+            info(f"   🛡️ Стоп-лосс: {stop_loss_price:.2f}₽ ({stop_loss_pct}%)")
+        else:
+            info(f"❌ [SHORT] {ticker}: НЕЛЬЗЯ ОТКРЫТЬ ПОЗИЦИЮ")
+        info(f"{'═' * 70}")
+
+        return final_result
 
     # ========== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ==========
 

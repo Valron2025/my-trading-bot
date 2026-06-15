@@ -154,6 +154,37 @@ class PreMarketTrader:
 
         return TradingSession.CLOSED
 
+    def can_trade_in_current_session(self) -> Tuple[bool, str, bool]:
+        """
+        Проверка, можно ли торговать в текущей сессии
+
+        Returns:
+            (можно_торговать, причина, можно_рыночные_заявки)
+        """
+        from trading_bot.utils.time_utils import get_moscow_time, is_dsvd_trading_time, is_otc_trading_time
+
+        now = get_moscow_time()
+        weekday = now.weekday()
+
+        # ========== БУДНИ ==========
+        if weekday < 5:
+            if self.is_pre_market_time():
+                return True, "pre-market (будни)", False
+            elif self.is_main_session():
+                return True, "основная сессия (будни)", True
+            elif self.is_evening_session():
+                return True, "вечерняя сессия (будни)", True
+            else:
+                return False, f"торги закрыты ({now.strftime('%H:%M')})", False
+
+        # ========== ВЫХОДНЫЕ ==========
+        if is_dsvd_trading_time():
+            return True, "ДСВД (рыночные заявки доступны)", True
+        elif is_otc_trading_time():
+            return False, "OTC режим (только ручное закрытие)", False
+        else:
+            return False, f"выходной день, вне ДСВД ({now.strftime('%H:%M')})", False
+
     def is_pre_market_time(self) -> bool:
         """Проверка, сейчас pre-market"""
         return self.get_current_session() == TradingSession.PRE_MARKET
@@ -486,11 +517,54 @@ class PreMarketTrader:
 
     async def create_pre_market_plan(self) -> List[PreMarketOrder]:
         """Создание pre-market плана на день"""
+        from trading_bot.utils.time_utils import get_moscow_time, is_dsvd_trading_time, is_otc_trading_time
+
         info(f"\n{'═' * 55}")
         info(f"🌅 СОЗДАНИЕ PRE-MARKET ПЛАНА")
         info(f"   Время: {datetime.now(MOSCOW_TZ).strftime('%H:%M:%S')} МСК")
         info(f"   Дата: {datetime.now(MOSCOW_TZ).strftime('%Y-%m-%d')}")
         info(f"{'═' * 55}")
+
+        # ========== ✅ ПРОВЕРКА ТЕКУЩЕЙ СЕССИИ ==========
+        now = get_moscow_time()
+        weekday = now.weekday()
+        is_weekend = weekday >= 5
+
+        can_create_plan = False
+        session_reason = ""
+
+        if not is_weekend:
+            # Будни - проверяем pre-market время
+            if self.is_pre_market_time():
+                can_create_plan = True
+                session_reason = "pre-market (будни)"
+            elif self.is_main_session():
+                # Основная сессия - не нужен pre-market план
+                info("🌅 Основная сессия, pre-market план не требуется")
+                return []
+            elif self.is_evening_session():
+                # Вечерняя сессия - можно, но осторожно
+                can_create_plan = True
+                session_reason = "вечерняя сессия (будни)"
+            else:
+                info(f"🌅 Торги закрыты (будни), pre-market план не создаётся")
+                return []
+        else:
+            # Выходные - проверяем ДСВД
+            if is_dsvd_trading_time():
+                can_create_plan = True
+                session_reason = "ДСВД (выходные, рыночные заявки доступны)"
+            elif is_otc_trading_time():
+                info("🌅 OTC режим (выходные) - pre-market план НЕ создаётся (только ручное закрытие)")
+                return []
+            else:
+                info(f"🌅 Выходной день, вне ДСВД ({now.strftime('%H:%M')}), pre-market план не создаётся")
+                return []
+
+        if can_create_plan:
+            info(f"   📊 Режим: {session_reason}")
+
+        # ========== ОСТАЛЬНОЙ КОД БЕЗ ИЗМЕНЕНИЙ ==========
 
         # Получаем баланс
         from trading_bot.api.tbank_client import tbank
@@ -503,7 +577,8 @@ class PreMarketTrader:
 
         # Для планирования используем 50% капитала (или свободные средства, если они больше)
         available_for_planning = max(total_capital * 0.5, available) if total_capital > 0 else available
-        info(f"   💰 Капитал: {total_capital:.0f}₽ | Свободно: {available:.0f}₽ | Для планирования: {available_for_planning:.0f}₽")
+        info(
+            f"   💰 Капитал: {total_capital:.0f}₽ | Свободно: {available:.0f}₽ | Для планирования: {available_for_planning:.0f}₽")
 
         # ✅ ИСПРАВЛЕНО: проверяем available_for_planning вместо available
         if available_for_planning < 500:
@@ -530,14 +605,14 @@ class PreMarketTrader:
                 debug(f"   ⏭️ {cand['ticker']}: OTC инструмент, пропускаем")
                 continue
             # ================================================================
-        
+
             # Проверяем лимит ордеров
             if len(orders) >= self.max_orders_per_day:
                 info(f"⏸️ Достигнут лимит ордеров ({self.max_orders_per_day})")
                 break
 
             # Проверяем лимит капитала (используем available_for_planning)
-            if total_allocated + cand['total_cost'] > available_for_planning * 0.5:  # ← ИСПРАВЛЕНО
+            if total_allocated + cand['total_cost'] > available_for_planning * 0.5:
                 info(f"⏸️ Достигнут лимит капитала ({total_allocated:.0f}₽)")
                 break
 
@@ -617,8 +692,9 @@ class PreMarketTrader:
     # ========== РАЗМЕЩЕНИЕ ОРДЕРОВ ==========
 
     async def place_pre_market_orders(self) -> int:
-        """Размещение pre-market ордеров"""
+        """Размещение pre-market ордеров с поддержкой ДСВД"""
         from trading_bot.api.tbank_client import tbank
+        from trading_bot.utils.time_utils import is_dsvd_trading_time, is_otc_trading_time
 
         if not self.pending_orders:
             warning("⚠️ Нет pending ордеров для размещения")
@@ -629,32 +705,43 @@ class PreMarketTrader:
         placed = 0
         session = self.get_current_session()
 
+        # ========== ОПРЕДЕЛЯЕМ ТИП ЗАЯВОК ==========
+        use_market = False
+
+        if is_dsvd_trading_time():
+            # ДСВД - можно рыночные!
+            use_market = True
+            info("   📊 ДСВД режим: используем РЫНОЧНЫЕ заявки")
+        elif session == TradingSession.MAIN:
+            use_market = True
+            info("   📊 Основная сессия: используем РЫНОЧНЫЕ заявки")
+        else:
+            info("   📊 Pre-market/OTC: используем ЛИМИТНЫЕ заявки")
+
         for order in self.pending_orders:
             try:
                 info(f"\n🔄 {order.direction} {order.ticker}: "
                      f"{order.quantity}шт по {order.limit_price:.2f}₽")
-                
-                # ========== ✅ ДОБАВИТЬ ПРОВЕРКУ OTC ==========
-                # Проверяем, не требует ли инструмент подтверждения
+
+                # ========== ПРОВЕРКА OTC (только для реального OTC, не для ДСВД) ==========
+                # OTC инструменты НЕЛЬЗЯ торговать автоматически!
                 if tbank.is_confirmation_required(order.figi):
                     warning(f"⚠️ {order.ticker} требует подтверждения сделок (OTC) - пропускаем")
                     order.status = "REJECTED"
                     self.rejected_orders.append(order)
                     continue
-                # ============================================
 
-                # В pre-market используем лимитные заявки
-                # В основную сессию можно использовать рыночные
-                use_market = session == TradingSession.MAIN
-
-                if order.direction == "BUY":
-                    if use_market:
+                # ========== ВЫБОР ТИПА ЗАЯВКИ В ЗАВИСИМОСТИ ОТ РЕЖИМА ==========
+                if use_market:
+                    # Рыночная заявка
+                    if order.direction == "BUY":
                         success_flag = tbank.buy(order.figi, order.quantity, use_market=True)
                     else:
-                        success_flag = tbank.buy(order.figi, order.quantity, use_market=False)
-                else:
-                    if use_market:
                         success_flag = tbank.sell(order.figi, order.quantity, use_market=True)
+                else:
+                    # Лимитная заявка (pre-market, OTC, вечерняя сессия)
+                    if order.direction == "BUY":
+                        success_flag = tbank.buy(order.figi, order.quantity, use_market=False)
                     else:
                         success_flag = tbank.sell(order.figi, order.quantity, use_market=False)
 
@@ -772,16 +859,53 @@ class PreMarketTrader:
     # ========== ЗАПУСК И ОСТАНОВКА ==========
 
     async def start_trader(self):
-        """Запуск PreMarketTrader"""
+        """Запуск PreMarketTrader с поддержкой ДСВД"""
         if self._running:
             return
 
-        # ========== ✅ ПРОВЕРКА API ПЕРЕД ЗАПУСКОМ ==========
+        from trading_bot.utils.time_utils import get_moscow_time, is_dsvd_trading_time, is_otc_trading_time, is_holiday
+
+        now = get_moscow_time()
+
+        # ========== ПРОВЕРКА ДСВД ==========
+        if is_otc_trading_time() and not is_dsvd_trading_time():
+            info("🌅 PreMarketTrader: OTC режим, пропускаем (только ручное закрытие)")
+            return
+
+        if is_dsvd_trading_time():
+            info("🌅 PreMarketTrader: ДСВД активна, запускаем (рыночные заявки доступны)")
+
+        weekday = now.weekday()
+        is_weekend = weekday >= 5
+
+        # ========== 1. БУДНИЕ ДНИ - ПРОВЕРЯЕМ PRE-MARKET ВРЕМЯ ==========
+        if not is_weekend:
+            if not self.is_pre_market_time():
+                info(f"🌅 PreMarketTrader: сейчас не pre-market время ({now.strftime('%H:%M')}), пропускаем")
+                return
+            info("🌅 PreMarketTrader запущен (будний день, pre-market)")
+
+        # ========== 2. ВЫХОДНЫЕ ДНИ - ПРОВЕРЯЕМ ДСВД ==========
+        else:
+            # ДСВД активна (09:50-18:59) - ЭТО НОРМАЛЬНАЯ ТОРГОВЛЯ!
+            if is_dsvd_trading_time():
+                info("🌅 PreMarketTrader: ДСВД активна, запускаем (рыночные заявки доступны)")
+            # OTC часы (вне ДСВД) - НЕ ТОРГУЕМ
+            elif is_otc_trading_time():
+                info("🌅 PreMarketTrader: OTC режим, пропускаем (только ручное закрытие)")
+                return
+            # Праздник без ДСВД - НЕ ТОРГУЕМ
+            elif is_holiday(now):
+                info(f"🌅 PreMarketTrader: праздник {now.strftime('%d.%m')}, ДСВД не активна, пропускаем")
+                return
+            else:
+                info("🌅 PreMarketTrader: выходной день, вне ДСВД, пропускаем")
+                return
+
+        # ========== 3. ПРОВЕРКА API ПЕРЕД ЗАПУСКОМ ==========
         from trading_bot.api.tbank_client import tbank
 
-        # Проверяем API через прямой вызов
         try:
-            # Пытаемся получить капитал - если получится, API работает
             available, total_capital, _ = tbank.get_available_funds()
             if available is None or total_capital is None:
                 raise Exception("Не удалось получить капитал")
@@ -792,7 +916,11 @@ class PreMarketTrader:
             return
 
         self._running = True
-        info("🌅 PreMarketTrader запущен (ПОЛНАЯ ВЕРСИЯ)")
+
+        if is_dsvd_trading_time():
+            info("🌅 PreMarketTrader запущен (ДСВД - рыночные заявки доступны)")
+        else:
+            info("🌅 PreMarketTrader запущен (ПОЛНАЯ ВЕРСИЯ)")
 
         # Создаём план
         await self.create_pre_market_plan()
@@ -800,7 +928,7 @@ class PreMarketTrader:
         # Размещаем ордера
         await self.place_pre_market_orders()
 
-        # Запускаем фоновый мониторинг и СОХРАНЯЕМ задачу
+        # Запускаем фоновый мониторинг
         self._monitor_task = asyncio.create_task(self.monitor_orders())
 
     async def stop_trader(self):

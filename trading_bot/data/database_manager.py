@@ -34,6 +34,13 @@ class DatabaseManager:
         """Инициализация всех таблиц"""
         with self._lock:
             conn = sqlite3.connect(self.db_path, check_same_thread=False)
+
+            # ✅ ОПТИМИЗАЦИЯ SQLite
+            conn.execute("PRAGMA journal_mode=WAL")  # WAL режим для конкурентности
+            conn.execute("PRAGMA synchronous=NORMAL")  # Безопасный баланс скорости
+            conn.execute("PRAGMA cache_size=-64000")  # 64MB кэша
+            conn.execute("PRAGMA temp_store=MEMORY")  # Временные таблицы в RAM
+
             cursor = conn.cursor()
 
             # Таблица позиций
@@ -116,6 +123,11 @@ class DatabaseManager:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_time ON trades(time)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_ticker ON trades(ticker)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_blacklist_expires ON blacklist(expires_at)")
+
+            # ✅ ДОПОЛНИТЕЛЬНЫЕ ИНДЕКСЫ ДЛЯ УСКОРЕНИЯ
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_orders_ticker ON orders(ticker)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_positions_ticker ON positions(ticker)")
 
             conn.commit()
             conn.close()
@@ -379,6 +391,59 @@ class DatabaseManager:
             return [dict(row) for row in rows]
 
     # ========== ВСПОМОГАТЕЛЬНЫЕ ==========
+
+    def cleanup_otc_positions(self, otc_figis: List[str]) -> int:
+        """
+        Удаление OTC-позиций из базы данных
+
+        Args:
+            otc_figis: Список FIGI OTC-инструментов
+
+        Returns:
+            int: Количество удалённых записей
+        """
+        if not otc_figis:
+            return 0
+
+        with self._lock:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            # Удаляем дубликаты из списка
+            unique_figis = list(set(otc_figis))
+
+            # Создаём placeholders для SQL запроса
+            placeholders = ','.join(['?'] * len(unique_figis))
+
+            deleted_positions = 0
+            deleted_orders = 0
+
+            try:
+                # Удаляем из таблицы positions
+                cursor.execute(f"DELETE FROM positions WHERE figi IN ({placeholders})", unique_figis)
+                deleted_positions = cursor.rowcount
+
+                # Удаляем связанные заявки из orders (опционально)
+                cursor.execute(f"DELETE FROM orders WHERE figi IN ({placeholders})", unique_figis)
+                deleted_orders = cursor.rowcount
+
+                # Удаляем из кэша (опционально)
+                cursor.execute(f"DELETE FROM cache WHERE key LIKE '%{unique_figis[0]}%' OR key IN ({placeholders})",
+                               unique_figis)
+
+                conn.commit()
+
+                if deleted_positions > 0:
+                    info(f"🧹 Очищено {deleted_positions} OTC-позиций и {deleted_orders} заявок из БД")
+
+                return deleted_positions
+
+            except Exception as e:
+                error(f"❌ Ошибка очистки OTC позиций: {e}")
+                conn.rollback()
+                return 0
+            finally:
+                conn.close()
 
     def get_stats(self) -> Dict[str, Any]:
         """Статистика базы данных"""

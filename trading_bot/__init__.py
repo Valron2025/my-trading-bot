@@ -26,12 +26,28 @@ logger = logging.getLogger(__name__)
 _trading_bot_instance = None
 
 
+# ========== ИНИЦИАЛИЗАЦИЯ МОНИТОРИНГА ==========
+def init_monitoring_system(bot=None):
+    """Инициализация системы мониторинга"""
+    from trading_bot.monitoring import init_monitoring, get_memory_monitor
+
+    result = init_monitoring(bot=bot, prometheus_port=8001, watchdog_timeout=300)
+
+    memory_monitor = get_memory_monitor()
+    if memory_monitor:
+        memory_monitor.log_usage()
+
+    return result
+
+
+# В функцию get_trading_bot() или init_trading_bot() добавьте:
 def get_trading_bot():
-    """Получение глобального экземпляра бота (ленивая инициализация)"""
     global _trading_bot_instance
     if _trading_bot_instance is None:
         from .bot import TradingBot
         _trading_bot_instance = TradingBot()
+        # ✅ ИНИЦИАЛИЗИРУЕМ МОНИТОРИНГ
+        init_monitoring_system(_trading_bot_instance)
         logger.info("✅ Глобальный экземпляр TradingBot создан")
     return _trading_bot_instance
 

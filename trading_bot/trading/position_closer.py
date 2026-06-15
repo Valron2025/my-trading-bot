@@ -1003,6 +1003,12 @@ class PositionCloser:
             ticker = item['ticker']
             warning(f"🔄 Закрытие убыточной позиции {ticker} (P&L: {item['profit_pct']:.2f}%)")
 
+            # ✅ ПРОВЕРКА OTC
+            if tbank.is_confirmation_required(figi):
+                warning(f"⚠️ {ticker} - OTC ИНСТРУМЕНТ! НЕВОЗМОЖНО ЗАКРЫТЬ АВТОМАТИЧЕСКИ!")
+                warning(f"   📱 Закройте позицию вручную!")
+                continue  # Пропускаем эту позицию
+
             if self.close_position_smart(item['figi'], ticker):
                 closed += 1
 

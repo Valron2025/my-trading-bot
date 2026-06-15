@@ -39,6 +39,7 @@ class StrategyEngine:
         self.stop_loss_pct = config.get('stop_loss_pct', 0.6)
         self.trailing_stop_pct = config.get('trailing_stop_pct', 0.4)
         self.max_hold_minutes = config.get('max_hold_minutes', 20)
+        self.use_dynamic_tp_sl = config.get('use_dynamic_tp_sl', True)
 
         # ✅ ДОБАВЛЕНА ПРОВЕРКА SHORT ПОРОГА В КЛАССЕ
         if self.score_threshold_short > -2:
@@ -91,6 +92,96 @@ class StrategyEngine:
         info(f"      - Aroon: {self.use_aroon}")
         info("=" * 60)
 
+    def calculate_dynamic_tp_sl(self, ticker: str, figi: str = None) -> Tuple[float, float]:
+        """
+        Расчёт динамических TP/SL на основе ATR и тренда
+        ВОЗВРАЩАЕТ: (take_profit_pct, stop_loss_pct)
+        """
+        from trading_bot.api.tbank_client import tbank
+        from trading_bot.logger import debug, info
+
+        # Fallback на статические значения
+        default_tp = self.config.get('take_profit_pct', 1.2)
+        default_sl = self.config.get('stop_loss_pct', 0.6)
+
+        if not figi:
+            debug(f"⚠️ {ticker}: нет FIGI для динамического TP/SL, использую статику")
+            return default_tp, default_sl
+
+        try:
+            # Получаем свечи для расчёта ATR
+            candles = tbank.get_candles(figi, days=2, interval_minutes=15)
+
+            if not candles or len(candles) < 20:
+                debug(f"⚠️ {ticker}: недостаточно свечей для ATR ({len(candles) if candles else 0}/20)")
+                return default_tp, default_sl
+
+            # Извлекаем цены
+            closes = []
+            highs = []
+            lows = []
+
+            for c in candles[-30:]:
+                if isinstance(c, (list, tuple)) and len(c) >= 2:
+                    close_val = c[0]
+                    closes.append(close_val)
+                    highs.append(close_val * 1.005)
+                    lows.append(close_val * 0.995)
+                elif isinstance(c, dict):
+                    closes.append(c.get('close', 0))
+                    highs.append(c.get('high', closes[-1]))
+                    lows.append(c.get('low', closes[-1]))
+                elif hasattr(c, 'close'):
+                    closes.append(c.close)
+                    highs.append(getattr(c, 'high', c.close))
+                    lows.append(getattr(c, 'low', c.close))
+
+            if len(closes) < 20:
+                return default_tp, default_sl
+
+            # Расчёт ATR
+            true_ranges = []
+            for i in range(1, len(closes)):
+                high_low = highs[i] - lows[i]
+                high_close = abs(highs[i] - closes[i - 1])
+                low_close = abs(lows[i] - closes[i - 1])
+                true_ranges.append(max(high_low, high_close, low_close))
+
+            atr = sum(true_ranges[-14:]) / min(14, len(true_ranges))
+            current_price = closes[-1]
+            atr_pct = (atr / current_price) * 100 if current_price > 0 else 1.5
+
+            # Определение тренда
+            ma20 = sum(closes[-20:]) / 20
+            ma10 = sum(closes[-10:]) / 10
+            current = closes[-1]
+
+            if current > ma20 and ma20 > ma10:
+                trend = "bullish"
+                tp_multiplier = 2.5
+                sl_multiplier = 1.5
+            elif current < ma20 and ma20 < ma10:
+                trend = "bearish"
+                tp_multiplier = 1.2
+                sl_multiplier = 1.0
+            else:
+                trend = "neutral"
+                tp_multiplier = 1.8
+                sl_multiplier = 1.2
+
+            # Расчёт TP/SL
+            take_profit = min(8.0, max(1.0, atr_pct * tp_multiplier))
+            stop_loss = min(5.0, max(0.5, atr_pct * sl_multiplier))
+
+            info(f"   📊 {ticker}: ATR={atr_pct:.2f}%, тренд={trend}")
+            info(f"   🎯 Динамический TP: +{take_profit:.2f}%, SL: -{stop_loss:.2f}%")
+
+            return take_profit, stop_loss
+
+        except Exception as e:
+            debug(f"❌ Ошибка расчёта динамического TP/SL для {ticker}: {e}")
+            return default_tp, default_sl
+
     # ➕ ДОБАВЛЕНО: метод для определения минимального количества свечей
     def _get_min_prices_for_ticker(self, ticker: str) -> int:
         """
@@ -115,6 +206,7 @@ class StrategyEngine:
                        prices: List[float],
                        volumes: List[float],
                        name: str = "",
+                       figi: str = None,
                        candles: Optional[List] = None,
                        candles_1min: Optional[List] = None,
                        candles_5min: Optional[List] = None,
@@ -171,6 +263,15 @@ class StrategyEngine:
             )
 
         current_price = prices[-1]
+
+        # ========== ДИНАМИЧЕСКИЙ TP/SL ==========
+        if figi and self.use_dynamic_tp_sl:
+            tp_pct, sl_pct = self.calculate_dynamic_tp_sl(name, figi)
+            self.take_profit_pct = tp_pct
+            self.stop_loss_pct = sl_pct
+        else:
+            self.take_profit_pct = self.config.get('take_profit_pct', 1.2)
+            self.stop_loss_pct = self.config.get('stop_loss_pct', 0.6)
 
         # ========== УНИВЕРСАЛЬНАЯ ПОДГОТОВКА ДАННЫХ ДЛЯ ИНДИКАТОРОВ ==========
         def get_candle_value(candle, attr, default=0):
@@ -584,7 +685,9 @@ class StrategyEngine:
             signals=signals[:20],
             rsi=rsi,
             macd=details.get('macd', 0),
-            volume_ratio=volume_ratio if 'volume_ratio' in details else 1.0
+            volume_ratio=volume_ratio if 'volume_ratio' in details else 1.0,
+            take_profit_pct=self.take_profit_pct,  # ← ДОБАВИТЬ
+            stop_loss_pct=self.stop_loss_pct  # ← ДОБАВИТЬ
         )
 
     def _analyze_multi_timeframe(self,
@@ -886,7 +989,7 @@ def create_strategy_engine(capital: float, market_volatility: float = 0.008) -> 
     max_hold_minutes = 20
 
     if capital < 5000:
-        score_threshold_long = max(score_threshold_long, 4)
+        score_threshold_long = max(score_threshold_long, 5)  # 4→5
         use_short = False
         score_threshold_short = -999
         take_profit_pct = 0.8
@@ -895,25 +998,25 @@ def create_strategy_engine(capital: float, market_volatility: float = 0.008) -> 
         info(f"   📊 МИКРО-КАПИТАЛ: консервативная стратегия, SHORT отключён")
 
     elif capital < 15000:
-        score_threshold_long = max(score_threshold_long, 3)
+        score_threshold_long = max(score_threshold_long, 4)  # 3→4
         if use_short:
-            score_threshold_short = max(score_threshold_short, -3)
+            score_threshold_short = max(score_threshold_short, -4)  # -3→-4
         take_profit_pct = 1.0
         stop_loss_pct = 0.5
         max_hold_minutes = 20
         info(f"   📊 МАЛЫЙ КАПИТАЛ: умеренная стратегия")
 
     elif capital < 50000:
-        score_threshold_long = max(score_threshold_long, 2)
+        score_threshold_long = max(score_threshold_long, 3)  # 2→3
         if use_short:
-            score_threshold_short = max(score_threshold_short, -2)
+            score_threshold_short = max(score_threshold_short, -3)  # -2→-3
         take_profit_pct = 1.2
         stop_loss_pct = 0.6
         max_hold_minutes = 25
         info(f"   📊 СРЕДНИЙ КАПИТАЛ: стандартная стратегия")
 
     else:
-        score_threshold_long = max(1, score_threshold_long - 1)
+        score_threshold_long = max(2, score_threshold_long)  # 1→2
         if use_short:
             score_threshold_short = max(score_threshold_short, -2)
         take_profit_pct = 1.5

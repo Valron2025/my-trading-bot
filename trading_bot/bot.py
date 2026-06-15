@@ -11,8 +11,6 @@ from .models import StockCandidate
 from .logger import info, success, error, warning, debug
 
 # ========== КОМПОНЕНТЫ ==========
-# from .core.trading_loop import TradingLoop
-# from .core.session_manager import SessionManager
 from .trading.position_opener import PositionOpener
 from .trading.position_closer import PositionCloser
 from .trading.position_sizer import PositionSizer
@@ -29,6 +27,9 @@ from .cache.position_cache import PositionCache
 from .utils.figi_resolver import FigiResolver
 from .utils.time_utils import get_moscow_time, is_pre_market_time, is_weekend_trading_time
 from trading_bot.trading.position_closer import position_closer
+
+# ========== СИСТЕМНАЯ ОПТИМИЗАЦИЯ ==========
+from .core.system_optimizer import SystemOptimizer, AutoOptimizer, setup_auto_optimization
 
 
 # ========== ГЛОБАЛЬНЫЕ ЭКЗЕМПЛЯРЫ ==========
@@ -84,9 +85,7 @@ class TradingBot:
         self.memory_monitor = MemoryMonitor()
 
         # ========== КОМПОНЕНТЫ ==========
-        # self.session_manager = SessionManager(self)
         self._session_manager = None
-        # self.position_sizer = PositionSizer(self)
         self._position_sizer = None
         self.position_opener = PositionOpener(self)
         self.position_closer = PositionCloser(self)
@@ -137,11 +136,23 @@ class TradingBot:
         # ========== ICEBERG И TRAILING (В POSITION_MANAGER) ==========
         from trading_bot.risk.position_manager import position_manager
         position_manager.init_advanced_managers(self)
+
+        # ПОДКЛЮЧЕНИЕ БД К POSITION_MANAGER
+        if self.db is not None:
+            position_manager.set_database(self.db)
+            info("✅ PositionManager подключён к DatabaseManager")
+        else:
+            warning("⚠️ DatabaseManager не инициализирован, PositionManager работает без БД")
+
         info("✅ Iceberg и Trailing Stop менеджеры инициализированы в PositionManager")
 
         # ========== ТОРГОВЫЙ ЦИКЛ ==========
         self._trading_loop = None
-        # self.trading_loop = TradingLoop(self)
+
+        # ========== ⭐ СИСТЕМНАЯ ОПТИМИЗАЦИЯ ⭐ ==========
+        self.auto_optimizer = None
+        self.system_profile = None
+        self._optimize_for_system()  # ← АВТОМАТИЧЕСКАЯ ОПТИМИЗАЦИЯ ПРИ ЗАПУСКЕ
 
         # ========== ЗАГРУЗКА ПАРАМЕТРОВ ==========
         self._load_all_optimized_params()
@@ -152,6 +163,191 @@ class TradingBot:
         # ========== ПРИМЕНЕНИЕ НАСТРОЕК АНАЛИТИКИ ==========
         from trading_bot.core.settings_manager import settings_manager
         settings_manager.apply_analytics_settings(self)
+
+    def __len__(self) -> int:
+        """Для совместимости с HealthMonitor"""
+        from trading_bot.risk.position_manager import position_manager
+        return len(position_manager.get_all_positions())
+
+    # ========== ⭐ АВТОМАТИЧЕСКАЯ ОПТИМИЗАЦИЯ ⭐ ==========
+
+    def _optimize_for_system(self):
+        """
+        Автоматическая оптимизация бота под текущую систему
+        Запускается автоматически при инициализации
+        """
+        try:
+            info("\n" + "=" * 60)
+            info("🤖 ЗАПУСК АВТОМАТИЧЕСКОЙ ОПТИМИЗАЦИИ")
+            info("=" * 60)
+
+            # Создаём и запускаем оптимизатор
+            self.auto_optimizer = AutoOptimizer(self)
+            self.system_profile = self.auto_optimizer.start()
+
+            # Применяем оптимизированные настройки
+            self._apply_system_optimizations()
+
+            # Показываем рекомендации
+            if self.auto_optimizer and hasattr(self.auto_optimizer.optimizer, 'get_recommendations'):
+                recommendations = self.auto_optimizer.optimizer.get_recommendations()
+                if recommendations and "⚠️" in recommendations:
+                    warning("\n" + recommendations)
+
+            info("✅ Системная оптимизация завершена")
+            info("=" * 60 + "\n")
+
+        except Exception as e:
+            warning(f"⚠️ Ошибка системной оптимизации: {e}")
+            # Создаём профиль по умолчанию
+            self.system_profile = self._create_default_profile()
+
+    def _apply_system_optimizations(self):
+        """Применение оптимизированных настроек к боту"""
+        if not self.system_profile:
+            return
+
+        profile = self.system_profile
+
+        info("\n" + "=" * 60)
+        info("🔧 ПРИМЕНЕНИЕ ОПТИМИЗИРОВАННЫХ НАСТРОЕК")
+        info("=" * 60)
+
+        # ========== 1. НАСТРОЙКИ СКАНЕРА ==========
+        if hasattr(self.stock_scanner, 'max_tickers_to_scan'):
+            old = self.stock_scanner.max_tickers_to_scan
+            self.stock_scanner.max_tickers_to_scan = profile.max_tickers
+            info(f"   📊 scanner.max_tickers: {old} → {profile.max_tickers}")
+
+        if hasattr(self.stock_scanner, 'parallel_workers'):
+            old = self.stock_scanner.parallel_workers
+            self.stock_scanner.parallel_workers = profile.max_workers
+            info(f"   👥 scanner.workers: {old} → {profile.max_workers}")
+
+        # ========== 2. НАСТРОЙКИ ТОРГОВОГО ЦИКЛА ==========
+        if hasattr(self, 'trading_loop'):
+            # Интервал проверки
+            if hasattr(self.trading_loop, 'check_interval'):
+                old = self.trading_loop.check_interval
+                self.trading_loop.check_interval = profile.cycle_sleep_seconds
+                info(f"   ⏱️ trading_loop.check_interval: {old} → {profile.cycle_sleep_seconds} сек")
+
+            # PositionMonitor
+            if hasattr(self.trading_loop, '_position_monitor') and self.trading_loop._position_monitor:
+                old = self.trading_loop._position_monitor.check_interval
+                self.trading_loop._position_monitor.check_interval = max(2, profile.cycle_sleep_seconds // 2)
+                info(
+                    f"   📊 position_monitor.interval: {old} → {self.trading_loop._position_monitor.check_interval} сек")
+
+        # ========== 3. НАСТРОЙКИ АНАЛИЗАТОРОВ ==========
+        from trading_bot.core.settings_manager import settings_manager
+
+        if hasattr(settings_manager, 'set'):
+            # Фундаментальный анализ
+            old_fund = settings_manager.get('fundamental_enabled', True)
+            settings_manager.set('fundamental_enabled', profile.use_fundamental)
+            info(f"   📊 fundamental_enabled: {old_fund} → {profile.use_fundamental}")
+
+            # Новостной анализ
+            old_news = settings_manager.get('news_enabled', True)
+            settings_manager.set('news_enabled', profile.use_news)
+            info(f"   📰 news_enabled: {old_news} → {profile.use_news}")
+
+        # ========== 4. НАСТРОЙКИ КЭША ==========
+        try:
+            from trading_bot.cache import price_cache, candles_cache
+
+            if hasattr(price_cache, 'set_ttl'):
+                old_ttl = price_cache.default_ttl if hasattr(price_cache, 'default_ttl') else 5
+                price_cache.set_ttl(profile.cache_ttl_seconds)
+                info(f"   💾 price_cache TTL: {old_ttl} → {profile.cache_ttl_seconds} сек")
+
+            if hasattr(candles_cache, 'set_ttl'):
+                candles_cache.set_ttl(profile.cache_ttl_seconds * 2)  # свечи дольше
+        except Exception as e:
+            debug(f"   ⚠️ Не удалось настроить кэш: {e}")
+
+        # ========== 5. АДАПТАЦИЯ ПОРОГОВ (если слабая система) ==========
+        if profile.is_low_end:
+            old_long = config.long_score_threshold
+            old_short = config.short_score_threshold
+
+            config.long_score_threshold = max(1, config.long_score_threshold // 2)
+            config.short_score_threshold = -max(1, abs(config.short_score_threshold) // 2)
+
+            info(f"   🎫 Score пороги: LONG {old_long} → {config.long_score_threshold}, "
+                 f"SHORT {old_short} → {config.short_score_threshold}")
+
+        # ========== 6. НАСТРОЙКИ СКОРОСТИ (для слабых систем) ==========
+        if profile.is_low_end:
+            # Уменьшаем количество параллельных задач
+            if hasattr(self.stock_scanner, 'parallel_workers'):
+                self.stock_scanner.parallel_workers = min(2, profile.max_workers)
+
+            # Отключаем тяжёлые индикаторы в StrategyEngine
+            if hasattr(self, 'technical_analyzer') and self.technical_analyzer:
+                engine = self.technical_analyzer.engine
+                if hasattr(engine, 'use_supertrend'):
+                    engine.use_supertrend = False
+                    engine.use_ichimoku = False
+                    engine.use_dmi_adx = False
+                    info(f"   ⚡ Отключены тяжёлые индикаторы для слабой системы")
+
+        info("=" * 60 + "\n")
+
+    def _create_default_profile(self) -> Any:
+        """Создание профиля по умолчанию при ошибке оптимизации"""
+        from .core.system_optimizer import SystemProfile
+
+        import psutil
+        cpu_count = psutil.cpu_count() or 2
+        mem = psutil.virtual_memory()
+        total_ram_mb = mem.total / (1024 * 1024)
+
+        return SystemProfile(
+            cpu_count=cpu_count,
+            cpu_freq_mhz=2000,
+            total_ram_mb=total_ram_mb,
+            available_ram_mb=mem.available / (1024 * 1024),
+            is_vps=False,
+            is_low_end=cpu_count <= 2 or total_ram_mb < 2048,
+            network_latency_ms=500,
+            max_workers=max(2, cpu_count // 2),
+            max_tickers=8 if total_ram_mb > 1024 else 5,
+            cache_ttl_seconds=30,
+            cycle_sleep_seconds=5,
+            use_parallel_scan=True,
+            use_websocket=True,
+            use_fundamental=True,
+            use_news=True,
+            scan_timeout_seconds=25,
+            notes="Профиль по умолчанию"
+        )
+
+    def get_optimization_status(self) -> Dict[str, Any]:
+        """Получение статуса оптимизации"""
+        if not self.system_profile:
+            return {'optimized': False, 'message': 'Оптимизация не выполнена'}
+
+        return {
+            'optimized': True,
+            'profile': {
+                'max_workers': self.system_profile.max_workers,
+                'max_tickers': self.system_profile.max_tickers,
+                'cache_ttl': self.system_profile.cache_ttl_seconds,
+                'use_fundamental': self.system_profile.use_fundamental,
+                'use_news': self.system_profile.use_news,
+            },
+            'system': {
+                'cpu_count': self.system_profile.cpu_count,
+                'ram_mb': self.system_profile.total_ram_mb,
+                'is_vps': self.system_profile.is_vps,
+                'is_low_end': self.system_profile.is_low_end,
+                'network_latency_ms': self.system_profile.network_latency_ms,
+            }
+        }
+
+    # ========== ОСТАЛЬНЫЕ МЕТОДЫ (БЕЗ ИЗМЕНЕНИЙ) ==========
 
     @property
     def trading_loop(self):
@@ -260,6 +456,35 @@ class TradingBot:
             self.db = DatabaseManager("trading_state.db")
         except Exception as e:
             warning(f"⚠️ DatabaseManager: {e}")
+
+        try:
+            from trading_bot.monitoring.health_monitor import HealthMonitor
+            from trading_bot.risk.position_manager import position_manager
+            # ✅ Передаём словарь компонентов
+            components_to_monitor = {
+                "api_client": _get_tbank(),
+                "position_manager": position_manager,
+                "telegram": _get_telegram(),
+                "bot": self
+            }
+            self.health_monitor = HealthMonitor(components=components_to_monitor, check_interval=60)
+            # Запускаем монитор в фоновом потоке, а не asyncio
+            threading.Thread(target=self._run_health_monitor, daemon=True).start()
+        except Exception as e:
+            warning(f"⚠️ HealthMonitor: {e}")
+
+    def _run_health_monitor(self):
+        """Запуск HealthMonitor в отдельном потоке"""
+        if hasattr(self, 'health_monitor'):
+            # Создаём новый event loop для потока
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self.health_monitor.start_monitor())
+            except Exception as e:
+                warning(f"HealthMonitor thread error: {e}")
+            finally:
+                loop.close()
 
     def _apply_settings(self):
         """Применение настроек из settings_manager"""
@@ -383,6 +608,10 @@ class TradingBot:
 
     def stop(self):
         """Остановка бота"""
+        # Останавливаем автооптимизатор
+        if self.auto_optimizer:
+            self.auto_optimizer.stop()
+
         if self.advanced_tpsl_manager:
             try:
                 self.advanced_tpsl_manager.stop()
@@ -458,13 +687,6 @@ class TradingBot:
     def get_detailed_pnl(self) -> Dict[str, Any]:
         """
         Детальный расчёт P&L по всем открытым позициям
-
-        Returns:
-            Dict с полями:
-            - total_pnl: общий P&L в рублях
-            - total_pnl_pct: общий P&L в процентах
-            - positions: список позиций с детальным P&L
-            - total_value: общая стоимость портфеля
         """
         try:
             positions = self._get_positions(force_refresh=True)
@@ -482,12 +704,10 @@ class TradingBot:
                 if quantity == 0 or avg_price == 0:
                     continue
 
-                # Получаем текущую цену
                 current_price = tbank.get_current_price(figi)
                 if not current_price:
                     current_price = avg_price
 
-                # Расчёт P&L в зависимости от стороны
                 if quantity > 0:  # LONG
                     pnl = (current_price - avg_price) * quantity
                     pnl_pct = ((current_price - avg_price) / avg_price) * 100 if avg_price > 0 else 0
@@ -495,7 +715,6 @@ class TradingBot:
                     pnl = (avg_price - current_price) * abs(quantity)
                     pnl_pct = ((avg_price - current_price) / avg_price) * 100 if avg_price > 0 else 0
 
-                # Получаем тикер
                 from trading_bot.api.tbank_client import tbank
                 ticker = tbank._get_ticker_by_figi(figi) or figi[:12]
 
@@ -514,7 +733,6 @@ class TradingBot:
                     'value': round(abs(quantity) * current_price, 2)
                 })
 
-            # Общий P&L в процентах
             total_pnl_pct = 0
             total_capital = total_value - total_pnl if total_value > 0 else 0
             if total_capital > 0:
@@ -579,12 +797,6 @@ class TradingBot:
                            price: float = None, use_market: bool = True) -> bool:
         return self.position_opener.open_position_auto(ticker, quantity, side, price, use_market)
 
-    # def emergency_close_all_positions(self) -> int:
-    #     """⚠️ ВНИМАНИЕ: Этот метод устарел. Используйте _emergency_close_profitable_only"""
-    #     warning("⚠️ Вызван устаревший метод emergency_close_all_positions!")
-    #     # return self.position_closer.emergency_close_all()
-    #     return 0
-
     def emergency_close_all_shorts(self) -> int:
         return self.position_closer.close_worst_positions(max_to_close=2)
 
@@ -604,68 +816,8 @@ class TradingBot:
             'tpsl_manager': self.advanced_tpsl_manager is not None,
         }
 
-    # ========== ЗАГЛУШКИ ДЛЯ ОБРАТНОЙ СОВМЕСТИМОСТИ ==========
-
-    # def _get_ticker_by_figi(self, figi: str) -> Optional[str]:
-    #     """Получение тикера по FIGI (делегирование resolver'у)"""
-    #     return self.figi_resolver.get_ticker_by_figi(figi)
-
-    # def _get_figi_by_ticker(self, ticker: str) -> Optional[str]:
-    #     """Получение FIGI по тикеру (делегирование resolver'у)"""
-    #     return self.figi_resolver.get_figi_by_ticker(ticker)
-
-    # def _place_market_order(self, figi: str, quantity: int, direction: str) -> bool:
-    #     """
-    #     Размещение рыночной заявки
-    #
-    #     Args:
-    #         figi: FIGI инструмента
-    #         quantity: Количество в лотах
-    #         direction: "BUY" или "SELL"
-    #
-    #     Returns:
-    #         bool: True если успешно
-    #     """
-    #     from trading_bot.api.tbank_client import tbank
-    #     from trading_bot.logger import info, error, warning, debug
-    #
-    #     ticker = self._get_ticker_by_figi(figi) or figi[:8]
-    #
-    #     info(f"📡 РЫНОЧНАЯ ЗАЯВКА: {direction} {quantity} шт {ticker}")
-    #
-    #     try:
-    #         if direction.upper() == "BUY":
-    #             result = tbank.buy(figi, quantity, use_market=True)
-    #         else:
-    #             result = tbank.sell(figi, quantity, use_market=True)
-    #
-    #         if result:
-    #             info(f"✅ Рыночная заявка {direction} {quantity} {ticker} исполнена")
-    #             return True
-    #         else:
-    #             error(f"❌ Рыночная заявка {direction} {quantity} {ticker} не исполнена")
-    #             return False
-    #
-    #     except Exception as e:
-    #         error(f"❌ Ошибка рыночной заявки {ticker}: {e}")
-    #         return False
-
     def _place_limit_order(self, figi: str, quantity: int, direction: str, price: float) -> bool:
-        """
-        Размещение лимитной заявки
-
-        Args:
-            figi: FIGI инструмента
-            quantity: Количество в лотах
-            direction: "BUY" или "SELL"
-            price: Лимитная цена
-
-        Returns:
-            bool: True если успешно
-        """
-        from trading_bot.api.tbank_client import tbank
-        from trading_bot.logger import info, error, warning, debug
-
+        """Размещение лимитной заявки"""
         from trading_bot.api.tbank_client import tbank
         ticker = tbank._get_ticker_by_figi(figi) or figi[:8]
 
@@ -673,14 +825,12 @@ class TradingBot:
 
         try:
             result = tbank.place_limit_order(figi, quantity, direction, price)
-
             if result:
                 info(f"✅ Лимитная заявка {direction} {quantity} {ticker} размещена")
                 return True
             else:
                 error(f"❌ Лимитная заявка {direction} {quantity} {ticker} не размещена")
                 return False
-
         except Exception as e:
             error(f"❌ Ошибка лимитной заявки {ticker}: {e}")
             return False

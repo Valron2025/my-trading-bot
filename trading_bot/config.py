@@ -36,13 +36,18 @@ class TradingConfig:
     take_profit_pct: float = 1.5
     stop_loss_pct: float = 1.0
     trailing_stop_pct: float = 0.5
-    max_positions: int = 5
-    min_trade_amount: int = 500
+    max_positions: int = 3
+    min_trade_amount: int = 300
     min_share_price: float = 5
     max_share_price: float = 2000
 
+    # ========== НАСТРОЙКИ ДЛЯ БЫСТРОГО РЕАГИРОВАНИЯ ==========
+    position_check_interval_seconds: int = 2  # проверка позиций каждые 2 секунды
+    max_scan_tickers: int = 50  # максимум тикеров для сканирования
+    emergency_mode: bool = False  # экстренный режим (сканировать только позиции)
+
     # ========== АДАПТИВНЫЕ ПАРАМЕТРЫ ==========
-    adaptive_position_size_pct: float = 0.08
+    adaptive_position_size_pct: float = 0.04
     adaptive_timeout_minutes: int = 30
     adaptive_cycle_seconds: int = 30
 
@@ -417,6 +422,17 @@ class TradingConfig:
         50000: 8,
         100000: 12,
     }
+
+    # ========== НАСТРОЙКИ АЙСБЕРГ-ЗАЯВОК ==========
+    large_position_threshold: int = 100  # Позиции больше 100 лотов используют айсберг
+    iceberg_visible_ratio: float = 0.1  # Видимая часть = 10% от общего объёма
+    iceberg_min_part_size: int = 10  # Минимальный размер одной части (лотов)
+    iceberg_max_parts: int = 50  # Максимум частей для разбиения
+
+    # ========== ПАРАЛЛЕЛЬНОЕ СКАНИРОВАНИЕ ==========
+    use_parallel_scan: bool = True  # Включить параллельный режим
+    max_concurrent_scans: int = 10  # Максимум параллельных анализов
+    parallel_scan_limit: int = 30  # Максимум тикеров при параллельном сканировании
 
 
 # Глобальный экземпляр

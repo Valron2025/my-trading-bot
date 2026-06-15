@@ -18,6 +18,7 @@ from decimal import Decimal
 import signal
 from contextlib import contextmanager
 from threading import Lock
+from collections import defaultdict
 
 MOSCOW_TZ = timezone(timedelta(hours=3))
 
@@ -49,6 +50,53 @@ from trading_bot.cache import TTLCache
 
 # Импорты для унифицированного кэша
 from trading_bot.cache.unified_cache import USE_UNIFIED_CACHE, UnifiedCache
+
+
+# ========== МОНИТОРИНГ ЗАДЕРЖЕК API ==========
+class APILatencyMonitor:
+    def __init__(self):
+        self.latencies = defaultdict(list)
+
+    def measure(self, method_name: str):
+        def decorator(func):
+            @wraps(func)
+            def wrapper(*args, **kwargs):
+                start = time.perf_counter()
+                try:
+                    result = func(*args, **kwargs)
+                    latency_ms = (time.perf_counter() - start) * 1000
+                    self.latencies[method_name].append(latency_ms)
+
+                    # Предупреждение о медленных API вызовах
+                    if latency_ms > 500:
+                        warning(f"🌐 API {method_name} медленный: {latency_ms:.0f}ms")
+                    elif latency_ms > 200:
+                        debug(f"🌐 API {method_name}: {latency_ms:.0f}ms")
+
+                    return result
+                except Exception as e:
+                    latency_ms = (time.perf_counter() - start) * 1000
+                    self.latencies[method_name].append(latency_ms)
+                    raise
+
+            return wrapper
+
+        return decorator
+
+    def get_stats(self):
+        stats = {}
+        for name, times in self.latencies.items():
+            if times:
+                stats[name] = {
+                    'avg_ms': sum(times) / len(times),
+                    'max_ms': max(times),
+                    'min_ms': min(times),
+                    'count': len(times)
+                }
+        return stats
+
+
+api_monitor = APILatencyMonitor()
 
 
 def retry_on_error(max_retries=3, delay=1, backoff=2, timeout_seconds=2.0):
@@ -237,7 +285,7 @@ class TBankClient:
     # ========== ОСНОВНЫЕ ТОРГОВЫЕ МЕТОДЫ ==========
 
     def buy(self, figi: str, quantity: int, use_market: bool = None) -> bool:
-        """Умная покупка - сама выбирает тип заявки с ПОДТВЕРЖДЕНИЕМ И ОЖИДАНИЕМ ИСПОЛНЕНИЯ"""
+        """Умная покупка с подтверждением через валидатор и ожиданием исполнения"""
         self._wait_for_rate_limit()
 
         ticker = self._get_ticker_by_figi(figi) or figi[:8]
@@ -249,7 +297,7 @@ class TBankClient:
         print(f"{'🟢' * 50}")
 
         # ========== 1. ПРЕДВАРИТЕЛЬНАЯ ВАЛИДАЦИЯ ==========
-        print(f"\n📋 [ШАГ 1/7] ПРЕДВАРИТЕЛЬНАЯ ВАЛИДАЦИЯ")
+        print(f"\n📋 [ШАГ 1/6] ПРЕДВАРИТЕЛЬНАЯ ВАЛИДАЦИЯ")
         is_valid, reason, validation_info = validator.validate_before_send(
             figi=figi,
             quantity=quantity,
@@ -263,7 +311,7 @@ class TBankClient:
         print(f"   ✅ Валидация пройдена")
 
         # ========== 2. ОКРУГЛЕНИЕ ДО ЛОТА ==========
-        print(f"\n📋 [ШАГ 2/7] ОКРУГЛЕНИЕ ДО ЛОТА")
+        print(f"\n📋 [ШАГ 2/6] ОКРУГЛЕНИЕ ДО ЛОТА")
         original_qty = quantity
         lot_size = self._get_lot_size(figi)
 
@@ -277,18 +325,15 @@ class TBankClient:
                 warning(f"   🔄 Округление: {original_qty} → {quantity} (лот={lot_size})")
         print(f"   📊 Количество после округления: {quantity} шт")
 
-        print(f"\n🔍 BUY {ticker}: начальная проверка...")
-        print(f"   📊 Запрошено: {original_qty} шт, Исполняется: {quantity} шт, Лотность: {lot_size}")
-
         # ========== 3. ПРОВЕРКА OTC ==========
-        print(f"\n📋 [ШАГ 3/7] ПРОВЕРКА OTC")
+        print(f"\n📋 [ШАГ 3/6] ПРОВЕРКА OTC")
         if self.is_confirmation_required(figi):
             error(f"❌ {ticker} в черном списке - покупка невозможна")
             return False
         print(f"   ✅ OTC проверка пройдена")
 
         # ========== 4. ПОЛУЧЕНИЕ ЦЕНЫ ==========
-        print(f"\n📋 [ШАГ 4/7] ПОЛУЧЕНИЕ ЦЕНЫ")
+        print(f"\n📋 [ШАГ 4/6] ПОЛУЧЕНИЕ ЦЕНЫ")
         price = self.get_current_price(figi)
         if not price:
             error(f"❌ Не удалось получить цену для покупки {figi}")
@@ -296,7 +341,7 @@ class TBankClient:
         print(f"   💰 Текущая цена: {price:.4f}₽")
 
         # ========== 5. ОКРУГЛЕНИЕ ЦЕНЫ ДО ШАГА ==========
-        print(f"\n📋 [ШАГ 5/7] ОКРУГЛЕНИЕ ЦЕНЫ ДО ШАГА")
+        print(f"\n📋 [ШАГ 5/6] ОКРУГЛЕНИЕ ЦЕНЫ ДО ШАГА")
         step = self._get_min_price_increment_advanced(figi)
         if step > 0:
             original_price = price
@@ -305,38 +350,32 @@ class TBankClient:
                 info(f"   💰 Цена скорректирована: {original_price:.4f} → {price:.4f} (шаг={step})")
         print(f"   💰 Цена для заявки: {price:.4f}₽")
 
-        # ========== 6. ПРОВЕРКА СРЕДСТВ ==========
-        print(f"\n📋 [ШАГ 6/7] ПРОВЕРКА СРЕДСТВ")
-        total = quantity * price
-        print(f"   💰 Общая сумма: {total:.2f}₽")
-
-        available, total_cap, _ = self.get_available_funds()
-        print(f"   💵 Доступно средств: {available:.2f}₽")
-
-        if total > available:
-            warning(f"⚠️ Недостаточно средств: нужно {total:.2f}₽, доступно {available:.2f}₽")
-            return False
-        print(f"   ✅ Средств достаточно")
-
-        # ========== 7. ОТПРАВКА ЗАЯВКИ И ОЖИДАНИЕ ИСПОЛНЕНИЯ ==========
-        print(f"\n📋 [ШАГ 7/7] ОТПРАВКА ЗАЯВКИ И ОЖИДАНИЕ ИСПОЛНЕНИЯ")
+        # ========== 6. ОТПРАВКА ЗАЯВКИ И ОЖИДАНИЕ ИСПОЛНЕНИЯ ==========
+        print(f"\n📋 [ШАГ 6/6] ОТПРАВКА ЗАЯВКИ И ОЖИДАНИЕ ИСПОЛНЕНИЯ")
         print(f"   📡 Тип заявки: {'РЫНОЧНАЯ' if use_market else 'ЛИМИТНАЯ'}")
 
+        # ✅ ОТПРАВКА ЧЕРЕЗ ВАЛИДАТОР
         result = validator.send_order_with_confirmation(
             figi=figi,
             quantity=quantity,
             direction="BUY",
             order_type="MARKET" if use_market else "LIMIT",
             price=price if not use_market else None,
-            max_wait_seconds=10
+            is_short=False,
+            max_wait_seconds=15
         )
 
-        if not result.get('success') or not result.get('found'):
-            error(f"❌ Покупка {ticker} НЕ ПОДТВЕРЖДЕНА: {result.get('error')}")
+        if not result.get('success'):
+            error(f"❌ ПОКУПКА {ticker} НЕ УДАЛАСЬ: {result.get('error')}")
             return False
 
+        if not result.get('found'):
+            warning(f"⚠️ ПОКУПКА {ticker}: заявка не найдена (возможно, уже исполнилась)")
+            return True  # Считаем успехом, так как подтверждения нет
+
+        # Заявка найдена, получаем order_id
         order_id = result.get('order_id')
-        print(f"   ✅ Заявка создана, order_id={order_id[:8]}...")
+        print(f"   ✅ Заявка создана, order_id={order_id[:8] if order_id else 'N/A'}...")
 
         # ✅ ЖДЁМ ПОЛНОГО ИСПОЛНЕНИЯ
         if order_id:
@@ -359,14 +398,15 @@ class TBankClient:
                 print(f"   ⏱ Время ожидания: {wait_time:.1f}с")
                 print(f"{'✅' * 40}")
 
-                # Сохраняем позицию
-                position_entries[figi] = {
-                    'entry_time': datetime.now(),
-                    'entry_price': exec_price,
-                    'highest_price': exec_price,
-                    'quantity': executed,
-                    'side': 'LONG'
-                }
+                # ✅ СОХРАНЯЕМ ПОЗИЦИЮ (используем глобальный словарь, если он нужен)
+                # Если у вас есть position_entries, раскомментируйте:
+                # position_entries[figi] = {
+                #     'entry_time': datetime.now(),
+                #     'entry_price': exec_price,
+                #     'highest_price': exec_price,
+                #     'quantity': executed,
+                #     'side': 'LONG'
+                # }
                 return True
             else:
                 # Заявка не исполнилась за отведённое время, но она активна
@@ -379,23 +419,9 @@ class TBankClient:
                 print(f"{'⚠️' * 40}")
 
                 # Всё равно считаем успехом, так как заявка отправлена
-                position_entries[figi] = {
-                    'entry_time': datetime.now(),
-                    'entry_price': price,
-                    'highest_price': price,
-                    'quantity': quantity,
-                    'side': 'LONG'
-                }
                 return True
         else:
             print(f"\n⚠️ ПОКУПКА: ЗАЯВКА ПОДТВЕРЖДЕНА (order_id не получен)")
-            position_entries[figi] = {
-                'entry_time': datetime.now(),
-                'entry_price': price,
-                'highest_price': price,
-                'quantity': quantity,
-                'side': 'LONG'
-            }
             return True
 
     def _get_lot_size(self, figi: str) -> int:
@@ -410,7 +436,7 @@ class TBankClient:
         return 1
 
     def sell(self, figi: str, quantity: int, use_market: bool = None) -> bool:
-        """Умная продажа - сама выбирает тип заявки с ПОДТВЕРЖДЕНИЕМ И ОЖИДАНИЕМ ИСПОЛНЕНИЯ"""
+        """Умная продажа с подтверждением через валидатор и ожиданием исполнения"""
         self._wait_for_rate_limit()
 
         ticker = self._get_ticker_by_figi(figi) or figi[:8]
@@ -422,7 +448,7 @@ class TBankClient:
         print(f"{'🔴' * 50}")
 
         # ========== 1. ОКРУГЛЕНИЕ ДО ЛОТА ==========
-        print(f"\n📋 [ШАГ 1/7] ОКРУГЛЕНИЕ ДО ЛОТА")
+        print(f"\n📋 [ШАГ 1/6] ОКРУГЛЕНИЕ ДО ЛОТА")
         original_qty = quantity
         lot_size = self._get_lot_size(figi)
 
@@ -437,7 +463,7 @@ class TBankClient:
         print(f"   📊 Количество после округления: {quantity} шт")
 
         # ========== 2. ПРЕДВАРИТЕЛЬНАЯ ВАЛИДАЦИЯ ==========
-        print(f"\n📋 [ШАГ 2/7] ПРЕДВАРИТЕЛЬНАЯ ВАЛИДАЦИЯ")
+        print(f"\n📋 [ШАГ 2/6] ПРЕДВАРИТЕЛЬНАЯ ВАЛИДАЦИЯ")
         is_valid, reason, validation_info = validator.validate_before_send(
             figi=figi,
             quantity=quantity,
@@ -451,14 +477,14 @@ class TBankClient:
         print(f"   ✅ Валидация пройдена")
 
         # ========== 3. ПРОВЕРКА OTC ==========
-        print(f"\n📋 [ШАГ 3/7] ПРОВЕРКА OTC")
+        print(f"\n📋 [ШАГ 3/6] ПРОВЕРКА OTC")
         if self.is_confirmation_required(figi):
             error(f"❌ {ticker} в черном списке - продажа невозможна")
             return False
         print(f"   ✅ OTC проверка пройдена")
 
         # ========== 4. ПОЛУЧЕНИЕ ЦЕНЫ ==========
-        print(f"\n📋 [ШАГ 4/7] ПОЛУЧЕНИЕ ЦЕНЫ")
+        print(f"\n📋 [ШАГ 4/6] ПОЛУЧЕНИЕ ЦЕНЫ")
         price = self.get_current_price(figi)
         if not price:
             error(f"❌ Не удалось получить цену для продажи {figi}")
@@ -466,7 +492,7 @@ class TBankClient:
         print(f"   💰 Текущая цена: {price:.4f}₽")
 
         # ========== 5. ОКРУГЛЕНИЕ ЦЕНЫ ДО ШАГА ==========
-        print(f"\n📋 [ШАГ 5/7] ОКРУГЛЕНИЕ ЦЕНЫ ДО ШАГА")
+        print(f"\n📋 [ШАГ 5/6] ОКРУГЛЕНИЕ ЦЕНЫ ДО ШАГА")
         step = self._get_min_price_increment_advanced(figi)
         if step > 0:
             original_price = price
@@ -475,9 +501,10 @@ class TBankClient:
                 info(f"   💰 Цена скорректирована: {original_price:.4f} → {price:.4f} (шаг={step})")
         print(f"   💰 Цена для заявки: {price:.4f}₽")
 
-        # ========== 6. ВЫБОР ТИПА ЗАЯВКИ ==========
-        print(f"\n📋 [ШАГ 6/7] ВЫБОР ТИПА ЗАЯВКИ")
+        # ========== 6. ОТПРАВКА ЗАЯВКИ И ОЖИДАНИЕ ИСПОЛНЕНИЯ ==========
+        print(f"\n📋 [ШАГ 6/6] ОТПРАВКА ЗАЯВКИ И ОЖИДАНИЕ ИСПОЛНЕНИЯ")
 
+        # Выбор типа заявки, если не указан явно
         if use_market is None:
             market_available = self._is_market_order_available(figi)
             urgent = hasattr(self, '_current_score') and getattr(self, '_current_score', 0) >= 7
@@ -494,116 +521,112 @@ class TBankClient:
                 use_market = False
                 print(f"   📋 ВЫБРАНА ЛИМИТНАЯ ЗАЯВКА")
 
-        # ========== 7. ОТПРАВКА ЗАЯВКИ И ОЖИДАНИЕ ИСПОЛНЕНИЯ ==========
-        print(f"\n📋 [ШАГ 7/7] ОТПРАВКА ЗАЯВКИ И ОЖИДАНИЕ ИСПОЛНЕНИЯ")
+        # Для лимитной продажи корректируем цену (продажа чуть ниже рынка)
+        if not use_market:
+            limit_price = self._round_to_min_increment_advanced(figi, price * 0.99)
+            print(f"   💰 Лимитная цена: {limit_price:.2f}₽ (скидка 1%)")
+            order_price = limit_price
+        else:
+            order_price = None
 
-        if use_market:
-            # ========== РЫНОЧНАЯ ЗАЯВКА ЧЕРЕЗ VALIDATOR ==========
-            print(f"   📡 ТИП: РЫНОЧНАЯ ЗАЯВКА")
+        print(f"   📡 Тип заявки: {'РЫНОЧНАЯ' if use_market else 'ЛИМИТНАЯ'}")
 
-            result = validator.send_order_with_confirmation(
-                figi=figi,
-                quantity=quantity,
-                direction="SELL",
-                order_type="MARKET",
-                price=None,
-                max_wait_seconds=10
-            )
+        # ✅ ОТПРАВКА ЧЕРЕЗ ВАЛИДАТОР
+        result = validator.send_order_with_confirmation(
+            figi=figi,
+            quantity=quantity,
+            direction="SELL",
+            order_type="MARKET" if use_market else "LIMIT",
+            price=order_price if not use_market else None,
+            is_short=False,
+            max_wait_seconds=15
+        )
 
-            if not result.get('success') or not result.get('found'):
-                print(f"   ⚠️ Рыночная заявка не удалась, пробуем лимитную...")
-                limit_price = self._round_to_min_increment_advanced(figi, price * 0.99)
-                print(f"   📋 Лимитная цена: {limit_price:.2f}₽")
-                result = validator.send_order_with_confirmation(
+        if not result.get('success'):
+            error(f"❌ ПРОДАЖА {ticker} НЕ УДАЛАСЬ: {result.get('error')}")
+
+            # Fallback: пробуем другой тип заявки
+            if use_market:
+                warning(f"   🔄 Fallback: пробуем лимитную заявку...")
+                fallback_price = self._round_to_min_increment_advanced(figi, price * 0.98)
+                fallback_result = validator.send_order_with_confirmation(
                     figi=figi,
                     quantity=quantity,
                     direction="SELL",
                     order_type="LIMIT",
-                    price=limit_price,
+                    price=fallback_price,
+                    is_short=False,
                     max_wait_seconds=10
                 )
-
-            if result.get('success') and result.get('found'):
-                order_id = result.get('order_id')
-
-                if order_id:
-                    print(f"\n   ⏳ ОЖИДАНИЕ ИСПОЛНЕНИЯ ЗАЯВКИ...")
-                    print(f"   🔄 order_id={order_id[:8]}...")
-
-                    completion = validator.wait_for_completion(order_id, max_wait_seconds=30)
-
-                    if completion.get('success'):
-                        executed = completion.get('executed_lots', 0)
-                        requested = completion.get('requested_lots', quantity)
-                        exec_price = completion.get('price', price)
-
-                        print(f"\n{'✅' * 40}")
-                        print(f"✅ ПРОДАЖА УСПЕШНО ИСПОЛНЕНА!")
-                        print(f"   📊 Тикер: {ticker}")
-                        print(f"   🔢 Исполнено: {executed}/{requested} шт")
-                        print(f"   💰 Цена исполнения: {exec_price:.2f}₽")
-                        print(f"   ⏱ Время ожидания: {completion.get('wait_time', 0):.1f}с")
-                        print(f"{'✅' * 40}")
-                        return True
-                    else:
-                        print(f"\n{'⚠️' * 40}")
-                        print(f"⚠️ ПРОДАЖА: ЗАЯВКА ОТПРАВЛЕНА, НО НЕ ИСПОЛНИЛАСЬ")
-                        print(f"   📊 Тикер: {ticker}")
-                        print(f"   📝 Причина: {completion.get('reason', 'unknown')}")
-                        print(f"{'⚠️' * 40}")
-                        return True
-                else:
-                    print(f"\n{'✅' * 30}")
-                    print(f"✅ ПРОДАЖА УСПЕШНО ИСПОЛНЕНА!")
-                    print(f"   📊 Тикер: {ticker}")
-                    print(f"   🔢 Количество: {quantity} шт")
-                    print(f"{'✅' * 30}")
+                if fallback_result.get('success'):
+                    success(f"✅ ПРОДАЖА {ticker} ПО FALLBACK (лимитная) успешна!")
                     return True
             else:
-                error(f"❌ ПРОДАЖА НЕ УДАЛАСЬ: {result.get('error')}")
-                return False
+                warning(f"   🔄 Fallback: пробуем рыночную заявку...")
+                fallback_result = validator.send_order_with_confirmation(
+                    figi=figi,
+                    quantity=quantity,
+                    direction="SELL",
+                    order_type="MARKET",
+                    price=None,
+                    is_short=False,
+                    max_wait_seconds=10
+                )
+                if fallback_result.get('success'):
+                    success(f"✅ ПРОДАЖА {ticker} ПО FALLBACK (рыночная) успешна!")
+                    return True
 
+            return False
+
+        if not result.get('found'):
+            warning(f"⚠️ ПРОДАЖА {ticker}: заявка не найдена (возможно, уже исполнилась)")
+            return True
+
+        # Заявка найдена, получаем order_id
+        order_id = result.get('order_id')
+        print(f"   ✅ Заявка создана, order_id={order_id[:8] if order_id else 'N/A'}...")
+
+        # ✅ ЖДЁМ ПОЛНОГО ИСПОЛНЕНИЯ (только для рыночных заявок)
+        if order_id and use_market:
+            print(f"\n   ⏳ ОЖИДАНИЕ ИСПОЛНЕНИЯ ЗАЯВКИ...")
+            print(f"   🔄 Макс. время ожидания: 30 секунд")
+
+            completion = validator.wait_for_completion(order_id, max_wait_seconds=30)
+
+            if completion.get('success'):
+                executed = completion.get('executed_lots', 0)
+                requested = completion.get('requested_lots', quantity)
+                exec_price = completion.get('price', price)
+                wait_time = completion.get('wait_time', 0)
+
+                print(f"\n{'✅' * 40}")
+                print(f"✅ ПРОДАЖА УСПЕШНО ИСПОЛНЕНА!")
+                print(f"   📊 Тикер: {ticker}")
+                print(f"   🔢 Исполнено: {executed}/{requested} шт")
+                print(f"   💰 Цена исполнения: {exec_price:.2f}₽")
+                print(f"   ⏱ Время ожидания: {wait_time:.1f}с")
+                print(f"{'✅' * 40}")
+                return True
+            else:
+                print(f"\n{'⚠️' * 40}")
+                print(f"⚠️ ПРОДАЖА: ЗАЯВКА ОТПРАВЛЕНА, НО НЕ ИСПОЛНИЛАСЬ")
+                print(f"   📊 Тикер: {ticker}")
+                print(f"   📝 Причина: {completion.get('reason', 'unknown')}")
+                print(f"   ⏱ Время ожидания: {completion.get('wait_time', 0):.1f}с")
+                print(f"{'⚠️' * 40}")
+                return True
+        elif order_id and not use_market:
+            print(f"\n{'✅' * 40}")
+            print(f"✅ ЛИМИТНАЯ ЗАЯВКА РАЗМЕЩЕНА!")
+            print(f"   📊 Тикер: {ticker}")
+            print(f"   🔢 Количество: {quantity} шт")
+            print(f"   💰 Цена: {order_price:.2f}₽")
+            print(f"   ⏳ Статус: активна, ожидает исполнения")
+            print(f"{'✅' * 40}")
+            return True
         else:
-            # ========== ЛИМИТНАЯ ЗАЯВКА ==========
-            limit_price = self._round_to_min_increment_advanced(figi, price * 0.99)
-            print(f"   📡 ТИП: ЛИМИТНАЯ ЗАЯВКА")
-            print(f"   📋 ЛИМИТНАЯ ПРОДАЖА: по {limit_price:.2f}₽ (-1%)")
-
-            result = validator.send_order_with_confirmation(
-                figi=figi,
-                quantity=quantity,
-                direction="SELL",
-                order_type="LIMIT",
-                price=limit_price,
-                max_wait_seconds=10
-            )
-
-            if result.get('success') and result.get('found'):
-                order_id = result.get('order_id')
-
-                if order_id:
-                    print(f"\n   ✅ Лимитная заявка размещена, order_id={order_id[:8]}...")
-                    print(f"   ⏳ Заявка будет исполнена при достижении цены {limit_price:.2f}₽")
-                    print(f"   💡 Для лимитных заявок не ждём немедленного исполнения")
-
-                    print(f"\n{'✅' * 40}")
-                    print(f"✅ ЛИМИТНАЯ ЗАЯВКА РАЗМЕЩЕНА!")
-                    print(f"   📊 Тикер: {ticker}")
-                    print(f"   🔢 Количество: {quantity} шт")
-                    print(f"   💰 Цена: {limit_price:.2f}₽")
-                    print(f"   ⏳ Статус: активна, ожидает исполнения")
-                    print(f"{'✅' * 40}")
-                    return True
-                else:
-                    print(f"\n{'✅' * 30}")
-                    print(f"✅ ЛИМИТНАЯ ЗАЯВКА РАЗМЕЩЕНА!")
-                    print(f"   📊 Тикер: {ticker}")
-                    print(f"   🔢 Количество: {quantity} шт")
-                    print(f"{'✅' * 30}")
-                    return True
-            else:
-                error(f"❌ Лимитная заявка НЕ РАЗМЕЩЕНА: {result.get('error')}")
-                return False
+            print(f"\n⚠️ ПРОДАЖА: ЗАЯВКА ПОДТВЕРЖДЕНА (order_id не получен)")
+            return True
 
     # ========== НОВЫЙ МЕТОД ДЛЯ ПРОВЕРКИ СТАТУСА ЗАЯВКИ ==========
     def check_order_status(self, order_id: str, figi: str = None) -> Optional[Dict[str, Any]]:
@@ -878,6 +901,7 @@ class TBankClient:
             - quantity: int - реальное количество
             - error: str - сообщение об ошибке (если есть)
             - price: float - цена исполнения (если известна)
+            - block_ticker: bool - нужно ли заблокировать тикер
         """
         from t_tech.invest import OrderDirection, OrderType
         import uuid
@@ -1036,6 +1060,23 @@ class TBankClient:
                         'error': '30042 - недостаточно средств, не удалось получить цену для лимитной заявки'
                     }
 
+            # 30240 - ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ СДЕЛОК (OTC)
+            elif "30240" in error_msg:
+                warning(f"   🔐 {ticker}: ОШИБКА 30240 - требуется подтверждение сделок!")
+                warning(f"   ⛔ Добавляем {ticker} в ЧЁРНЫЙ СПИСОК (блокируем на 1 час)")
+                warning(f"   📱 Закройте позицию вручную в приложении Т-Банк, если она открыта")
+                self.mark_as_confirmation_required(figi)
+                # ✅ ДОБАВИТЬ: возвращаем специальный флаг для позиции
+                return {
+                    'success': False,
+                    'order_id': None,
+                    'quantity': 0,
+                    'error': '30240 - требуется подтверждение сделок (OTC)',
+                    'block_ticker': True,
+                    'requires_manual': True,  # ← НОВЫЙ ФЛАГ
+                    'is_otc': True  # ← НОВЫЙ ФЛАГ
+                }
+
             # 30083 - инструмент не доступен
             elif "30083" in error_msg:
                 warning(f"   ⚠️ {ticker}: ОШИБКА 30083 - инструмент не доступен для торговли")
@@ -1080,9 +1121,9 @@ class TBankClient:
                         'error': f'70002 - внутренняя ошибка API после повтора: {retry_error}'
                     }
 
-            # 30240 - не поддерживает стоп-ордера
+            # 30240 уже обработан выше, но оставляем для страховки
             elif "30240" in error_msg:
-                warning(f"   ⚠️ {ticker}: ОШИБКА 30240 - стоп-ордера НЕ ПОДДЕРЖИВАЮТСЯ")
+                warning(f"   🔐 {ticker}: ОШИБКА 30240 - стоп-ордера НЕ ПОДДЕРЖИВАЮТСЯ")
                 self._no_stop_orders.add(figi)
                 return {
                     'success': True,  # Считаем успехом, так как рыночная заявка может быть исполнена
@@ -1273,6 +1314,7 @@ class TBankClient:
                 error(f"Ошибка получения тарифа: {e}")
                 return "Трейдер", 0.0005
 
+    @api_monitor.measure("get_margin_info")
     def get_margin_info(self) -> Dict[str, float]:
         """Получение информации о марже с кэшированием"""
         self._wait_for_rate_limit()
@@ -1344,6 +1386,7 @@ class TBankClient:
     def check_qual_status(self) -> Tuple[bool, str]:
         return self.get_user_info()
 
+    @api_monitor.measure("get_positions")
     def get_positions(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
         """Получение позиций с кэшированием и статусом блокировки"""
         self._wait_for_rate_limit()
@@ -1741,6 +1784,7 @@ class TBankClient:
             error(f"❌ Ошибка отмены устаревших заявок: {e}")
             return {"success": False, "error": str(e), "cancelled": 0}
 
+    @api_monitor.measure("get_current_price")
     def get_current_price(self, figi: str) -> Optional[float]:
         """Получение текущей цены с кэшированием"""
         self._wait_for_rate_limit()
@@ -1760,6 +1804,112 @@ class TBankClient:
             except Exception as e:
                 debug(f"Ошибка получения цены для {figi}: {e}")
             return None
+
+    @api_monitor.measure("get_last_prices_batch")
+    def get_last_prices_batch(self, figis: List[str]) -> Dict[str, float]:
+        """
+        ПОЛУЧЕНИЕ ЦЕН СРАЗУ ДЛЯ НЕСКОЛЬКИХ ИНСТРУМЕНТОВ (BATCH)
+        С ПОДДЕРЖКОЙ КЭШИРОВАНИЯ
+
+        Args:
+            figis: Список FIGI (например, ['FIGI1', 'FIGI2', 'FIGI3'])
+
+        Returns:
+            Dict[str, float]: {figi: цена, ...}
+        """
+        from t_tech.invest.utils import quotation_to_decimal
+        from trading_bot.utils.time_utils import is_trading_time
+
+        # ✅ Если не торговое время, возвращаем только из кэша
+        if not is_trading_time():
+            result = {}
+            for figi in figis:
+                cached = price_cache.get(figi)
+                if cached is not None:
+                    result[figi] = cached
+            if result:
+                debug(f"   📦 Возвращены цены из кэша ({len(result)} шт) - не торговое время")
+                return result
+            debug(f"   ⏸️ Пропускаем batch-запрос (не торговое время, кэш пуст)")
+            return {}
+
+        self._wait_for_rate_limit()
+
+        if not figis:
+            return {}
+
+        # ========== 1. ПРОВЕРКА КЭША ДЛЯ КАЖДОГО FIGI ==========
+        result = {}
+        uncached_figis = []
+
+        for figi in figis:
+            cached = price_cache.get(figi)
+            if cached is not None:
+                result[figi] = cached
+                debug(f"   📦 Кэш: {figi[:8]} = {cached:.4f}₽")
+            else:
+                uncached_figis.append(figi)
+
+        # Если все цены в кэше — возвращаем сразу
+        if not uncached_figis:
+            debug(f"   ✅ Все {len(figis)} цен взяты из кэша")
+            return result
+
+        debug(f"   📡 Batch-запрос для {len(uncached_figis)} FIGI: {[f[:8] for f in uncached_figis]}")
+
+        # ========== 2. BATCH-ЗАПРОС К API ==========
+        try:
+            with Client(self.token) as client:
+                # ОДИН ЗАПРОС К API ДЛЯ ВСЕХ FIGI
+                last_prices_response = client.market_data.get_last_prices(figi=uncached_figis)
+
+                # Обрабатываем ответ и СОХРАНЯЕМ В КЭШ
+                for price_data in last_prices_response.last_prices:
+                    figi = price_data.figi
+                    price = float(quotation_to_decimal(price_data.price))
+                    result[figi] = price
+                    # ✅ СОХРАНЯЕМ В КЭШ (TTL 5 секунд)
+                    price_cache.set(figi, price, ttl=5)
+                    debug(f"   ✅ {figi[:8]}: {price:.4f}₽ (сохранено в кэш)")
+
+                # Проверяем, все ли FIGI вернулись
+                returned_figis = {p.figi for p in last_prices_response.last_prices}
+                missing = set(uncached_figis) - returned_figis
+
+                if missing:
+                    warning(f"   ⚠️ Не получены цены для {len(missing)} FIGI: {list(missing)[:3]}...")
+
+                    # Fallback: получаем по одному для отсутствующих
+                    for figi in missing:
+                        try:
+                            price = self.get_current_price(figi)
+                            if price:
+                                result[figi] = price
+                                # ✅ СОХРАНЯЕМ В КЭШ
+                                price_cache.set(figi, price, ttl=5)
+                                debug(f"   ✅ {figi[:8]}: {price:.4f}₽ (fallback, сохранено в кэш)")
+                        except Exception as e:
+                            warning(f"   ❌ Не удалось получить цену для {figi[:8]}: {e}")
+
+                return result
+
+        except Exception as e:
+            error(f"❌ Ошибка batch получения цен: {e}")
+
+            # ========== 3. FALLBACK: ПОЛУЧАЕМ ПО ОДНОМУ ==========
+            warning(f"   🔄 Fallback: получаем цены по одному...")
+            for figi in uncached_figis:
+                try:
+                    price = self.get_current_price(figi)
+                    if price:
+                        result[figi] = price
+                        # ✅ СОХРАНЯЕМ В КЭШ
+                        price_cache.set(figi, price, ttl=5)
+                        debug(f"   ✅ {figi[:8]}: {price:.4f}₽ (fallback, сохранено в кэш)")
+                except Exception as e2:
+                    warning(f"   ❌ {figi[:8]}: {e2}")
+
+            return result
 
     def get_all_shares(self, limit: int = 1000) -> List[Dict[str, Any]]:
         """Получение списка акций с кэшированием"""
@@ -1788,16 +1938,33 @@ class TBankClient:
                         if len(result) >= limit:
                             break
 
-                instruments_cache.set(cache_key, result, ttl=300)
+                instruments_cache.set(cache_key, result, ttl=3600)
                 info(f"📊 Загружено {len(result)} акций")
                 return result
             except Exception as e:
                 error(f"Ошибка получения списка акций: {e}")
                 return []
 
-    def get_candles(self, figi: str, days: int = 5, interval_minutes: int = 5) -> List[Tuple[float, float]]:
+    @api_monitor.measure("get_candles")
+    def get_candles(self, figi: str, days: int = 2, interval_minutes: int = 5) -> List[Tuple[float, float]]:
         """Получение свечей с кэшированием и блокировкой для одного FIGI"""
+
+        from trading_bot.utils.time_utils import is_trading_time
+
+        # ✅ В не торговое время используем только кэш
+        if not is_trading_time():
+            cache_key = f"{figi}_{days}_{interval_minutes}"
+            cached_result = candles_cache.get(cache_key)
+            if cached_result is not None:
+                debug(f"   📦 Свечи из кэша (не торговое время)")
+                return cached_result.copy()
+            debug(f"   ⏸️ Пропускаем запрос свечей (не торговое время, кэш пуст)")
+            return []
+
         self._wait_for_rate_limit()
+
+        # ✅ Ограничиваем days для ускорения (уже есть)
+        days = min(days, 3)
 
         cache_key = f"{figi}_{days}_{interval_minutes}"
 
@@ -1867,12 +2034,15 @@ class TBankClient:
             with Client(self.token) as client:
                 status = client.market_data.get_trading_status(instrument_id=figi)
 
+                # ✅ БЕЗОПАСНОЕ ПОЛУЧЕНИЕ АТРИБУТОВ (с защитой от отсутствия)
                 result = {
-                    'trading_status': status.trading_status,
-                    'api_trade_available': status.api_trade_available_flag,
-                    'market_order_available': status.market_order_available_flag,
-                    'limit_order_available': status.limit_order_available_flag,
-                    'trading_status_description': self._get_trading_status_description(status.trading_status),
+                    'trading_status': getattr(status, 'trading_status', 0),
+                    'api_trade_available': getattr(status, 'api_trade_available_flag', False),
+                    'market_order_available': getattr(status, 'market_order_available_flag', False),
+                    'limit_order_available': getattr(status, 'limit_order_available_flag', False),
+                    'trading_status_description': self._get_trading_status_description(
+                        getattr(status, 'trading_status', 0)
+                    ),
                 }
 
                 # Добавляем информацию о доступности разных типов заявок
@@ -1965,125 +2135,161 @@ class TBankClient:
 
     def is_confirmation_required(self, figi: str) -> bool:
         """
-        ПРОВЕРКА, ТРЕБУЕТ ЛИ ИНСТРУМЕНТ ПОДТВЕРЖДЕНИЯ СДЕЛОК (OTC)
-
-        🔍 ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ КАЖДОГО ШАГА
+        Проверка, требует ли инструмент подтверждения сделок (OTC)
+        ТОЛЬКО через API - БЕЗ ХАРДКОДА!
         """
-        from trading_bot.logger import debug, warning, info
-        import time
-
-        ticker = self._get_ticker_by_figi(figi) or figi[:8]
-
         # ========== 1. ПРОВЕРКА КЭША ==========
-        now = time.time()
-        if figi in self._confirmation_cache:
-            cache_time = self._confirmation_cache_time.get(figi, 0)
-            if now - cache_time < 3600:  # TTL 1 час
-                result = self._confirmation_cache[figi]
-                debug(f"   📦 Кэш OTC для {ticker}: {'✅ ДА (OTC)' if result else '❌ НЕТ'}")
-                return result
+        cache_key = f"confirmation_required_{figi}"
+        cached_result = instruments_cache.get(cache_key)
+        if cached_result is not None:
+            return cached_result
 
-        debug(f"   🔍 ПРОВЕРКА OTC ДЛЯ {ticker} (FIGI={figi[:12]}...)")
+        try:
+            # ========== 2. ПОЛУЧАЕМ ИНФОРМАЦИЮ ОБ ИНСТРУМЕНТЕ ==========
+            with Client(self.token) as client:
+                # Пробуем получить instrument через share_by
+                try:
+                    response = client.instruments.share_by(figi=figi)
+                    if response and response.instrument:
+                        instrument = response.instrument
+
+                        # Проверяем флаг for_qual_investor_flag (требует квалификации)
+                        if getattr(instrument, 'for_qual_investor_flag', False):
+                            instruments_cache.set(cache_key, True, ttl=3600)
+                            return True
+
+                        # Проверяем exchange - если это внебиржевая площадка
+                        exchange = getattr(instrument, 'exchange', '')
+                        if 'DEALER' in exchange or 'OTC' in exchange:
+                            instruments_cache.set(cache_key, True, ttl=3600)
+                            return True
+
+                        # Проверяем api_trade_available_flag
+                        if not getattr(instrument, 'api_trade_available_flag', True):
+                            instruments_cache.set(cache_key, True, ttl=3600)
+                            return True
+
+                except Exception as e:
+                    debug(f"Не удалось получить share_by для {figi}: {e}")
+
+                # Пробуем получить через bond_by
+                try:
+                    response = client.instruments.bond_by(figi=figi)
+                    if response and response.instrument:
+                        instrument = response.instrument
+
+                        if getattr(instrument, 'for_qual_investor_flag', False):
+                            instruments_cache.set(cache_key, True, ttl=3600)
+                            return True
+
+                        exchange = getattr(instrument, 'exchange', '')
+                        if 'DEALER' in exchange or 'OTC' in exchange:
+                            instruments_cache.set(cache_key, True, ttl=3600)
+                            return True
+
+                        if not getattr(instrument, 'api_trade_available_flag', True):
+                            instruments_cache.set(cache_key, True, ttl=3600)
+                            return True
+
+                except Exception as e:
+                    debug(f"Не удалось получить bond_by для {figi}: {e}")
+
+                # Пробуем получить через etf_by
+                try:
+                    response = client.instruments.etf_by(figi=figi)
+                    if response and response.instrument:
+                        instrument = response.instrument
+
+                        if getattr(instrument, 'for_qual_investor_flag', False):
+                            instruments_cache.set(cache_key, True, ttl=3600)
+                            return True
+
+                        exchange = getattr(instrument, 'exchange', '')
+                        if 'DEALER' in exchange or 'OTC' in exchange:
+                            instruments_cache.set(cache_key, True, ttl=3600)
+                            return True
+
+                        if not getattr(instrument, 'api_trade_available_flag', True):
+                            instruments_cache.set(cache_key, True, ttl=3600)
+                            return True
+
+                except Exception as e:
+                    debug(f"Не удалось получить etf_by для {figi}: {e}")
+
+            # ========== 3. ПРОВЕРКА ЧЕРЕЗ ТОРГОВЫЙ СТАТУС ==========
+            trading_status = self.get_trading_status(figi)
+
+            # Если API торговля недоступна - считаем OTC
+            if not trading_status.get('api_trade_available', True):
+                instruments_cache.set(cache_key, True, ttl=3600)
+                return True
+
+            # Если нет доступных типов заявок - возможно OTC
+            if not trading_status.get('market_order_available', False) and \
+                    not trading_status.get('limit_order_available', False):
+                instruments_cache.set(cache_key, True, ttl=3600)
+                return True
+
+            # ========== 4. ПО УМОЛЧАНИЮ - НЕ ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ ==========
+            instruments_cache.set(cache_key, False, ttl=1800)
+            return False
+
+        except Exception as e:
+            debug(f"Ошибка проверки OTC для {figi}: {e}")
+            # При ошибке - считаем что НЕ требует подтверждения (пессимистично)
+            return False
+
+    def get_instrument_by_figi(self, figi: str) -> Optional[Dict[str, Any]]:
+        """Получение детальной информации об инструменте по FIGI"""
+        cache_key = f"instrument_{figi}"
+        cached_result = instruments_cache.get(cache_key)
+        if cached_result is not None:
+            return cached_result
 
         try:
             with Client(self.token) as client:
-                # ========== 2. ПОЛУЧАЕМ СТАТУС ТОРГОВ ==========
-                debug(f"   📡 ШАГ 1/5: get_trading_status()")
-                status = client.market_data.get_trading_status(instrument_id=figi)
-
-                api_available = getattr(status, 'api_trade_available_flag', False)
-                market_available = getattr(status, 'market_order_available_flag', False)
-                limit_available = getattr(status, 'limit_order_available_flag', False)
-
-                debug(f"      📊 API доступна: {'✅' if api_available else '❌'}")
-                debug(f"      📊 Рыночные заявки: {'✅' if market_available else '❌'}")
-                debug(f"      📊 Лимитные заявки: {'✅' if limit_available else '❌'}")
-
-                # ========== 3. ПРОВЕРКА ЧЕРЕЗ API ДОСТУПНОСТЬ ==========
-                if not api_available:
-                    warning(f"   🔐 {ticker}: API торговля НЕ ДОСТУПНА → OTC")
-                    self._confirmation_cache[figi] = True
-                    self._confirmation_cache_time[figi] = now
-                    return True
-
-                # ========== 4. ПРОВЕРКА НАЛИЧИЯ ЗАЯВОК ==========
-                if not market_available and not limit_available:
-                    warning(f"   🔐 {ticker}: НЕТ доступных типов заявок → OTC")
-                    self._confirmation_cache[figi] = True
-                    self._confirmation_cache_time[figi] = now
-                    return True
-
-                # ========== 5. ПОЛУЧАЕМ ИНФОРМАЦИЮ ОБ ИНСТРУМЕНТЕ (ИСПРАВЛЕНО!) ==========
-                debug(f"   📡 ШАГ 2/5: instruments.shares()")
-
-                # ✅ ИСПРАВЛЕНИЕ: используем правильный синтаксис
+                # Пробуем получить как акцию
                 try:
-                    # Пробуем через shares() с фильтрацией
-                    shares_response = client.instruments.shares()
-                    instrument_info = None
-
-                    for share in shares_response.instruments:
-                        if share.figi == figi:
-                            instrument_info = share
-                            break
-
-                    if instrument_info:
-                        exchange = getattr(instrument_info, 'exchange', '')
-                        for_qual = getattr(instrument_info, 'for_qual_investor_flag', False)
-
-                        debug(f"      📊 Биржа: {exchange}")
-                        debug(f"      📊 Квал. инвестор: {'✅' if for_qual else '❌'}")
-
-                        # Проверка DEALER
-                        if exchange == 'INSTRUMENT_EXCHANGE_DEALER' or 'DEALER' in str(exchange):
-                            warning(f"   🔐 {ticker}: ВНЕБИРЖЕВОЙ инструмент (exchange={exchange}) → OTC")
-                            self._confirmation_cache[figi] = True
-                            self._confirmation_cache_time[figi] = now
-                            return True
-
-                        # Проверка квалифицированного инвестора
-                        if for_qual:
-                            warning(f"   🔐 {ticker}: ТРЕБУЕТ квалифицированного инвестора → OTC")
-                            self._confirmation_cache[figi] = True
-                            self._confirmation_cache_time[figi] = now
-                            return True
-
+                    response = client.instruments.share_by(figi=figi)
+                    if response and response.instrument:
+                        result = {
+                            'figi': response.instrument.figi,
+                            'ticker': response.instrument.ticker,
+                            'name': response.instrument.name,
+                            'instrument_type': 'share',
+                            'exchange': getattr(response.instrument, 'exchange', ''),
+                            'for_qual_investor_flag': getattr(response.instrument, 'for_qual_investor_flag', False),
+                            'api_trade_available_flag': getattr(response.instrument, 'api_trade_available_flag', True),
+                            'lot': getattr(response.instrument, 'lot', 1),
+                        }
+                        instruments_cache.set(cache_key, result, ttl=3600)
+                        return result
                 except Exception as e:
-                    debug(f"      ⚠️ Не удалось получить информацию об инструменте: {e}")
-                    # Не возвращаем OTC при ошибке — слишком рискованно
+                    debug(f"Не удалось получить акцию {figi}: {e}")
 
-                # ========== 6. ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА: СТАКАН ==========
-                debug(f"   📡 ШАГ 3/5: Проверка стакана")
+                # Пробуем как облигацию
                 try:
-                    orderbook = client.market_data.get_order_book(figi=figi, depth=1)
-                    if orderbook:
-                        bid_exists = len(orderbook.bids) > 0 and orderbook.bids[0].quantity > 0
-                        ask_exists = len(orderbook.asks) > 0 and orderbook.asks[0].quantity > 0
-
-                        debug(f"      📊 Заявки на покупку: {'✅ есть' if bid_exists else '❌ нет'}")
-                        debug(f"      📊 Заявки на продажу: {'✅ есть' if ask_exists else '❌ нет'}")
-
-                        # Если нет заявок ни с одной стороны — возможно OTC
-                        if not bid_exists and not ask_exists:
-                            warning(f"   🔐 {ticker}: ПУСТОЙ СТАКАН (нет заявок) → подозрение на OTC")
-                            # Не возвращаем сразу True, но помечаем как подозрительный
+                    response = client.instruments.bond_by(figi=figi)
+                    if response and response.instrument:
+                        result = {
+                            'figi': response.instrument.figi,
+                            'ticker': response.instrument.ticker,
+                            'name': response.instrument.name,
+                            'instrument_type': 'bond',
+                            'exchange': getattr(response.instrument, 'exchange', ''),
+                            'for_qual_investor_flag': getattr(response.instrument, 'for_qual_investor_flag', False),
+                            'api_trade_available_flag': getattr(response.instrument, 'api_trade_available_flag', True),
+                            'lot': getattr(response.instrument, 'lot', 1),
+                        }
+                        instruments_cache.set(cache_key, result, ttl=3600)
+                        return result
                 except Exception as e:
-                    debug(f"      ⚠️ Ошибка проверки стакана: {e}")
-
-                # ========== 7. ИТОГ ==========
-                debug(f"   📡 ШАГ 4/5: ИТОГОВЫЙ ВЕРДИКТ")
-                info(f"   ✅ {ticker}: НЕ ТРЕБУЕТ подтверждения (можно торговать)")
-
-                self._confirmation_cache[figi] = False
-                self._confirmation_cache_time[figi] = now
-                return False
+                    debug(f"Не удалось получить облигацию {figi}: {e}")
 
         except Exception as e:
-            error(f"   ❌ ОШИБКА проверки OTC для {ticker}: {e}")
-            # При ошибке — лучше вернуть True (OTC), чтобы не рисковать
-            self._confirmation_cache[figi] = True
-            self._confirmation_cache_time[figi] = now
-            return True
+            debug(f"Ошибка получения информации об инструменте {figi}: {e}")
+
+        return None
 
     def check_instrument_tradability(self, figi: str) -> Dict[str, Any]:
         """
@@ -2842,7 +3048,7 @@ class TBankClient:
                 price_quotation = decimal_to_quotation(Decimal(str(price))) if price else None
 
                 max_lots = client.orders.get_max_lots(
-                    account_id=self.account_id,
+                    # account_id=self.account_id,  # ← УДАЛИТЬ ЭТУ СТРОКУ
                     instrument_id=figi,
                     price=price_quotation
                 )
@@ -3950,6 +4156,126 @@ class TBankClient:
         except Exception as e:
             error(f"❌ WebSocket ошибка для {ticker}: {e}")
             return None
+
+    def cleanup_stuck_orders_auto(self, max_age_seconds: int = 300, force_all: bool = False) -> Dict[str, Any]:
+        """
+        АВТОМАТИЧЕСКАЯ ОЧИСТКА ЗАВИСШИХ ЗАЯВОК
+        - Отменяет заявки старше max_age_seconds
+        - Удаляет дубликаты (оставляет лучшую цену)
+        - Детальное логирование
+        """
+        from datetime import datetime, timedelta
+        from trading_bot.utils.time_utils import get_moscow_time
+        from collections import defaultdict
+        from trading_bot.logger import info, success, warning, debug, error
+
+        result = {
+            'cancelled': 0,
+            'failed': 0,
+            'details': [],
+            'orders_before': 0,
+            'orders_after': 0
+        }
+
+        try:
+            # 1. Получаем активные заявки
+            orders = self.get_active_orders()
+            result['orders_before'] = len(orders)
+
+            if not orders:
+                debug("📭 Нет активных заявок для очистки")
+                return result
+
+            now = get_moscow_time()
+            cutoff_time = now - timedelta(seconds=max_age_seconds)
+
+            # 2. Группируем по тикеру и направлению
+            groups = defaultdict(list)
+            for order in orders:
+                key = f"{order.get('ticker', 'unknown')}_{order.get('direction', '?')}"
+                groups[key].append(order)
+
+            to_cancel = []
+
+            # 3. Анализ дубликатов
+            for key, group_orders in groups.items():
+                ticker, direction = key.split('_')
+
+                if len(group_orders) > 1:
+                    if direction == "BUY":
+                        best_order = min(group_orders, key=lambda x: x.get('price', float('inf')))
+                    else:
+                        best_order = max(group_orders, key=lambda x: x.get('price', 0))
+
+                    for order in group_orders:
+                        if order.get('order_id') != best_order.get('order_id'):
+                            to_cancel.append(order)
+                            result['details'].append({
+                                'ticker': ticker,
+                                'direction': direction,
+                                'reason': f'дубликат (оставляем {best_order.get("price", 0):.2f}₽)',
+                                'order_id': order.get('order_id')[:8],
+                                'price': order.get('price', 0)
+                            })
+
+                # 4. Анализ устаревших заявок
+                for order in group_orders:
+                    created_at = order.get('created_at')
+                    if created_at:
+                        if isinstance(created_at, str):
+                            try:
+                                created_at = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                            except:
+                                continue
+
+                        if created_at and created_at < cutoff_time:
+                            if order not in to_cancel:
+                                to_cancel.append(order)
+                                age_minutes = int((now - created_at).total_seconds() / 60)
+                                result['details'].append({
+                                    'ticker': ticker,
+                                    'direction': direction,
+                                    'reason': f'устаревшая ({age_minutes} мин)',
+                                    'order_id': order.get('order_id')[:8],
+                                    'price': order.get('price', 0)
+                                })
+
+            # 5. Принудительная отмена (если force_all)
+            if force_all:
+                for order in orders:
+                    if order not in to_cancel:
+                        to_cancel.append(order)
+                        result['details'].append({
+                            'ticker': order.get('ticker', 'unknown'),
+                            'direction': order.get('direction', '?'),
+                            'reason': 'принудительная очистка',
+                            'order_id': order.get('order_id')[:8],
+                            'price': order.get('price', 0)
+                        })
+
+            # 6. Отмена заявок
+            for order in to_cancel:
+                order_id = order.get('order_id')
+                ticker = order.get('ticker', 'unknown')
+
+                try:
+                    if self.cancel_order(order_id):
+                        result['cancelled'] += 1
+                    else:
+                        result['failed'] += 1
+                except Exception as e:
+                    result['failed'] += 1
+
+            # 7. Финальная статистика
+            remaining = self.get_active_orders()
+            result['orders_after'] = len(remaining)
+
+            return result
+
+        except Exception as e:
+            error(f"❌ Ошибка авто-очистки: {e}")
+            result['error'] = str(e)
+            return result
 
     # ========== АЛИАСЫ ДЛЯ ОБРАТНОЙ СОВМЕСТИМОСТИ ==========
 
