@@ -37,17 +37,25 @@ except ImportError as e:
 except Exception as e:
     print(f"⚠️ Error starting Telegram: {e}")
 
-# ========== ЗАПУСК ТОРГОВОГО БОТА ==========
+# ========== ЗАПУСК ТОРГОВОГО БОТА В ОТДЕЛЬНОМ ПОТОКЕ ==========
 print("🚀 STARTING TRADING BOT...")
 _trading_bot = None
+_bot_thread = None
 
-try:
-    from trading_bot import get_trading_bot
-    _trading_bot = get_trading_bot()
-    _trading_bot.start()
-    print("✅ TRADING BOT STARTED")
-except Exception as e:
-    print(f"⚠️ Error starting trading bot: {e}")
+def run_bot():
+    global _trading_bot
+    try:
+        from trading_bot import get_trading_bot
+        _trading_bot = get_trading_bot()
+        _trading_bot.start()
+        print("✅ TRADING BOT STARTED")
+    except Exception as e:
+        print(f"⚠️ Error starting trading bot: {e}")
+
+# ✅ ЗАПУСКАЕМ БОТА В ОТДЕЛЬНОМ ПОТОКЕ
+_bot_thread = threading.Thread(target=run_bot, daemon=True)
+_bot_thread.start()
+print("✅ TRADING BOT THREAD STARTED")
 
 app = Flask(__name__)
 
@@ -66,7 +74,8 @@ def health_check():
         "status": "ok",
         "timestamp": datetime.now().isoformat(),
         "service": "trading-bot",
-        "telegram_polling": _telegram_thread is not None and _telegram_thread.is_alive()
+        "telegram_polling": _telegram_thread is not None and _telegram_thread.is_alive(),
+        "bot_thread": _bot_thread is not None and _bot_thread.is_alive()
     }), 200
 
 @app.route('/health/simple')
@@ -91,6 +100,7 @@ def status():
         "capital": capital,
         "positions": _bot_status.get('positions', 0),
         "telegram_alive": _telegram_thread is not None and _telegram_thread.is_alive(),
+        "bot_alive": _bot_thread is not None and _bot_thread.is_alive(),
         "timestamp": datetime.now().isoformat()
     }), 200
 
@@ -98,4 +108,5 @@ if __name__ == "__main__":
     port = int(os.environ.get('PORT', 10000))
     print(f"\n🚀 STARTING WEB SERVER ON PORT {port}")
     print("=" * 60 + "\n")
-    app.run(host='0.0.0.0', port=port, debug=False, threaded=False)
+    # ✅ threaded=True для обработки запросов
+    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
