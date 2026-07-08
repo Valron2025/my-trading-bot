@@ -21,21 +21,25 @@ services:
         value: "WARNING"
       - key: PYTHONPATH
         value: "."
-      # ✅ НОВЫЕ ПЕРЕМЕННЫЕ ДЛЯ ОПТИМИЗАЦИИ
+
+      # ✅ ОПТИМИЗАЦИЯ ДЛЯ RENDER (ВЫСОКАЯ ЗАДЕРЖКА API)
       - key: SCAN_INTERVAL
-        value: "120"              # Сканировать каждые 2 минуты
+        value: "300"              # Сканирование каждые 5 минут
       - key: MAX_TICKERS_TO_SCAN
-        value: "8"                # Анализировать только 8 тикеров
+        value: "5"                # Только 5 тикеров за раз
       - key: PARALLEL_WORKERS
-        value: "3"                # 3 параллельных запроса
+        value: "2"                # 2 параллельных запроса
       - key: SCAN_CACHE_TTL
-        value: "180"              # Кэш сканирования на 3 минуты
+        value: "600"              # Кэш сканирования 10 минут
       - key: API_MIN_INTERVAL
-        value: "1.0"              # Минимальный интервал между API запросами
+        value: "2.0"              # 2 секунды между запросами (БЫЛО 1.0)
       - key: CANDLES_CACHE_TTL
-        value: "120"              # Кэш свечей на 2 минуты
+        value: "600"              # Кэш свечей 10 минут (БЫЛО 120)
       - key: MAX_REQUESTS
         value: "500"              # Максимум запросов на воркер
+      - key: POSITION_CHECK_INTERVAL
+        value: "120"              # 2 минуты между проверками позиций
+
     healthCheckPath: /health
     autoDeploy: true
     plan: free
