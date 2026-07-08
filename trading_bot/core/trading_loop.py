@@ -1,4 +1,4 @@
-﻿"""Основной торговый цикл - сердце бота"""
+"""Основной торговый цикл - сердце бота"""
 
 import time
 import asyncio
@@ -99,6 +99,56 @@ def _get_telegram():
     return get_telegram_notifier()
 
 
+class PerformanceMonitor:
+    """Автоматический мониторинг производительности"""
+    
+    def __init__(self, trading_loop):
+        self.trading_loop = trading_loop
+        self._cycle_times = []
+        self._api_latencies = []
+        self._last_report_time = time.time()
+        self._report_interval = 300  # 5 минут
+    
+    def record_cycle(self, duration: float):
+        """Запись времени цикла"""
+        self._cycle_times.append(duration)
+        if len(self._cycle_times) > 100:
+            self._cycle_times = self._cycle_times[-100:]
+        
+        # Автоматическая корректировка
+        self._auto_adjust(duration)
+    
+    def _auto_adjust(self, duration: float):
+        """Автоматическая корректировка параметров"""
+        # Если цикл слишком долгий (>30 сек) - уменьшаем нагрузку
+        if duration > 30 and self.trading_loop._running:
+            # Уменьшаем количество тикеров
+            if hasattr(self.trading_loop.bot, 'stock_scanner'):
+                scanner = self.trading_loop.bot.stock_scanner
+                if scanner.max_tickers_to_scan > 3:
+                    new_limit = max(3, scanner.max_tickers_to_scan - 2)
+                    warning(f"⚡ АВТО-АДАПТАЦИЯ: цикл {duration:.1f}с, уменьшаем тикеры {scanner.max_tickers_to_scan}→{new_limit}")
+                    scanner.max_tickers_to_scan = new_limit
+                
+                # Увеличиваем интервал сканирования
+                if scanner._scan_interval < 180:
+                    new_interval = min(300, scanner._scan_interval + 30)
+                    scanner._scan_interval = new_interval
+                    debug(f"   📊 scan_interval: {new_interval}с")
+    
+    def get_stats(self) -> Dict:
+        """Получение статистики"""
+        if not self._cycle_times:
+            return {}
+        
+        return {
+            'avg_cycle_ms': sum(self._cycle_times) / len(self._cycle_times) * 1000,
+            'max_cycle_ms': max(self._cycle_times) * 1000,
+            'min_cycle_ms': min(self._cycle_times) * 1000,
+            'cycles_count': len(self._cycle_times)
+        }
+
+
 class TradingLoop:
     """Основной торговый цикл"""
 
@@ -140,8 +190,210 @@ class TradingLoop:
 
         self._tech_analysis_cache = {}  # {cache_key: {'timestamp': time, 'data': result}}
         self._tech_cache_ttl = 60  # 60 секунд TTL
+        
+        self._method_cache = {}
+        self._method_cache_ttl = 30  # 30 секунд
+        
+        self._market_conditions_cache = {}
+        self._market_conditions_ttl = 60  # 60 секунд
+        
+        # ✅ АВТОМАТИЧЕСКАЯ ОПТИМИЗАЦИЯ
+        self._performance_monitor = PerformanceMonitor(self)
+        
+        # Запускаем автоматическую оптимизацию в фоне
+        self._auto_optimize()
+        
+        info("✅ TradingLoop инициализирован с авто-оптимизацией")
 
         info("✅ TradingLoop инициализирован")
+        
+    def _auto_optimize(self):
+        """
+        АВТОМАТИЧЕСКАЯ ОПТИМИЗАЦИЯ ПАРАМЕТРОВ
+        Выполняется при инициализации и периодически в фоне
+        """
+        import psutil
+        import os
+        import time
+        from trading_bot.config import config
+        from trading_bot.logger import info, warning, success
+        
+        info("\n" + "=" * 60)
+        info("⚡ ЗАПУСК АВТОМАТИЧЕСКОЙ ОПТИМИЗАЦИИ")
+        info("=" * 60)
+        
+        try:
+            # ========== 1. АНАЛИЗ СИСТЕМЫ ==========
+            cpu_count = psutil.cpu_count() or 2
+            mem = psutil.virtual_memory()
+            total_ram_mb = mem.total / (1024 * 1024)
+            available_ram_mb = mem.available / (1024 * 1024)
+            cpu_percent = psutil.cpu_percent(interval=0.5)
+            
+            is_render = os.environ.get('RENDER', False)
+            is_vps = os.environ.get('VPS', False)
+            
+            info(f"📊 СИСТЕМНАЯ ИНФОРМАЦИЯ:")
+            info(f"   🖥️  CPU: {cpu_count} ядер, загрузка {cpu_percent:.0f}%")
+            info(f"   💾 RAM: {total_ram_mb:.0f}MB (доступно {available_ram_mb:.0f}MB)")
+            info(f"   🏷️  Окружение: {'Render' if is_render else 'VPS' if is_vps else 'Local'}")
+            
+            # ========== 2. РАСЧЁТ ОПТИМАЛЬНЫХ ПАРАМЕТРОВ ==========
+            # 2.1. Количество тикеров для сканирования
+            if is_render:
+                max_tickers = min(3, cpu_count)
+                max_workers = min(2, cpu_count)
+                scan_interval = 120
+                cache_ttl = 300
+            elif cpu_count >= 4 and total_ram_mb > 2048:
+                max_tickers = min(10, cpu_count * 2)
+                max_workers = min(8, cpu_count)
+                scan_interval = 60
+                cache_ttl = 120
+            elif cpu_count <= 2 or total_ram_mb < 1024:
+                max_tickers = min(3, cpu_count)
+                max_workers = min(2, cpu_count)
+                scan_interval = 180
+                cache_ttl = 600
+            else:
+                max_tickers = min(5, cpu_count)
+                max_workers = min(4, cpu_count)
+                scan_interval = 90
+                cache_ttl = 180
+            
+            # 2.2. Корректировка по загрузке CPU
+            if cpu_percent > 80:
+                max_tickers = max(2, max_tickers - 1)
+                scan_interval = min(300, scan_interval + 60)
+                warning(f"   ⚠️ Высокая загрузка CPU ({cpu_percent:.0f}%), снижаем нагрузку")
+            
+            # 2.3. Корректировка по доступной памяти
+            if available_ram_mb < 256:
+                max_tickers = min(2, max_tickers)
+                cache_ttl = min(600, cache_ttl * 2)
+                warning(f"   ⚠️ Мало памяти ({available_ram_mb:.0f}MB), уменьшаем нагрузку")
+            
+            # ========== 3. ПРИМЕНЕНИЕ НАСТРОЕК ==========
+            # 3.1. Настройки сканера
+            if hasattr(self.bot, 'stock_scanner'):
+                scanner = self.bot.stock_scanner
+                old_tickers = getattr(scanner, 'max_tickers_to_scan', 5)
+                scanner.max_tickers_to_scan = max_tickers
+                info(f"   📊 scanner.max_tickers: {old_tickers} → {max_tickers}")
+                
+                old_workers = getattr(scanner, 'parallel_workers', 4)
+                scanner.parallel_workers = max_workers
+                info(f"   👥 scanner.workers: {old_workers} → {max_workers}")
+                
+                old_interval = getattr(scanner, '_scan_interval', 60)
+                scanner._scan_interval = scan_interval
+                info(f"   ⏱️ scanner.interval: {old_interval}с → {scan_interval}с")
+                
+                old_cache_ttl = getattr(scanner, '_candles_cache_ttl', 120)
+                if hasattr(scanner, '_candles_cache_ttl'):
+                    scanner._candles_cache_ttl = cache_ttl
+                    info(f"   💾 scanner.cache_ttl: {old_cache_ttl}с → {cache_ttl}с")
+            
+            # 3.2. Настройки позиций
+            old_max_positions = config.max_positions
+            if total_ram_mb < 1024:
+                new_max_positions = min(3, old_max_positions)
+            elif total_ram_mb < 2048:
+                new_max_positions = min(5, old_max_positions)
+            else:
+                new_max_positions = min(15, old_max_positions)
+            
+            if new_max_positions != old_max_positions:
+                config.max_positions = new_max_positions
+                info(f"   📈 max_positions: {old_max_positions} → {new_max_positions}")
+            
+            # 3.3. Настройки циклов (через PositionMonitor)
+            if hasattr(self, '_position_monitor') and self._position_monitor:
+                if cpu_percent > 70 or total_ram_mb < 1024:
+                    self._position_monitor.check_interval = 60
+                    info(f"   🔄 position_monitor.interval: → 60с (режим экономии)")
+                elif cpu_percent > 50:
+                    self._position_monitor.check_interval = 30
+                    info(f"   🔄 position_monitor.interval: → 30с")
+            
+            # 3.4. Настройки API интервала
+            from trading_bot.api.tbank_client import tbank
+            old_interval = getattr(tbank, '_min_interval', 1.0)
+            if is_render:
+                new_interval = 2.0
+            elif cpu_count >= 4:
+                new_interval = 0.5
+            else:
+                new_interval = 1.0
+            tbank._min_interval = new_interval
+            info(f"   🌐 API min_interval: {old_interval}с → {new_interval}с")
+            
+            # 3.5. Настройки кэшей
+            from trading_bot.cache import candles_cache, price_cache
+            candles_cache._default_ttl = cache_ttl
+            price_cache._cache._default_ttl = min(10, cache_ttl // 10)
+            info(f"   💾 candles_cache TTL: → {cache_ttl}с")
+            
+            # ========== 4. СОХРАНЕНИЕ ПРОФИЛЯ ==========
+            self._optimization_profile = {
+                'timestamp': time.time(),
+                'cpu_count': cpu_count,
+                'total_ram_mb': total_ram_mb,
+                'available_ram_mb': available_ram_mb,
+                'cpu_percent': cpu_percent,
+                'is_render': is_render,
+                'max_tickers': max_tickers,
+                'max_workers': max_workers,
+                'scan_interval': scan_interval,
+                'cache_ttl': cache_ttl,
+                'max_positions': new_max_positions,
+                'api_interval': new_interval,
+            }
+            
+            # ========== 5. ФИНАЛЬНЫЙ ОТЧЁТ ==========
+            info("\n" + "─" * 40)
+            info("📊 ОПТИМИЗИРОВАННЫЕ ПАРАМЕТРЫ:")
+            info(f"   🖥️  Система: {cpu_count} ядер, {total_ram_mb:.0f}MB RAM")
+            info(f"   📊 Тикеров: {max_tickers} | Воркеров: {max_workers}")
+            info(f"   ⏱️  Сканирование: {scan_interval}с | Кэш: {cache_ttl}с")
+            info(f"   📈 Макс. позиций: {new_max_positions}")
+            info(f"   🌐 API интервал: {new_interval}с")
+            info(f"   🏷️  Режим: {'ЭКОНОМИЯ' if total_ram_mb < 1024 else 'НОРМА' if total_ram_mb < 2048 else 'ПРОИЗВОДИТЕЛЬНОСТЬ'}")
+            info("─" * 40)
+            
+            success("✅ АВТОМАТИЧЕСКАЯ ОПТИМИЗАЦИЯ ЗАВЕРШЕНА")
+            info("=" * 60 + "\n")
+            
+            return self._optimization_profile
+            
+        except Exception as e:
+            error(f"❌ ОШИБКА АВТО-ОПТИМИЗАЦИИ: {e}")
+            import traceback
+            debug(traceback.format_exc())
+            
+            # Создаём профиль по умолчанию при ошибке
+            self._optimization_profile = {
+                'timestamp': time.time(),
+                'error': str(e),
+                'max_tickers': 3,
+                'max_workers': 2,
+                'scan_interval': 120,
+                'cache_ttl': 300,
+                'max_positions': 3,
+                'api_interval': 2.0,
+            }
+            return self._optimization_profile
+        
+    def _get_cached(self, cache_key: str, func, *args, **kwargs):
+        """Универсальный метод получения данных с кэшем"""
+        if cache_key in self._method_cache:
+            cached_time, result = self._method_cache[cache_key]
+            if (time.time() - cached_time) < self._method_cache_ttl:
+                return result
+        
+        result = func(*args, **kwargs)
+        self._method_cache[cache_key] = (time.time(), result)
+        return result
 
     # ==================== МЕТОД ДЛЯ УМНОГО ЗАКРЫТИЯ ПОЗИЦИЙ ====================
 
@@ -501,21 +753,38 @@ class TradingLoop:
         return True, f"баланс OK ({exposure['short_pct'] * 100:.0f}% SHORT)"
 
     def get_max_positions_by_capital(self, total_capital: float) -> int:
-        """
-        Динамический лимит позиций в зависимости от капитала
-        """
+        """Динамический лимит позиций с автоматическим расчётом"""
+        import psutil
+        import os
+        
+        # Базовый лимит от капитала
         if total_capital < 5000:
-            return 2
+            base_limit = 2
         elif total_capital < 10000:
-            return 3
+            base_limit = 3
         elif total_capital < 20000:
-            return 4
+            base_limit = 4
         elif total_capital < 50000:
-            return 6
+            base_limit = 6
         elif total_capital < 100000:
-            return 10
+            base_limit = 10
         else:
-            return 15
+            base_limit = 15
+        
+        # Корректировка по мощности системы
+        cpu_count = psutil.cpu_count() or 2
+        mem = psutil.virtual_memory()
+        is_render = os.environ.get('RENDER', False)
+        
+        if is_render:
+            # На Render - меньше позиций
+            return min(base_limit, 3)
+        elif cpu_count <= 2 or mem.total < 2 * 1024**3:  # < 2GB
+            return min(base_limit, 4)
+        elif cpu_count <= 4:
+            return min(base_limit, 6)
+        else:
+            return base_limit
 
     def check_position_limits_advanced(self, side: str, total_cost: float, total_capital: float) -> Tuple[bool, str]:
         """
@@ -925,27 +1194,31 @@ class TradingLoop:
         return False
 
     def _get_market_conditions_for_weekend(self) -> Dict[str, Any]:
-        """Получение рыночных условий для принятия решения перед выходными"""
+        """Получение рыночных условий с КЭШИРОВАНИЕМ"""
+        
+        # ✅ ПРОВЕРКА КЭША
+        cache_key = "market_conditions"
+        if cache_key in self._market_conditions_cache:
+            cached_time, result = self._market_conditions_cache[cache_key]
+            if (time.time() - cached_time) < self._market_conditions_ttl:
+                return result
+        
         try:
             from trading_bot.analysis.market_analyzer import market_analyzer
             from trading_bot.analysis.news_sentiment import news_sentiment
 
-            # Анализ рынка в целом
             market = market_analyzer.analyze_market_conditions()
 
-            # Глобальный новостной фон
             news_risk = "neutral"
             try:
-                # Оценка новостей за последние 24 часа
                 news_score = news_sentiment.get_global_sentiment(days=1)
                 if news_score < -0.3:
-                    news_risk = "negative"  # Риск падения
+                    news_risk = "negative"
                 elif news_score > 0.3:
-                    news_risk = "positive"  # Риск роста
+                    news_risk = "positive"
             except:
                 pass
 
-            # Определяем общий тренд
             if market.trend > 0.3:
                 trend = "bullish"
             elif market.trend < -0.3:
@@ -953,37 +1226,41 @@ class TradingLoop:
             else:
                 trend = "sideways"
 
-            # Волатильность
-            volatility = min(market.volatility, 1.0)
-
-            return {
+            result = {
                 'trend': trend,
                 'trend_strength': abs(market.trend),
-                'volatility': volatility,
+                'volatility': min(market.volatility, 1.0),
                 'news_risk': news_risk,
                 'market_score': market.trend
             }
+            
+            # ✅ СОХРАНЯЕМ В КЭШ
+            self._market_conditions_cache[cache_key] = (time.time(), result)
+            return result
+
         except Exception as e:
             debug(f"Не удалось получить рыночные условия: {e}")
-            return {
+            result = {
                 'trend': 'sideways',
                 'trend_strength': 0,
                 'volatility': 0.3,
                 'news_risk': 'neutral',
                 'market_score': 0
             }
+            self._market_conditions_cache[cache_key] = (time.time(), result)
+            return result
 
     def _analyze_position_technicals(self, ticker: str, figi: str, side: str,
-                                     current_price: float, avg_price: float) -> Dict[str, Any]:
+                                 current_price: float, avg_price: float) -> Dict[str, Any]:
         """Технический анализ конкретной позиции с определением ЛОКАЛЬНОГО тренда и ATR"""
 
         # ✅ КЭШ ДЛЯ ТЕХНИЧЕСКОГО АНАЛИЗА
         cache_key = f"tech_{ticker}_{figi}_{side}_{int(current_price * 100)}_{int(avg_price * 100)}"
 
-        # Проверяем кэш (60 секунд)
+        # ✅ ИЗМЕНЕНО: 60 → 300 СЕКУНД (5 минут)
         if hasattr(self, '_tech_analysis_cache'):
             cached = self._tech_analysis_cache.get(cache_key)
-            if cached and (time.time() - cached['timestamp']) < 60:
+            if cached and (time.time() - cached['timestamp']) < 300:
                 debug(f"   📦 Тех.анализ {ticker} из кэша (возраст: {time.time() - cached['timestamp']:.1f}с)")
                 return cached['data']
 
@@ -1293,7 +1570,7 @@ class TradingLoop:
         # Запускаем отдельный поток для мониторинга позиций
         self._position_monitor = PositionMonitor(self)
         self._position_monitor.start()
-        info("✅ PositionMonitor запущен (проверка позиций каждые 2 секунды)")
+        info(f"✅ PositionMonitor запущен (проверка позиций каждые {self._position_monitor.check_interval} секунд)")
     
         info("🔄 Запуск TradingLoop...")
         self._running = True
@@ -1996,15 +2273,11 @@ class TradingLoop:
              f"SHORT≤{config.short_score_threshold}, SHORT={'✅' if config.use_short else '❌'}")
 
     def _get_top_liquid_tickers(self, limit: int = 10) -> List[str]:
-        """
-        Получение топ-N самых ликвидных тикеров на основе объёма торгов в рублях
-        Динамически обновляется каждый час
-        """
+        """Получение топ-N ликвидных тикеров с УВЕЛИЧЕННЫМ TTL"""
         from trading_bot.api.tbank_client import tbank
 
-        cache_ttl = 3600  # 1 час
+        cache_ttl = 7200  # ✅ 2 ЧАСА (было 1 час)
 
-        # Проверяем кэш
         if hasattr(self, '_top_tickers_cache') and self._top_tickers_cache:
             cache_time = getattr(self, '_top_tickers_cache_time', 0)
             if time.time() - cache_time < cache_ttl:
@@ -2391,12 +2664,27 @@ class TradingLoop:
                 margin_info = _get_tbank().get_margin_info()
                 margin_rate = margin_info.get('margin_rate', 0)
 
+                # ✅ СОБИРАЕМ FIGI ДЛЯ BATCH-ЗАПРОСА
+                figis_for_report = []
+                for pos in positions:
+                    figi = pos.get('figi', 'unknown')
+                    if figi and figi != 'unknown':
+                        figis_for_report.append(figi)
+
+                # ✅ ОДИН BATCH-ЗАПРОС ДЛЯ ВСЕХ ЦЕН
+                prices_for_report = {}
+                if figis_for_report:
+                    prices_for_report = _get_tbank().get_last_prices_batch(figis_for_report)
+                    debug(f"   📡 Batch-запрос цен для {len(prices_for_report)}/{len(figis_for_report)} позиций (daily report)")
+
                 total_pnl = 0
                 for pos in positions:
                     figi = pos.get('figi', 'unknown')
                     qty = pos.get('quantity', 0)
                     avg = pos.get('avg_price', 0)
-                    cur = _get_tbank().get_current_price(figi)
+                    cur = prices_for_report.get(figi)
+                    if not cur:
+                        cur = _get_tbank().get_current_price(figi)  # fallback
                     if cur:
                         if qty < 0:
                             total_pnl += (avg - cur) * abs(qty)
@@ -2525,12 +2813,24 @@ class TradingLoop:
             # Получаем капитал для уведомлений
             _, total_capital, _ = _get_tbank().get_available_funds()
 
+            # ✅ СОБИРАЕМ ВСЕ FIGI ДЛЯ BATCH-ЗАПРОСА
+            figis_for_margin = []
+            for pos in positions:
+                figi = pos.get('figi')
+                if figi:
+                    figis_for_margin.append(figi)
+
+            # ✅ ОДИН BATCH-ЗАПРОС ДЛЯ ВСЕХ ЦЕН
+            prices_for_margin = {}
+            if figis_for_margin:
+                prices_for_margin = _get_tbank().get_last_prices_batch(figis_for_margin)
+                debug(f"   📡 Batch-запрос цен для {len(prices_for_margin)}/{len(figis_for_margin)} позиций (margin check)")
+
             # ========== ЭКСТРЕННЫЙ РЕЖИМ (≥95%) ==========
             if margin_rate >= 95:
                 error(f"🔥 ЭКСТРЕННЫЙ РЕЖИМ: маржа {margin_rate:.1f}%! Позиций: {current_positions}")
                 info(f"   🧠 Запуск интеллектуального анализа всех позиций...")
 
-                # ✅ ИСПРАВЛЕНО: используем существующий метод
                 closed = position_closer.close_worst_positions(max_to_close=3)
 
                 if closed > 0:
@@ -2539,16 +2839,17 @@ class TradingLoop:
                     info(f"   ℹ️ Умная логика решила не закрывать ни одной позиции")
                     info(f"   💚 Все позиции остаются согласно анализу")
 
-                # Telegram уведомление (не чаще раза в час)
+                # ✅ ИСПОЛЬЗУЕМ ЦЕНЫ ИЗ BATCH-ЗАПРОСА ДЛЯ P&L
                 if not hasattr(self, '_emergency_margin_notified') or not self._emergency_margin_notified:
                     telegram = _get_telegram()
                     if telegram:
-                        # Рассчитываем примерный убыток
                         total_pnl = 0
                         for pos in positions:
                             figi = pos.get('figi')
                             if figi:
-                                current_price = _get_tbank().get_current_price(figi)
+                                current_price = prices_for_margin.get(figi)
+                                if not current_price:
+                                    current_price = _get_tbank().get_current_price(figi)  # fallback
                                 if current_price:
                                     qty = pos.get('quantity', 0)
                                     avg = pos.get('avg_price', 0)
@@ -2577,7 +2878,6 @@ class TradingLoop:
                 error(f"🔥 КРИТИЧЕСКАЯ МАРЖА: {margin_rate:.1f}%! Позиций: {current_positions}")
                 info(f"   🧠 Запуск интеллектуального анализа убыточных позиций...")
 
-                # ✅ ИСПРАВЛЕНО: закрываем 2 худшие позиции
                 closed = position_closer.close_worst_positions(max_to_close=2)
 
                 if closed > 0:
@@ -2585,7 +2885,6 @@ class TradingLoop:
                 else:
                     info(f"   ℹ️ Умная логика решила не закрывать ни одной позиции")
 
-                # Telegram уведомление (не чаще раза в час)
                 if not hasattr(self, '_critical_margin_notified') or not self._critical_margin_notified:
                     telegram = _get_telegram()
                     if telegram:
@@ -2604,12 +2903,10 @@ class TradingLoop:
             # ========== ОПАСНАЯ МАРЖА (75-84%) ==========
             elif margin_rate >= 75:
                 warning(f"⚠️ ОПАСНАЯ МАРЖА: {margin_rate:.1f}%")
-                # ✅ ИСПРАВЛЕНО: закрываем 1 самую убыточную позицию
                 closed = position_closer.close_worst_positions(max_to_close=1)
                 if closed > 0:
                     success(f"✅ Закрыта {closed} самая убыточная позиция")
 
-                # Сбрасываем флаги уведомлений
                 self._critical_margin_notified = False
                 self._emergency_margin_notified = False
 
@@ -2632,19 +2929,11 @@ class TradingLoop:
             return 0
 
     def _emergency_close_profitable_only(self) -> int:
-        """
-        АВАРИЙНОЕ ЗАКРЫТИЕ - использует умную логику для каждого тикера
-
-        Логика:
-        1. При критической марже (>85%) - анализируем КАЖДУЮ позицию через умную логику
-        2. Не хардкодим "закрыть всё" - доверяемся интеллектуальному анализу
-        3. Отправляем детальное уведомление в Telegram
-        """
+        """АВАРИЙНОЕ ЗАКРЫТИЕ - использует умную логику для каждого тикера"""
         from trading_bot.risk.position_manager import position_manager
         from trading_bot.api.tbank_client import tbank
         from trading_bot.utils.time_utils import get_moscow_time
 
-        # ✅ ДОБАВЛЕНО: логирование входа в метод
         info(f"\n{'🔴' * 50}")
         info(f"🔥🔥🔥 МЕТОД _emergency_close_profitable_only ВЫЗВАН! 🔥🔥🔥")
         info(f"{'🔴' * 50}")
@@ -2681,6 +2970,19 @@ class TradingLoop:
                 info(f"   📭 Нет открытых позиций")
                 return 0
 
+            # ✅ СОБИРАЕМ ВСЕ FIGI ДЛЯ BATCH-ЗАПРОСА
+            figis_for_emergency = []
+            for pos in positions:
+                figi = pos.get('figi')
+                if figi:
+                    figis_for_emergency.append(figi)
+
+            # ✅ ОДИН BATCH-ЗАПРОС ДЛЯ ВСЕХ ЦЕН
+            prices_for_emergency = {}
+            if figis_for_emergency:
+                prices_for_emergency = _get_tbank().get_last_prices_batch(figis_for_emergency)
+                debug(f"   📡 Batch-запрос цен для {len(prices_for_emergency)}/{len(figis_for_emergency)} позиций (emergency close)")
+
             info(f"\n📊 [3/9] АНАЛИЗ ПОЗИЦИЙ ({len(positions)} шт) ПРИ МАРЖЕ {margin_rate:.1f}%:")
             info(f"{'─' * 50}")
 
@@ -2698,7 +3000,11 @@ class TradingLoop:
                     info(f"      ⚠️ Нет FIGI, пропускаем")
                     continue
 
-                current_price = tbank.get_current_price(figi)
+                # ✅ БЕРЁМ ЦЕНУ ИЗ BATCH-ЗАПРОСА
+                current_price = prices_for_emergency.get(figi)
+                if not current_price:
+                    current_price = tbank.get_current_price(figi)  # fallback
+
                 ticker = pos.get('ticker') or figi[:8]
                 quantity = pos.get('quantity', 0)
                 avg_price = pos.get('avg_price', 0)
@@ -2955,9 +3261,18 @@ class TradingLoop:
             if not positions:
                 return 0
 
+            # ✅ СОБИРАЕМ FIGI ДЛЯ BATCH-ЗАПРОСА
+            figis_for_close = list(positions.keys())
+            prices_for_close = {}
+            if figis_for_close:
+                prices_for_close = _get_tbank().get_last_prices_batch(figis_for_close)
+                debug(f"   📡 Batch-запрос цен для {len(prices_for_close)}/{len(figis_for_close)} позиций (close worst)")
+
             positions_data = []
             for figi, pos in positions.items():
-                current_price = _get_tbank().get_current_price(figi)
+                current_price = prices_for_close.get(figi)
+                if not current_price:
+                    current_price = _get_tbank().get_current_price(figi)  # fallback
                 if current_price:
                     profit_pct = pos.current_profit_pct(current_price)
                     positions_data.append({
@@ -3134,52 +3449,86 @@ class TradingLoop:
     def _check_positions(self):
         """Проверка стоп-лоссов, тейк-профитов и отката от максимума"""
 
+        # ========== 1. ПРОВЕРКА ТОРГОВОГО ВРЕМЕНИ ==========
         if not self._is_trading_time():
             debug(f"   ⏸️ Пропускаем проверку позиций (не торговое время)")
             return
 
+        # ========== 2. ПРОВЕРКА ИНТЕРВАЛА (60 СЕКУНД) ==========
         now = time.time()
-        if hasattr(self, '_last_check_time') and (now - self._last_check_time) < 5:
-            debug(f"   ⏸️ Пропускаем проверку позиций (прошло <5с)")
+        
+        # Инициализация, если отсутствует
+        if not hasattr(self, '_last_check_time'):
+            self._last_check_time = 0
+            debug(f"   ⚠️ _last_check_time инициализирован: 0")
+        
+        elapsed = now - self._last_check_time
+        
+        # ✅ ГЛАВНОЕ УСЛОВИЕ - 60 СЕКУНД МИНИМУМ
+        if self._last_check_time > 0 and elapsed < 60:
+            debug(f"   ⏸️ Пропускаем проверку позиций (прошло {elapsed:.1f}с < 60с)")
             return
+        
+        # ✅ ВЫПОЛНЯЕМ ПРОВЕРКУ
         self._last_check_time = now
+        debug(f"   ✅ Выполняем проверку позиций (интервал с прошлой проверки: {elapsed:.1f}с)")
 
         try:
             from trading_bot.risk.position_manager import position_manager
             from trading_bot.api.tbank_client import tbank
 
+            # ========== 3. ПОЛУЧЕНИЕ ПОЗИЦИЙ ==========
             positions = position_manager.get_all_positions()
             if not positions:
+                debug(f"   📭 Нет позиций для проверки")
                 return
 
-            # ✅ СОБИРАЕМ ВСЕ FIGI В ОДИН СПИСОК
-            figis = list(positions.keys())
+            # ========== 4. ОГРАНИЧЕНИЕ: ТОЛЬКО 3 ПОЗИЦИИ ЗА РАЗ ==========
+            MAX_POSITIONS_TO_ANALYZE = 3
+            positions_items = list(positions.items())
+            
+            # ========== 5. ЦИКЛИЧЕСКАЯ ОЧЕРЕДЬ ==========
+            if not hasattr(self, '_position_analysis_index'):
+                self._position_analysis_index = 0
+            
+            start_idx = self._position_analysis_index % len(positions_items)
+            positions_to_analyze = []
+            for i in range(MAX_POSITIONS_TO_ANALYZE):
+                idx = (start_idx + i) % len(positions_items)
+                positions_to_analyze.append(positions_items[idx])
+            
+            self._position_analysis_index = (self._position_analysis_index + MAX_POSITIONS_TO_ANALYZE) % len(positions_items)
+            debug(f"   📊 Анализируем позиции: {[p[1].ticker for p in positions_to_analyze]}")
 
-            # ✅ ОДИН BATCH-ЗАПРОС ДЛЯ ВСЕХ ПОЗИЦИЙ
+            # ========== 6. BATCH-ЗАПРОС ЦЕН ==========
+            figis = list(positions.keys())
             prices_dict = {}
             if figis:
-                prices_dict = tbank.get_last_prices_batch(figis)  # ← ОДИН ЗАПРОС!
-                debug(f"   📡 Batch-запрос цен для {len(prices_dict)}/{len(figis)} позиций")
+                prices_dict = tbank.get_last_prices_batch(figis)
+                debug(f"   📡 Получены цены для {len(prices_dict)}/{len(figis)} позиций")
 
-            for figi, position in positions.items():
-                # ✅ БЕРЁМ ЦЕНУ ИЗ СЛОВАРЯ (МГНОВЕННО!)
+            # ========== 7. АНАЛИЗ КАЖДОЙ ПОЗИЦИИ ==========
+            for figi, position in positions_to_analyze:
+                # 7.1. Получение текущей цены
                 current_price = prices_dict.get(figi)
                 if not current_price:
-                    # Fallback: отдельный запрос только если не получили
-                    current_price = tbank.get_current_price(figi)
+                    current_price = tbank.get_current_price(figi)  # fallback
                 if not current_price:
                     warning(f"   ⚠️ {position.ticker}: не удалось получить цену")
                     continue
 
-                # ========== 1. РАСЧЁТ ТЕКУЩЕЙ ПРИБЫЛИ ==========
+                # 7.2. Расчёт текущей прибыли
                 if position.side.value == "LONG":
                     profit_pct = (current_price - position.avg_price) / position.avg_price * 100
-                    entry_price = position.avg_price
                 else:
                     profit_pct = (position.avg_price - current_price) / position.avg_price * 100
-                    entry_price = position.avg_price
 
-                # ========== 2. ПОЛУЧАЕМ ТЕХНИЧЕСКИЙ АНАЛИЗ ДЛЯ ДИНАМИЧЕСКИХ УРОВНЕЙ ==========
+                # ========== 8. ПРОПУСК ГЛУБОКО УБЫТОЧНЫХ ПОЗИЦИЙ (> -2%) ==========
+                if profit_pct < -2:
+                    debug(f"   ⏸️ {position.ticker}: убыток {profit_pct:.1f}%, пропускаем тех.анализ")
+                    continue
+
+                # ========== 9. ТЕХНИЧЕСКИЙ АНАЛИЗ (С КЭШЕМ 300 СЕКУНД) ==========
                 tech_analysis = self._analyze_position_technicals(
                     position.ticker, figi, position.side.value,
                     current_price, position.avg_price
@@ -3188,21 +3537,16 @@ class TradingLoop:
                 atr_pct = tech_analysis.get('atr_pct', 1.5)
                 local_trend = tech_analysis.get('local_trend', 'neutral')
 
-                # ========== 3. ДИНАМИЧЕСКИЙ ТРЕЙЛИНГ-СТОП НА ОСНОВЕ ATR ==========
-                # Базовый откат = половина ATR (но не менее 0.3% и не более 2.5%)
+                # ========== 10. ДИНАМИЧЕСКИЙ ТРЕЙЛИНГ-СТОП ==========
                 trailing_drawdown_pct = max(0.3, min(2.5, atr_pct * 0.5))
 
-                # Корректировка по тренду
                 if local_trend == position.side.value.lower():
-                    # По тренду — можно больше (оставляем прибыль расти)
                     trailing_drawdown_pct = min(3.0, trailing_drawdown_pct * 1.5)
                     trend_bonus = f" (по тренду +50%)"
                 else:
-                    # Против тренда — фиксируем быстрее
                     trailing_drawdown_pct = max(0.3, trailing_drawdown_pct * 0.8)
                     trend_bonus = f" (против тренда -20%)"
 
-                # Корректировка по волатильности рынка
                 market_volatility = getattr(config, 'market_volatility', 0.01)
                 if market_volatility > 0.02:
                     trailing_drawdown_pct *= 1.3
@@ -3213,10 +3557,9 @@ class TradingLoop:
                 else:
                     volatility_bonus = ""
 
-                # Ограничиваем финальное значение
                 trailing_drawdown_pct = max(0.3, min(3.0, trailing_drawdown_pct))
 
-                # ========== 4. ИНИЦИАЛИЗАЦИЯ И ОБНОВЛЕНИЕ МАКСИМУМОВ ==========
+                # ========== 11. ИНИЦИАЛИЗАЦИЯ МАКСИМУМОВ ==========
                 if not hasattr(position, 'max_profit_pct'):
                     position.max_profit_pct = profit_pct
                     position.max_profit_time = get_moscow_time()
@@ -3224,7 +3567,7 @@ class TradingLoop:
 
                     info(f"\n   📊 {position.ticker}: инициализирован трейлинг-стоп")
                     info(f"      📐 ATR: {atr_pct:.2f}%")
-                    info(f"      🔻 Откат для срабатывания: {trailing_drawdown_pct:.2f}%{trend_bonus}{volatility_bonus}")
+                    info(f"      🔻 Откат: {trailing_drawdown_pct:.2f}%{trend_bonus}{volatility_bonus}")
                     info(f"      📈 Текущий P&L: {profit_pct:+.2f}%")
                     if profit_pct > 0:
                         if position.side.value == "LONG":
@@ -3233,64 +3576,34 @@ class TradingLoop:
                             stop_price = current_price * (1 + trailing_drawdown_pct / 100)
                         info(f"      🛑 Стоп-цена: {stop_price:.2f}₽")
 
-                # Обновляем максимум прибыли
+                # ========== 12. ОБНОВЛЕНИЕ МАКСИМУМА ==========
                 if profit_pct > position.max_profit_pct:
                     old_max = position.max_profit_pct
                     position.max_profit_pct = profit_pct
                     position.max_profit_time = get_moscow_time()
                     position.trailing_drawdown_pct = trailing_drawdown_pct
 
-                    # Рассчитываем новую стоп-цену
                     if position.side.value == "LONG":
                         stop_price = current_price * (1 - trailing_drawdown_pct / 100)
                     else:
                         stop_price = current_price * (1 + trailing_drawdown_pct / 100)
 
                     info(f"\n   📈 {position.ticker}: НОВЫЙ МАКСИМУМ ПРИБЫЛИ!")
-                    info(f"      📊 Был: {old_max:+.2f}% → Стал: {profit_pct:+.2f}%")
-                    info(f"      💰 Текущая цена: {current_price:.2f}₽")
-                    info(f"      🔻 Откат для срабатывания: {trailing_drawdown_pct:.2f}%")
+                    info(f"      📊 {old_max:+.2f}% → {profit_pct:+.2f}%")
                     info(f"      🛑 Новый стоп: {stop_price:.2f}₽")
 
-                    # Отправляем уведомление в Telegram при значительном обновлении
-                    if profit_pct - old_max > 1.0:
-                        try:
-                            telegram = _get_telegram()
-                            if telegram:
-                                telegram.send_message(
-                                    f"📈 **ОБНОВЛЕНИЕ МАКСИМУМА**\n\n"
-                                    f"{position.ticker} ({position.side.value})\n"
-                                    f"📊 P&L: {old_max:+.2f}% → {profit_pct:+.2f}%\n"
-                                    f"💰 Цена: {entry_price:.2f}₽ → {current_price:.2f}₽\n"
-                                    f"🛑 Стоп: {stop_price:.2f}₽ (откат {trailing_drawdown_pct:.1f}%)"
-                                )
-                        except Exception as e:
-                            debug(f"   ⚠️ Ошибка отправки Telegram: {e}")
-
-                # ========== 5. ПРОВЕРКА ОТКАТА ОТ МАКСИМУМА (ТРЕЙЛИНГ-СТОП) ==========
-                if position.max_profit_pct > 1.0:  # Активируется только при прибыли >1%
+                # ========== 13. ПРОВЕРКА ТРЕЙЛИНГ-СТОПА ==========
+                if position.max_profit_pct > 1.0:
                     drawdown = position.max_profit_pct - profit_pct
                     trailing_pct = getattr(position, 'trailing_drawdown_pct', trailing_drawdown_pct)
-
-                    # Логируем текущий откат (каждые 0.1% изменения)
-                    if drawdown > 0 and (not hasattr(position, '_last_drawdown_log') or
-                                         abs(drawdown - position._last_drawdown_log) > 0.1):
-                        position._last_drawdown_log = drawdown
-                        debug(f"   📊 {position.ticker}: откат от максимума: {drawdown:.2f}% / {trailing_pct:.2f}% "
-                              f"(макс: {position.max_profit_pct:+.2f}%, тек: {profit_pct:+.2f}%)")
 
                     if drawdown > trailing_pct:
                         warning(f"\n   {'⚠️' * 30}")
                         warning(f"   🎯 {position.ticker}: СРАБОТАЛ ТРЕЙЛИНГ-СТОП!")
-                        warning(f"   {'⚠️' * 30}")
-                        warning(f"      📈 Максимум P&L: {position.max_profit_pct:+.2f}%")
-                        warning(f"      📉 Текущий P&L: {profit_pct:+.2f}%")
+                        warning(f"      📈 Максимум: {position.max_profit_pct:+.2f}%")
+                        warning(f"      📉 Текущий: {profit_pct:+.2f}%")
                         warning(f"      📉 Откат: {drawdown:.2f}% > {trailing_pct:.2f}%")
-                        warning(f"      📊 ATR: {atr_pct:.2f}%")
-                        warning(f"      💰 Цена входа: {entry_price:.2f}₽")
-                        warning(f"      💰 Текущая цена: {current_price:.2f}₽")
 
-                        # Закрываем позицию
                         try:
                             if position.side.value == "LONG":
                                 success = _get_tbank().sell(figi, position.quantity, use_market=True)
@@ -3299,94 +3612,13 @@ class TradingLoop:
 
                             if success:
                                 success(f"   ✅ {position.ticker} закрыт по трейлинг-стопу!")
-
-                                # Отправляем уведомление в Telegram
-                                try:
-                                    telegram = _get_telegram()
-                                    if telegram:
-                                        telegram.send_message(
-                                            f"🎯 **ТРЕЙЛИНГ-СТОП СРАБОТАЛ!**\n\n"
-                                            f"{position.ticker} ({position.side.value})\n"
-                                            f"📈 Максимум: {position.max_profit_pct:+.2f}%\n"
-                                            f"📉 Закрыто: {profit_pct:+.2f}%\n"
-                                            f"💰 Прибыль: {profit_pct:+.2f}%\n"
-                                            f"🛑 Откат: {drawdown:.2f}%"
-                                        )
-                                except Exception:
-                                    pass
+                                position_manager.remove_position(figi)
                             else:
-                                error(f"   ❌ Не удалось закрыть {position.ticker} по трейлинг-стопу")
+                                error(f"   ❌ Не удалось закрыть {position.ticker}")
                         except Exception as e:
-                            error(f"   ❌ Ошибка при закрытии {position.ticker}: {e}")
+                            error(f"   ❌ Ошибка закрытия {position.ticker}: {e}")
 
-                        position_manager.remove_position(figi)
-                        continue
-
-                # ========== 6. ДИНАМИЧЕСКИЕ ТЕЙК-ПРОФИТ И СТОП-ЛОСС ==========
-                # Рассчитываем TP на основе ATR и локального тренда
-                if local_trend == position.side.value.lower():
-                    take_profit = atr_pct * 2.5
-                    tp_reason = f"по тренду (2.5×ATR)"
-                else:
-                    take_profit = atr_pct * 1.2
-                    tp_reason = f"против тренда (1.2×ATR)"
-
-                take_profit = min(8.0, max(1.0, take_profit))
-                stop_loss = atr_pct * 1.2
-
-                # Проверяем ТЕЙК-ПРОФИТ
-                if profit_pct >= take_profit:
-                    info(f"\n   {'💰' * 30}")
-                    info(f"   🎯 {position.ticker}: ТЕЙК-ПРОФИТ ДОСТИГНУТ!")
-                    info(f"   {'💰' * 30}")
-                    info(f"      📊 P&L: {profit_pct:.2f}% >= {take_profit:.2f}% ({tp_reason})")
-                    info(f"      💰 Цена входа: {entry_price:.2f}₽")
-                    info(f"      💰 Текущая цена: {current_price:.2f}₽")
-                    info(f"      📈 Прибыль: {profit_pct:+.2f}%")
-
-                    try:
-                        if position.side.value == "LONG":
-                            success = _get_tbank().sell(figi, position.quantity, use_market=True)
-                        else:
-                            success = _get_tbank().buy(figi, position.quantity, use_market=True)
-
-                        if success:
-                            success(f"   ✅ {position.ticker} закрыт по тейк-профиту!")
-                        else:
-                            error(f"   ❌ Не удалось закрыть {position.ticker} по тейк-профиту")
-                    except Exception as e:
-                        error(f"   ❌ Ошибка при закрытии {position.ticker}: {e}")
-
-                    position_manager.remove_position(figi)
-                    continue
-
-                # Проверяем СТОП-ЛОСС
-                if profit_pct <= -stop_loss:
-                    warning(f"\n   {'🛑' * 30}")
-                    warning(f"   🛑 {position.ticker}: СТОП-ЛОСС СРАБОТАЛ!")
-                    warning(f"   {'🛑' * 30}")
-                    warning(f"      📊 P&L: {profit_pct:.2f}% <= -{stop_loss:.2f}%")
-                    warning(f"      💰 Цена входа: {entry_price:.2f}₽")
-                    warning(f"      💰 Текущая цена: {current_price:.2f}₽")
-                    warning(f"      📉 Убыток: {profit_pct:.2f}%")
-
-                    try:
-                        if position.side.value == "LONG":
-                            success = _get_tbank().sell(figi, position.quantity, use_market=True)
-                        else:
-                            success = _get_tbank().buy(figi, position.quantity, use_market=True)
-
-                        if success:
-                            success(f"   ✅ {position.ticker} закрыт по стоп-лоссу")
-                        else:
-                            error(f"   ❌ Не удалось закрыть {position.ticker} по стоп-лоссу")
-                    except Exception as e:
-                        error(f"   ❌ Ошибка при закрытии {position.ticker}: {e}")
-
-                    position_manager.remove_position(figi)
-                    continue
-
-            debug(f"   ✅ Позиции проверены")
+            debug(f"   ✅ Проверка позиций завершена (обработано {len(positions_to_analyze)} позиций)")
 
         except Exception as e:
             error(f"   ❌ Ошибка проверки позиций: {e}")
@@ -3405,13 +3637,23 @@ class TradingLoop:
             info("📭 Нет открытых позиций")
             return
 
+        # ✅ СОБИРАЕМ FIGI ДЛЯ BATCH-ЗАПРОСА
+        figis_for_status = list(positions.keys())
+        prices_for_status = {}
+        if figis_for_status:
+            prices_for_status = tbank.get_last_prices_batch(figis_for_status)
+            debug(f"   📡 Batch-запрос цен для {len(prices_for_status)}/{len(figis_for_status)} позиций (trailing status)")
+
         info(f"\n{'=' * 80}")
         info(f"📊 СТАТУС ТРЕЙЛИНГ-СТОПА")
         info(f"📅 Время: {get_moscow_time().strftime('%H:%M:%S')}")
         info(f"{'=' * 80}")
 
         for figi, position in positions.items():
-            current_price = tbank.get_current_price(figi)
+            # ✅ БЕРЁМ ЦЕНУ ИЗ BATCH-ЗАПРОСА
+            current_price = prices_for_status.get(figi)
+            if not current_price:
+                current_price = tbank.get_current_price(figi)  # fallback
             if not current_price:
                 continue
 
@@ -3691,28 +3933,28 @@ class TradingLoop:
 
 
 class PositionMonitor(threading.Thread):
-    """ОТДЕЛЬНЫЙ ПОТОК ДЛЯ МОНИТОРИНГА ПОЗИЦИЙ (каждые 2 секунды!)"""
+    """ОТДЕЛЬНЫЙ ПОТОК ДЛЯ МОНИТОРИНГА ПОЗИЦИЙ"""
 
     def __init__(self, trading_loop):
         super().__init__(daemon=True)
         self.trading_loop = trading_loop
         self._running = False
+        # ✅ ИЗМЕНЕНО: 2 → 5 СЕКУНД (или 10 для экономии)
         self.check_interval = 5
 
     def run(self):
         self._running = True
         while self._running:
             try:
-                # ✅ Проверяем торговое время
                 if self.trading_loop._is_trading_time():
                     self.trading_loop._check_positions()
-                    time.sleep(2)
+                    # ✅ ИЗМЕНЕНО: 2 → 5 СЕКУНД
+                    time.sleep(self.check_interval)
                 else:
-                    # В не торговое время проверяем редко
-                    time.sleep(30)
+                    time.sleep(60)
             except Exception as e:
                 debug(f"PositionMonitor error: {e}")
-                time.sleep(5)
+                time.sleep(self.check_interval)
 
     def stop(self):
         self._running = False

@@ -404,7 +404,7 @@ if figi:
                 prices=prices,
                 volumes=volumes,
                 name=test_ticker,
-                instrument_id=figi,
+                figi=figi,  # ✅ ПРАВИЛЬНО
                 candles=[{'close': p, 'volume': v} for p, v in zip(prices, volumes)]
             )
 

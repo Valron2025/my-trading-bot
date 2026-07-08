@@ -37,6 +37,22 @@ class PositionOpener:
         self._temp_sl = None
         self._temp_ts = None
         self._position_manager = None
+        
+        self._check_cache = {}
+        self._check_cache_ttl = 30  # 30 секунд
+        self._otc_cache = {}
+        self._otc_cache_ttl = 3600  # 1 час для OTC
+        
+    def _check_with_cache(self, cache_key: str, check_func, *args, **kwargs):
+        """Проверка с кэшированием"""
+        if cache_key in self._check_cache:
+            cached_time, result = self._check_cache[cache_key]
+            if (time.time() - cached_time) < self._check_cache_ttl:
+                return result
+        
+        result = check_func(*args, **kwargs)
+        self._check_cache[cache_key] = (time.time(), result)
+        return result
 
     def _get_position_manager(self):
         """Ленивое получение PositionManager для избежания циклических импортов"""
@@ -61,67 +77,90 @@ class PositionOpener:
         )
         from trading_bot.api.tbank_client import tbank
 
-        now = get_moscow_time()
         ticker_str = ticker or (figi[:8] if figi else "unknown")
+        
+        # ✅ ПРОВЕРКА КЭША
+        cache_key = f"order_type_{figi}_{ticker_str}"
+        if cache_key in self._check_cache:
+            cached_time, result = self._check_cache[cache_key]
+            if (time.time() - cached_time) < 60:
+                return result
 
         info(f"   🔍 ВЫБОР ТИПА ЗАЯВКИ ДЛЯ {ticker_str}:")
 
-        # ========== 1. ПРОВЕРКА ДОСТУПНОСТИ РЫНОЧНЫХ ЗАЯВОК ДЛЯ ИНСТРУМЕНТА ==========
+        # 1. ПРОВЕРКА ДОСТУПНОСТИ РЫНОЧНЫХ ЗАЯВОК
         market_available = True
+        limit_available = True
+        
         if figi:
             try:
                 status = tbank.get_trading_status(figi)
                 market_available = status.get('market_order_available', False)
-                info(
-                    f"      📊 Рыночные заявки для {ticker_str}: {'✅ ДОСТУПНЫ' if market_available else '❌ НЕ ДОСТУПНЫ'}")
+                limit_available = status.get('limit_order_available', False)
+                info(f"      📊 Рыночные: {'✅' if market_available else '❌'}, Лимитные: {'✅' if limit_available else '❌'}")
             except Exception as e:
                 debug(f"      ⚠️ Ошибка проверки: {e}")
 
-        # ========== 2. ЕСЛИ РЫНОЧНЫЕ НЕ ДОСТУПНЫ - ТОЛЬКО ЛИМИТНЫЕ ==========
-        if not market_available:
+        # 2. ЕСЛИ РЫНОЧНЫЕ НЕ ДОСТУПНЫ, НО ЛИМИТНЫЕ ДОСТУПНЫ
+        if not market_available and limit_available:
             info(f"      📋 ИСПОЛЬЗУЕМ: ЛИМИТНУЮ ЗАЯВКУ (рыночные недоступны)")
-            return False, f"limit (market orders not available for {ticker_str})"
+            result = (False, f"limit (market orders not available for {ticker_str})")
+            self._check_cache[cache_key] = (time.time(), result)
+            return result
 
-        # ========== 3. ПРИНУДИТЕЛЬНОЕ ИСПОЛЬЗОВАНИЕ ЛИМИТНЫХ ИЗ НАСТРОЕК ==========
+        # 3. ЕСЛИ НЕТ НИ РЫНОЧНЫХ, НИ ЛИМИТНЫХ
+        if not market_available and not limit_available:
+            info(f"      ❌ НЕТ ДОСТУПНЫХ ТИПОВ ЗАЯВОК!")
+            result = (False, f"no orders available for {ticker_str}")
+            self._check_cache[cache_key] = (time.time(), result)
+            return result
+
+        # 4. ПРИНУДИТЕЛЬНОЕ ИСПОЛЬЗОВАНИЕ
         if getattr(config, 'use_limit_orders', False):
             if is_evening_session_time():
-                warning(f"      ⚠️ Вечерняя сессия: лимитные заявки НЕ РАБОТАЮТ!")
-                info(f"      🟢 ИСПОЛЬЗУЕМ: РЫНОЧНУЮ ЗАЯВКУ")
-                return True, "market (evening session forced)"
-            info(f"      📋 ИСПОЛЬЗУЕМ: ЛИМИТНУЮ ЗАЯВКУ (config forced)")
-            return False, "limit (config forced)"
+                result = (True, "market (evening session forced)")
+                self._check_cache[cache_key] = (time.time(), result)
+                return result
+            result = (False, "limit (config forced)")
+            self._check_cache[cache_key] = (time.time(), result)
+            return result
 
-        # ========== 4. ПРИНУДИТЕЛЬНОЕ ИСПОЛЬЗОВАНИЕ РЫНОЧНЫХ ИЗ НАСТРОЕК ==========
         if getattr(config, 'use_market_orders', False):
-            info(f"      🟢 ИСПОЛЬЗУЕМ: РЫНОЧНУЮ ЗАЯВКУ (config forced)")
-            return True, "market (config forced)"
+            result = (True, "market (config forced)")
+            self._check_cache[cache_key] = (time.time(), result)
+            return result
 
-        # ========== 5. PRE-MARKET (06:50 - 09:50) - ТОЛЬКО ЛИМИТНЫЕ ==========
+        # 5. PRE-MARKET
         if is_pre_market_time():
-            info(f"      🌅 Pre-market: ИСПОЛЬЗУЕМ ЛИМИТНУЮ ЗАЯВКУ")
-            return False, "limit (pre-market)"
+            result = (False, "limit (pre-market)")
+            self._check_cache[cache_key] = (time.time(), result)
+            return result
 
-        # ========== 6. ВЕЧЕРНЯЯ СЕССИЯ (19:00 - 23:50) - РЫНОЧНЫЕ ==========
+        # 6. ВЕЧЕРНЯЯ СЕССИЯ
         if is_evening_session_time():
-            info(f"      🌙 Вечерняя сессия: ИСПОЛЬЗУЕМ РЫНОЧНУЮ ЗАЯВКУ")
-            return True, "market (evening session)"
+            result = (True, "market (evening session)")
+            self._check_cache[cache_key] = (time.time(), result)
+            return result
 
-        # ========== 7. ОСНОВНАЯ СЕССИЯ (10:00 - 18:59) - ПРЕДПОЧИТАЕМ РЫНОЧНЫЕ ==========
+        # 7. ОСНОВНАЯ СЕССИЯ
         if is_main_session_time():
             if getattr(config, 'prefer_market_in_main', True):
-                info(f"      🏛️ Основная сессия: ИСПОЛЬЗУЕМ РЫНОЧНУЮ ЗАЯВКУ")
-                return True, "market (main session, fast execution)"
-            info(f"      🏛️ Основная сессия: ИСПОЛЬЗУЕМ ЛИМИТНУЮ ЗАЯВКУ")
-            return False, "limit (main session)"
+                result = (True, "market (main session)")
+                self._check_cache[cache_key] = (time.time(), result)
+                return result
+            result = (False, "limit (main session)")
+            self._check_cache[cache_key] = (time.time(), result)
+            return result
 
-        # ========== 8. ПО УМОЛЧАНИЮ - РЫНОЧНЫЕ ==========
-        info(f"      🟢 ИСПОЛЬЗУЕМ: РЫНОЧНУЮ ЗАЯВКУ (default)")
-        return True, "market (default)"
+        # ПО УМОЛЧАНИЮ
+        result = (True, "market (default)")
+        self._check_cache[cache_key] = (time.time(), result)
+        return result
 
     # ========== LONG ПОЗИЦИИ ==========
 
     def open_long_market(self, stock: StockCandidate, quantity: int) -> bool:
-        """Открытие LONG позиции с АВТОМАТИЧЕСКИМ ВЫБОРОМ типа заявки и детальным логированием"""
+        """Открытие LONG позиции с АВТОМАТИЧЕСКИМ ВЫБОРОМ типа заявки"""
         from trading_bot.api.tbank_client import tbank
 
         ticker = stock.ticker
@@ -146,21 +185,34 @@ class PositionOpener:
         # ========== ПРОВЕРКА OTC ==========
         try:
             if tbank.is_confirmation_required(stock.figi):
-                warning(f"⛔ {ticker} - OTC инструмент (требует подтверждения)")
-                self.bot._add_to_blacklist(ticker, minutes=60)
+                warning(f"⛔ {ticker} - требует подтверждения сделок (OTC)")
                 info(f"   ❌ ОТКАЗ: OTC инструмент")
                 return False
 
             is_otc, otc_reason = _get_instrument_filter().is_otc_instrument(stock.figi, ticker)
             if is_otc:
-                error(f"❌ {ticker} - OTC ИНСТРУМЕНТ! НЕВОЗМОЖНО ЗАКРЫТЬ ЧЕРЕЗ API!")
+                error(f"❌ {ticker} - OTC ИНСТРУМЕНТ!")
                 error(f"   Причина: {otc_reason}")
-                self.bot._add_to_blacklist(ticker, minutes=3600)
                 info(f"   ❌ ОТКАЗ: OTC (инструмент фильтр)")
                 return False
+                
+            # ✅ Проверка доступности рыночных заявок
+            trading_status = tbank.get_trading_status(stock.figi)
+            if not trading_status.get('market_order_available', False):
+                if trading_status.get('limit_order_available', False):
+                    warning(f"⚠️ {ticker}: рыночные заявки недоступны, но лимитные доступны")
+                    # Пробуем лимитную заявку
+                    info(f"   🔄 Переключаемся на лимитную заявку")
+                    use_market = False
+                else:
+                    warning(f"⛔ {ticker} - нет доступных типов заявок!")
+                    info(f"   ❌ ОТКАЗ: заявки недоступны")
+                    return False
+            else:
+                use_market, order_reason = self._get_order_type(stock.figi, ticker)
+                    
         except Exception as e:
             warning(f"⚠️ Ошибка проверки OTC: {e}")
-            info(f"   ❌ ОТКАЗ: ошибка OTC проверки")
             return False
 
         # ========== ПРОВЕРКА СПРЕДА ==========
@@ -185,6 +237,22 @@ class PositionOpener:
             info(f"   ❌ ОТКАЗ: количество меньше лота")
             return False
 
+        # ========== ПРОВЕРКА МАКСИМАЛЬНОГО КОЛИЧЕСТВА ==========
+        try:
+            max_lots = tbank.get_max_lots(stock.figi, "BUY")
+            if max_lots > 0:
+                max_quantity = max_lots * stock.lot
+                if quantity > max_quantity:
+                    warning(f"⚠️ {ticker}: запрошено {quantity} шт, макс. {max_quantity} шт")
+                    # ✅ КОРРЕКТИРУЕМ КОЛИЧЕСТВО
+                    quantity = max_quantity
+                    if quantity < stock.lot:
+                        info(f"   ❌ ОТКАЗ: даже после коррекции меньше лота")
+                        return False
+                    info(f"   🔄 Количество скорректировано до {quantity} шт (лимит {max_quantity})")
+        except Exception as e:
+            debug(f"   ⚠️ Не удалось получить max_lots: {e}")
+
         # ========== ПРОВЕРКА СРЕДСТВ ==========
         if not self._check_funds(stock.figi, quantity, stock.price, ticker):
             info(f"   ❌ ОТКАЗ: недостаточно средств (check_funds)")
@@ -201,13 +269,13 @@ class PositionOpener:
         try:
             info(f"📡 ОТПРАВКА заявки: BUY {quantity} {ticker}")
             if use_market:
-                success_flag = tbank.buy(stock.figi, quantity, use_market=True)
+                result = tbank.buy(stock.figi, quantity, use_market=True)
             else:
-                limit_price = tbank._round_to_min_increment(stock.figi, stock.price * 1.01)
+                limit_price = tbank._round_to_min_increment_advanced(stock.figi, stock.price * 1.01)
                 info(f"   📊 Лимитная цена: {limit_price:.2f}₽ (рынок: {stock.price:.2f}₽)")
-                success_flag = tbank.place_limit_order(stock.figi, quantity, "BUY", limit_price)
+                result = tbank.place_limit_order(stock.figi, quantity, "BUY", limit_price)
 
-            if success_flag:
+            if result:
                 success(f"✅ {ticker}: LONG позиция успешно открыта ({order_reason})")
                 self._add_position_to_manager(stock, quantity, stock.price, OrderSide.LONG)
                 self._long_pending.pop(pending_key, None)
@@ -218,8 +286,8 @@ class PositionOpener:
                 if not use_market:
                     warning(f"   🔄 Пробуем рыночную заявку как fallback...")
                     try:
-                        success_flag = tbank.buy(stock.figi, quantity, use_market=True)
-                        if success_flag:
+                        result = tbank.buy(stock.figi, quantity, use_market=True)
+                        if result:
                             success(f"✅ {ticker}: LONG позиция открыта (рыночная fallback)")
                             self._add_position_to_manager(stock, quantity, stock.price, OrderSide.LONG)
                             self._long_pending.pop(pending_key, None)
@@ -480,8 +548,14 @@ class PositionOpener:
     # ========== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ==========
 
     def _check_funds(self, figi: str, quantity: int, price: float, ticker: str) -> bool:
-        """Проверка достаточности средств для LONG"""
+        """Проверка достаточности средств для LONG с КЭШИРОВАНИЕМ"""
         from trading_bot.api.tbank_client import tbank
+        
+        cache_key = f"funds_{figi}_{quantity}_{int(price*100)}"
+        if cache_key in self._check_cache:
+            cached_time, result = self._check_cache[cache_key]
+            if (time.time() - cached_time) < 10:  # 10 секунд
+                return result
 
         try:
             available, total_capital, _ = tbank.get_available_funds()
@@ -489,20 +563,20 @@ class PositionOpener:
 
             MAX_POSITION_PCT = 0.7
             if total_cost > total_capital * MAX_POSITION_PCT:
-                warning(f"⚠️ {ticker}: {total_cost:.0f}₽ > {MAX_POSITION_PCT * 100:.0f}% капитала")
+                self._check_cache[cache_key] = (time.time(), False)
                 return False
 
             MIN_RESERVE = 300
             if available - total_cost < MIN_RESERVE:
-                warning(f"⚠️ {ticker}: после сделки останется {available - total_cost:.0f}₽ < {MIN_RESERVE}₽")
+                self._check_cache[cache_key] = (time.time(), False)
                 return False
 
             MIN_COVERAGE_PCT = 0.3
             if available < total_cost * MIN_COVERAGE_PCT:
-                warning(f"⚠️ {ticker}: свободных средств {available:.0f}₽ < {MIN_COVERAGE_PCT * 100:.0f}% суммы")
+                self._check_cache[cache_key] = (time.time(), False)
                 return False
 
-            info(f"   💰 Проверка средств: OK (нужно {total_cost:.0f}₽, свободно {available:.0f}₽)")
+            self._check_cache[cache_key] = (time.time(), True)
             return True
         except Exception as e:
             warning(f"   ⚠️ Не удалось проверить средства: {e}")

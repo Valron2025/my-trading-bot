@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+import os
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
@@ -33,98 +34,161 @@ class StockScanner:
         self._analysis_cache = {}
         self._price_cache = {}
         self._last_scan_time = 0
-        self._scan_interval = 30
+        self._scan_interval = int(os.environ.get('SCAN_INTERVAL', 60))  # ✅ 60 секунд
         self._cached_candidates = []
         self._low_liquidity_cache = {}
 
         # ПАРАМЕТРЫ ДЛЯ ОПТИМИЗАЦИИ
         self._scan_result_cache = {}  # {cache_key: {'candidates': [], 'timestamp': time}}
-        self._scan_cache_ttl = 60  # 60 секунд TTL для кэша сканирования
-        self.max_tickers_to_scan = 15
-        self.parallel_workers = 8
-        self._max_sequential = 30
+        self._scan_cache_ttl = int(os.environ.get('SCAN_CACHE_TTL', 120))  # ✅ 120 секунд
+        self.max_tickers_to_scan = int(os.environ.get('MAX_TICKERS_TO_SCAN', 10))  # ✅ 10
+        self.parallel_workers = int(os.environ.get('PARALLEL_WORKERS', 4))  # ✅ 4
+        self._max_sequential = int(os.environ.get('MAX_SEQUENTIAL', 30))  # ✅ 30
 
         if USE_UNIFIED_CACHE:
             self._unified_cache = UnifiedCache(default_ttl=30, name="stock_scanner")
 
-        self._candles_cache = TTLCache(default_ttl=60, max_size=500, name="scanner_candles")
+        self._candles_cache = TTLCache(default_ttl=120, max_size=500, name="scanner_candles")
+        self._liquidity_cache = TTLCache(default_ttl=3600, max_size=500, name="liquidity_cache")
+        self._price_cache_ttl = 10
+        
+        # ✅ АВТОМАТИЧЕСКИЙ РАСЧЁТ ПАРАМЕТРОВ
+        self._calculate_optimal_params()
+
+        info(f"📊 StockScanner: max_tickers={self.max_tickers_to_scan}, "
+             f"workers={self.parallel_workers}, scan_interval={self._scan_interval}с")
+        
+    def _calculate_optimal_params(self):
+        """Автоматический расчёт оптимальных параметров на основе системы"""
+        import psutil
+        import os
+        
+        # 1. Определяем мощность системы
+        cpu_count = psutil.cpu_count() or 2
+        mem = psutil.virtual_memory()
+        total_ram_mb = mem.total / (1024 * 1024)
+        
+        # 2. Определяем тип окружения (Render/VPS/Local)
+        is_render = os.environ.get('RENDER', False)
+        is_vps = os.environ.get('VPS', False)
+        
+        # 3. Автоматический расчёт параметров
+        if is_render:
+            # Бесплатный Render: очень ограниченные ресурсы
+            self.max_tickers_to_scan = min(3, cpu_count)
+            self.parallel_workers = min(2, cpu_count)
+            self._scan_interval = 120  # 2 минуты
+            self._candles_cache_ttl = 300  # 5 минут
+            self._scan_cache_ttl = 180  # 3 минуты
+            self._min_api_interval = 2.0  # 2 секунды между запросами
+            
+        elif is_vps or cpu_count >= 4:
+            # VPS или мощный компьютер
+            self.max_tickers_to_scan = min(10, cpu_count * 2)
+            self.parallel_workers = min(8, cpu_count)
+            self._scan_interval = 60  # 1 минута
+            self._candles_cache_ttl = 120  # 2 минуты
+            self._scan_cache_ttl = 120  # 2 минуты
+            self._min_api_interval = 0.5
+            
+        else:
+            # Обычный компьютер
+            self.max_tickers_to_scan = min(5, cpu_count)
+            self.parallel_workers = min(4, cpu_count)
+            self._scan_interval = 90  # 1.5 минуты
+            self._candles_cache_ttl = 180  # 3 минуты
+            self._scan_cache_ttl = 150  # 2.5 минуты
+            self._min_api_interval = 1.0
+            
+        # 4. Расчёт на основе доступной памяти
+        if total_ram_mb < 1024:  # < 1GB
+            self.max_tickers_to_scan = min(self.max_tickers_to_scan, 3)
+            self._candles_cache_ttl = 600  # 10 минут (меньше запросов)
+            self._cache_max_size = 100
+        elif total_ram_mb < 2048:  # < 2GB
+            self.max_tickers_to_scan = min(self.max_tickers_to_scan, 5)
+            self._cache_max_size = 200
+        else:
+            self._cache_max_size = 500
+        
+        # 5. Расчёт на основе задержек API (если есть данные)
+        self._calculate_from_api_latency()
+        
+        info(f"📊 АВТО-ОПТИМИЗАЦИЯ: max_tickers={self.max_tickers_to_scan}, "
+             f"workers={self.parallel_workers}, interval={self._scan_interval}с, "
+             f"ram={total_ram_mb:.0f}MB, render={is_render}")
+    
+    def _calculate_from_api_latency(self):
+        """Расчёт параметров на основе задержек API"""
+        try:
+            from trading_bot.api.tbank_client import api_monitor
+            
+            stats = api_monitor.get_stats()
+            if not stats:
+                return
+            
+            # Средняя задержка API
+            avg_latency = 0
+            count = 0
+            for name, data in stats.items():
+                if 'get_last_prices_batch' in name or 'get_candles' in name:
+                    avg_latency += data['avg_ms']
+                    count += 1
+            
+            if count > 0:
+                avg_latency = avg_latency / count
+                
+                # Если API медленный (>1000ms) - уменьшаем нагрузку
+                if avg_latency > 1000:
+                    self.max_tickers_to_scan = min(self.max_tickers_to_scan, 3)
+                    self._scan_interval = max(self._scan_interval, 180)
+                    self.parallel_workers = min(self.parallel_workers, 2)
+                    info(f"   ⚠️ API медленный ({avg_latency:.0f}ms), снижена нагрузка")
+                    
+        except Exception as e:
+            debug(f"Не удалось получить статистику API: {e}")
 
     def _is_low_liquidity_ticker(self, ticker: str, figi: str = None) -> bool:
         """
-        ДИНАМИЧЕСКАЯ ПРОВЕРКА НИЗКОЛИКВИДНЫХ ТИКЕРОВ
-        С кэшированием результата на 1 час
+        ПРОВЕРКА ЛИКВИДНОСТИ С КЭШИРОВАНИЕМ (ускоренная версия)
         """
         from trading_bot.cache import TTLCache
+        from trading_bot.api.tbank_client import tbank
 
         ticker_upper = ticker.upper()
-
-        # Используем TTLCache для кэширования (1 час)
-        if not hasattr(self, '_liquidity_cache'):
-            self._liquidity_cache = TTLCache(default_ttl=3600, max_size=500, name="liquidity_cache")
 
         cached = self._liquidity_cache.get(ticker_upper)
         if cached is not None:
             return cached
 
         try:
-            from trading_bot.api.tbank_client import tbank
-
             if figi is None:
                 figi = tbank._get_figi_by_ticker(ticker_upper)
-
             if not figi:
                 self._liquidity_cache.set(ticker_upper, False)
                 return False
 
-            is_low = False
-            reason = ""
-
-            # 1. Проверка стакана
-            orderbook = tbank.get_orderbook(figi, depth=3)
+            orderbook = tbank.get_orderbook(figi, depth=1)
             if orderbook:
-                bid_volume = orderbook.get('bid_volume', 0)
-                ask_volume = orderbook.get('ask_volume', 0)
-                total_volume = bid_volume + ask_volume
-
-                if total_volume < 5000:
-                    is_low = True
-                    reason = f"объём стакана {total_volume} < 5000"
-
-            # 2. Проверка среднего объёма
-            if not is_low:
-                candles = tbank.get_candles(figi, days=5, interval_minutes=60)
-                if candles and len(candles) >= 5:
-                    volumes = [c[1] for c in candles if c[1] > 0]
-                    if volumes:
-                        avg_volume = sum(volumes) / len(volumes)
-                        if avg_volume < 50000:
-                            is_low = True
-                            reason = f"ср.объём {avg_volume:,.0f} < 50000"
-
-            # 3. Проверка спреда
-            if not is_low and orderbook:
-                best_bid = orderbook.get('best_bid')
-                best_ask = orderbook.get('best_ask')
-                if best_bid and best_ask and best_bid > 0:
+                best_bid = orderbook.get('best_bid', 0)
+                best_ask = orderbook.get('best_ask', 0)
+                
+                if best_bid > 0 and best_ask > 0:
                     spread_pct = (best_ask - best_bid) / best_bid * 100
                     if spread_pct > 0.5:
-                        is_low = True
-                        reason = f"спред {spread_pct:.2f}% > 0.5%"
+                        self._liquidity_cache.set(ticker_upper, True)
+                        debug(f"📊 {ticker}: низкая ликвидность (спред {spread_pct:.2f}%)")
+                        return True
 
-            if is_low:
-                debug(f"📊 {ticker}: низколиквидный тикер ({reason}), min_candles=15")
-            else:
-                debug(f"📊 {ticker}: нормальная ликвидность, min_candles=20")
-
-            self._liquidity_cache.set(ticker_upper, is_low)
-            return is_low
+            self._liquidity_cache.set(ticker_upper, False)
+            return False
 
         except Exception as e:
             debug(f"⚠️ Ошибка проверки ликвидности {ticker}: {e}")
             self._liquidity_cache.set(ticker_upper, False)
             return False
 
-    # ========== ОСНОВНОЙ МЕТОД SCAN (С АВТОВЫБОРОМ РЕЖИМА) ==========
+    # ========== ОСНОВНОЙ МЕТОД SCAN ==========
 
     async def scan(
             self,
@@ -133,16 +197,8 @@ class StockScanner:
             use_parallel: bool = True,
             trading_loop=None
     ) -> List[StockCandidate]:
-        """Сканирование рынка - АВТОМАТИЧЕСКИЙ ВЫБОР РЕЖИМА С КЭШИРОВАНИЕМ"""
+        """Сканирование рынка с улучшенным кэшированием"""
 
-        print("\n" + "=" * 80)
-        print("🔥🔥🔥🔥🔥 SCAN МЕТОД ВЫЗВАН! 🔥🔥🔥🔥🔥")
-        print(f"   available_funds = {available_funds}")
-        print(f"   force_refresh = {force_refresh}")
-        print(f"   use_parallel = {use_parallel}")
-        print("=" * 80 + "\n")
-
-        # ✅ ПРОВЕРКА КЭША РЕЗУЛЬТАТОВ СКАНИРОВАНИЯ
         cache_key = f"scan_{int(available_funds // 1000)}_{use_parallel}"
 
         if not force_refresh:
@@ -151,7 +207,6 @@ class StockScanner:
                 debug(f"   📦 Результаты сканирования из кэша (актуальны {self._scan_cache_ttl} сек)")
                 return cached['candidates'].copy() if cached['candidates'] else []
 
-        # Проверка обычного кэша
         now = time.time()
         if not force_refresh and now - self._last_scan_time < self._scan_interval:
             debug(f"⏸️ Используем кэш сканирования")
@@ -159,26 +214,21 @@ class StockScanner:
 
         info(f"🔍 Запуск сканирования рынка...")
 
-        # Получаем список акций
         all_shares = _get_tbank().get_all_shares(limit=500)
         rub_shares = [s for s in all_shares if s.get('currency') == 'rub']
 
-        # ✅ ДЛЯ БОЛЬШОГО КОЛИЧЕСТВА ТИКЕРОВ - ПАРАЛЛЕЛЬНЫЙ РЕЖИМ
         if use_parallel and len(rub_shares) > 20:
             info(f"🚀 Используем ПАРАЛЛЕЛЬНЫЙ режим ({min(len(rub_shares), self.max_tickers_to_scan)} тикеров)")
             candidates = await self._scan_parallel(available_funds, limit=self.max_tickers_to_scan)
         else:
-            # ✅ ДЛЯ МАЛОГО КОЛИЧЕСТВА - ПОСЛЕДОВАТЕЛЬНЫЙ
             info(f"📡 Используем ПОСЛЕДОВАТЕЛЬНЫЙ режим ({min(len(rub_shares), self._max_sequential)} тикеров)")
             candidates = await self._scan_sequential(available_funds, force_refresh, trading_loop)
 
-        # ✅ СОХРАНЕНИЕ В КЭШ РЕЗУЛЬТАТОВ
         self._scan_result_cache[cache_key] = {
             'candidates': candidates.copy() if candidates else [],
             'timestamp': time.time()
         }
 
-        # Сохраняем в обычный кэш
         self._cache_candidates(candidates)
         self._last_scan_time = now
 
@@ -190,29 +240,23 @@ class StockScanner:
         self._last_scan_time = 0
         info("🧹 Кэш сканирования очищен")
 
-    # ========== ПОСЛЕДОВАТЕЛЬНЫЙ АНАЛИЗ (СУЩЕСТВУЮЩАЯ ЛОГИКА) ==========
+    # ========== ПОСЛЕДОВАТЕЛЬНЫЙ АНАЛИЗ ==========
 
     async def _scan_sequential(
-            self,
-            available_funds: float,
-            force_refresh: bool = False,
-            trading_loop=None
+        self,
+        available_funds: float,
+        force_refresh: bool = False,
+        trading_loop=None
     ) -> List[StockCandidate]:
-        """ПОСЛЕДОВАТЕЛЬНЫЙ АНАЛИЗ - СУЩЕСТВУЮЩАЯ ЛОГИКА"""
+        """ПОСЛЕДОВАТЕЛЬНЫЙ АНАЛИЗ С ОГРАНИЧЕНИЕМ"""
 
-        # Получаем список акций
         all_shares = _get_tbank().get_all_shares(limit=500)
         rub_shares = [s for s in all_shares if s.get('currency') == 'rub']
 
-        # ✅ ИЗМЕНЕНО: 30 вместо 50
-        if len(rub_shares) > self._max_sequential:
-            rub_shares = rub_shares[:self._max_sequential]
-            info(f"📊 Ограничено до {self._max_sequential} акций для быстрого сканирования")
-
-        # # Ограничиваем количество для быстрой проверки
-        # if len(rub_shares) > 50:
-        #     rub_shares = rub_shares[:50]
-        #     info(f"📊 Ограничено до 50 акций для быстрого сканирования")
+        # ✅ ОГРАНИЧИВАЕМ КОЛИЧЕСТВО
+        if len(rub_shares) > self.max_tickers_to_scan:
+            rub_shares = rub_shares[:self.max_tickers_to_scan]
+            info(f"📊 Ограничено до {self.max_tickers_to_scan} акций для сканирования")
 
         if not rub_shares:
             warning("⚠️ Не удалось получить список акций")
@@ -246,24 +290,20 @@ class StockScanner:
 
             lot_price = current_price * lot
 
-            # Проверка минимальной суммы сделки
             if lot_price < config.min_trade_amount:
                 skipped_low_lot += 1
                 continue
 
-            # Фильтрация по OTC и ликвидности
             if not self._check_instrument_filter(figi, ticker, current_price):
                 skipped_filter += 1
                 continue
 
-            # Получаем анализ
             analysis = await self._get_combined_analysis(figi, ticker, current_price, trading_loop=trading_loop)
 
             if analysis is None:
                 skipped_analysis_none += 1
                 continue
 
-            # Проверка порогов для входа
             if analysis.score >= config.long_score_threshold:
                 side = OrderSide.LONG
             elif analysis.score <= config.short_score_threshold and config.use_short:
@@ -271,7 +311,6 @@ class StockScanner:
             else:
                 continue
 
-            # Создаём кандидата
             candidate = StockCandidate(
                 figi=figi,
                 name=name,
@@ -286,7 +325,6 @@ class StockScanner:
             candidates.append(candidate)
             processed += 1
 
-        # Сортируем по score
         candidates.sort(key=lambda x: x.rank_score, reverse=True)
 
         info(f"📊 Результаты сканирования:")
@@ -305,36 +343,53 @@ class StockScanner:
     async def _scan_parallel(
             self,
             available_funds: float,
-            limit: int = 30,
-            max_concurrent: int = 15
+            limit: int = 15,
+            max_concurrent: int = 8
     ) -> List[StockCandidate]:
-        """ПАРАЛЛЕЛЬНОЕ СКАНИРОВАНИЕ РЫНКА"""
+        """ПАРАЛЛЕЛЬНОЕ СКАНИРОВАНИЕ С ПРЕДВАРИТЕЛЬНОЙ ФИЛЬТРАЦИЕЙ"""
         from trading_bot.api.tbank_client import tbank
         import asyncio
 
-        # ✅ ИСПОЛЬЗУЕМ НОВЫЕ ПАРАМЕТРЫ
-        info(f"🚀 ЗАПУСК ПАРАЛЛЕЛЬНОГО СКАНИРОВАНИЯ (макс {self.parallel_workers} потоков)")
+        info(f"🚀 ПАРАЛЛЕЛЬНОЕ СКАНИРОВАНИЕ (макс {self.parallel_workers} потоков)")
 
-        # Получаем список акций
         all_shares = tbank.get_all_shares(limit=500)
-        rub_shares = [s for s in all_shares if s.get('currency') == 'rub'][:self.max_tickers_to_scan]
+        rub_shares = [s for s in all_shares if s.get('currency') == 'rub']
 
-        info(f"📊 Будет проанализировано {len(rub_shares)} тикеров")
+        # ПРЕДВАРИТЕЛЬНАЯ ФИЛЬТРАЦИЯ
+        filtered_shares = []
+        for share in rub_shares:
+            ticker = share.get('ticker')
+            figi = share.get('figi')
+            
+            if not ticker or not figi:
+                continue
+                
+            if tbank.is_confirmation_required(figi):
+                continue
+                
+            if self._is_low_liquidity_ticker(ticker, figi):
+                continue
+                
+            filtered_shares.append(share)
+            
+            if len(filtered_shares) >= self.max_tickers_to_scan:
+                break
 
-        # Семафор для ограничения параллельности
+        info(f"📊 После фильтрации: {len(filtered_shares)} тикеров из {len(rub_shares)}")
+
+        if not filtered_shares:
+            return []
+
         semaphore = asyncio.Semaphore(self.parallel_workers)
 
-        async def analyze_one_with_limit(share):
+        async def analyze_with_limit(share):
             async with semaphore:
                 return await self._analyze_single_stock_async(share, available_funds)
 
-        # Создаём задачи
-        tasks = [analyze_one_with_limit(share) for share in rub_shares]
+        tasks = [analyze_with_limit(share) for share in filtered_shares]
 
-        # Запускаем все задачи параллельно
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Собираем успешные результаты
         candidates = []
         for result in results:
             if result and not isinstance(result, Exception):
@@ -342,21 +397,18 @@ class StockScanner:
             elif isinstance(result, Exception):
                 debug(f"   ⚠️ Ошибка: {str(result)[:80]}")
 
-        # Сортируем по score
         candidates.sort(key=lambda x: x.rank_score, reverse=True)
 
-        info(f"✅ ПАРАЛЛЕЛЬНОЕ СКАНИРОВАНИЕ ЗАВЕРШЕНО! Найдено {len(candidates)} кандидатов")
+        info(f"✅ ПАРАЛЛЕЛЬНОЕ СКАНИРОВАНИЕ: найдено {len(candidates)} кандидатов")
 
-        return candidates
+        return candidates[:5]
 
     async def _analyze_single_stock_async(
         self,
         share: Dict,
         available_funds: float
     ) -> Optional[StockCandidate]:
-        """
-        АНАЛИЗ ОДНОГО ТИКЕРА (асинхронная версия)
-        """
+        """АНАЛИЗ ОДНОГО ТИКЕРА (асинхронная версия)"""
         from trading_bot.api.tbank_client import tbank
         from trading_bot.models import StockCandidate, OrderSide
         import asyncio
@@ -369,24 +421,20 @@ class StockScanner:
             return None
 
         try:
-            # ========== 1. ПОЛУЧАЕМ ЦЕНУ ==========
             current_price = tbank.get_current_price(figi)
             if not current_price or current_price <= 0:
                 return None
 
-            # ========== 2. ПРОВЕРКА OTC ==========
             if tbank.is_confirmation_required(figi):
                 return None
 
-            # ========== 3. ПОЛУЧАЕМ СВЕЧИ ==========
             candles = await asyncio.to_thread(
-                tbank.get_candles, figi, 3, 15  # 3 дня, 15-минутные свечи
+                tbank.get_candles, figi, 3, 15
             )
 
             if not candles or len(candles) < 20:
                 return None
 
-            # ========== 4. ТЕХНИЧЕСКИЙ АНАЛИЗ ==========
             analysis = await asyncio.to_thread(
                 self._run_technical_analysis,
                 ticker, candles, current_price
@@ -397,7 +445,6 @@ class StockScanner:
 
             score = analysis.get('score', 0)
 
-            # ========== 5. ОПРЕДЕЛЯЕМ СТОРОНУ ==========
             if score >= config.long_score_threshold:
                 side = OrderSide.LONG
             elif score <= config.short_score_threshold and config.use_short:
@@ -405,13 +452,11 @@ class StockScanner:
             else:
                 return None
 
-            # ========== 6. РАСЧЁТ РАЗМЕРА ПОЗИЦИИ ==========
             quantity = self._calculate_quick_quantity(available_funds, current_price, lot, score)
 
             if quantity <= 0:
                 return None
 
-            # ========== 7. СОЗДАЁМ КАНДИДАТА ==========
             from ..models import StockAnalysis as StockAnalysisClass
 
             candidate = StockCandidate(
@@ -453,9 +498,7 @@ class StockScanner:
         candles: List,
         current_price: float
     ) -> Dict[str, Any]:
-        """
-        Синхронный технический анализ (для запуска в потоке)
-        """
+        """Синхронный технический анализ"""
         from trading_bot.analysis.technical_analyzer import analyzer
         return analyzer.analyze_with_candles(ticker, candles, current_price)
 
@@ -466,35 +509,30 @@ class StockScanner:
         lot: int,
         score: float
     ) -> int:
-        """
-        Быстрый расчёт размера позиции
-        """
-        # Максимум 3-5% от свободных средств
+        """Быстрый расчёт размера позиции"""
         max_pct = 0.05 if abs(score) > 5 else 0.03
         max_amount = available_funds * max_pct
 
         quantity = int(max_amount / price)
 
-        # Корректировка по лоту
         if lot > 1:
             quantity = (quantity // lot) * lot
 
         if quantity < lot:
             quantity = lot
 
-        # Минимальная сумма
         if quantity * price < 300:
             return 0
 
         return quantity
 
+    # ========== ПОЛНЫЙ МЕТОД ПОИСКА И ОТКРЫТИЯ ==========
+
     async def find_and_open_positions(self, total_capital: float, available_funds: float,
                                       current_positions: int, minutes_left: int,
                                       session: str, min_auto_score: int = 0,
                                       trading_loop=None):
-        """
-        Поиск и открытие позиций - полная логика с ПРОВЕРКОЙ БАЛАНСА И ДЕТАЛЬНЫМ ЛОГИРОВАНИЕМ
-        """
+        """Поиск и открытие позиций"""
         from trading_bot.config import config
         from trading_bot.api.tbank_client import tbank
         from trading_bot.risk.position_manager import position_manager
@@ -504,19 +542,7 @@ class StockScanner:
         from trading_bot.analysis.technical_analyzer import analyzer
         import time
 
-        # ========== ПРИНУДИТЕЛЬНЫЙ PRINT ДЛЯ ДИАГНОСТИКИ ==========
-        print("\n" + "=" * 80)
-        print("🔥🔥🔥🔥🔥 find_and_open_positions ВЫЗВАН! 🔥🔥🔥🔥🔥")
-        print(f"   total_capital = {total_capital}")
-        print(f"   available_funds = {available_funds}")
-        print(f"   current_positions = {current_positions}")
-        print(f"   session = {session}")
-        print(f"   min_auto_score = {min_auto_score}")
-        print(f"   trading_loop = {trading_loop is not None}")
-        print("=" * 80 + "\n")
-
         # ========== ШАГ 1: СИНХРОНИЗАЦИЯ КАПИТАЛА ==========
-        print("📌 ШАГ 1/8: СИНХРОНИЗАЦИЯ КАПИТАЛА")
         info(f"\n{'═' * 60}")
         info(f"🔍 [ШАГ 1/8] СИНХРОНИЗАЦИЯ КАПИТАЛА")
         info(f"{'═' * 60}")
@@ -524,13 +550,10 @@ class StockScanner:
         if config.total_capital != total_capital:
             config.total_capital = total_capital
             info(f"   ✅ Синхронизирован капитал: {total_capital:.2f}₽")
-            print(f"   ✅ Синхронизирован капитал: {total_capital:.2f}₽")
         else:
             info(f"   💰 Капитал: {total_capital:.2f}₽")
-            print(f"   💰 Капитал: {total_capital:.2f}₽")
 
         # ========== ШАГ 2: ПРОВЕРКА МИНИМАЛЬНОГО ОСТАТКА ==========
-        print("📌 ШАГ 2/8: ПРОВЕРКА СРЕДСТВ")
         info(f"\n{'═' * 60}")
         info(f"🔍 [ШАГ 2/8] ПРОВЕРКА СРЕДСТВ")
         info(f"{'═' * 60}")
@@ -538,18 +561,14 @@ class StockScanner:
         MIN_RESERVE = 500
         info(f"   💵 Доступно средств: {available_funds:.2f}₽")
         info(f"   🔒 Минимальный резерв: {MIN_RESERVE}₽")
-        print(f"   💵 Доступно средств: {available_funds:.2f}₽, резерв: {MIN_RESERVE}₽")
 
         if available_funds < MIN_RESERVE:
-            print(f"🔥🔥🔥 ВОЗВРАТ: недостаточно средств! {available_funds:.0f}₽ < {MIN_RESERVE}₽")
             warning(f"   ❌ КРИТИЧЕСКИ МАЛО СРЕДСТВ: {available_funds:.0f}₽ < {MIN_RESERVE}₽")
             return
         else:
             info(f"   ✅ Средств достаточно: {available_funds:.0f}₽ >= {MIN_RESERVE}₽")
-            print(f"   ✅ Средств достаточно")
 
         # ========== ШАГ 3: ОБНОВЛЕНИЕ НАСТРОЕК АНАЛИЗАТОРОВ ==========
-        print("📌 ШАГ 3/8: НАСТРОЙКИ АНАЛИЗАТОРОВ")
         info(f"\n{'═' * 60}")
         info(f"🔍 [ШАГ 3/8] НАСТРОЙКИ АНАЛИЗАТОРОВ")
         info(f"{'═' * 60}")
@@ -565,10 +584,8 @@ class StockScanner:
         info(f"   📊 Фундаментальный анализ: {'✅ ВКЛ' if fundamental_enabled else '❌ ВЫКЛ'}")
         info(f"   📰 Новостной анализ: {'✅ ВКЛ' if news_enabled else '❌ ВЫКЛ'}")
         info(f"   📈 Технический анализ: {'✅ ВКЛ' if technical_enabled else '❌ ВЫКЛ'}")
-        print(f"   📊 FA={fundamental_enabled}, News={news_enabled}, TA={technical_enabled}")
 
         # ========== ШАГ 4: ПРОВЕРКА МАРЖИ ==========
-        print("📌 ШАГ 4/8: ПРОВЕРКА МАРЖИ")
         info(f"\n{'═' * 60}")
         info(f"🔍 [ШАГ 4/8] ПРОВЕРКА МАРЖИ")
         info(f"{'═' * 60}")
@@ -576,87 +593,62 @@ class StockScanner:
         margin_info = tbank.get_margin_info()
         margin_rate = margin_info.get('margin_rate', 0)
         info(f"   📊 Текущая маржа: {margin_rate:.1f}%")
-        print(f"   📊 Текущая маржа: {margin_rate:.1f}%")
 
         if margin_rate > 80:
-            print(f"🔥🔥🔥 ВОЗВРАТ: высокая маржа {margin_rate:.1f}% > 80%")
             warning(f"   ❌ Высокая маржа ({margin_rate:.0f}%), пропускаем открытие")
             return
         elif margin_rate > 70:
             warning(f"   ⚠️ Маржа {margin_rate:.0f}% - осторожно")
-            print(f"   ⚠️ Маржа {margin_rate:.0f}% - осторожно, но продолжаем")
         else:
             info(f"   ✅ Маржа в норме")
-            print(f"   ✅ Маржа в норме")
 
         # ========== ШАГ 5: ПОИСК КАНДИДАТОВ ==========
-        print("📌 ШАГ 5/8: ПОИСК КАНДИДАТОВ")
         info(f"\n{'═' * 60}")
         info(f"🔍 [ШАГ 5/8] ПОИСК КАНДИДАТОВ")
         info(f"{'═' * 60}")
 
         scan_start = time.time()
-        print("   🔄 Запуск сканирования рынка...")
         candidates = await self.scan(available_funds, trading_loop=trading_loop)
         scan_time = time.time() - scan_start
 
         info(f"   ⏱ Время сканирования: {scan_time:.2f}с")
         info(f"   📋 Найдено кандидатов: {len(candidates)}")
-        print(f"   ⏱ Время сканирования: {scan_time:.2f}с, кандидатов: {len(candidates)}")
 
         if not candidates:
-            print(f"🔥🔥🔥 ВОЗВРАТ: нет кандидатов!")
             debug(f"   📭 Нет кандидатов для входа")
             return
 
-        # Показываем топ-5 кандидатов
         if candidates:
             info(f"\n   🏆 ТОП-5 КАНДИДАТОВ:")
-            print(f"\n   🏆 ТОП-5 КАНДИДАТОВ:")
             for i, c in enumerate(candidates[:5], 1):
                 info(f"      {i}. {c.ticker}: score={c.analysis.score:.1f}, {c.side.value}, цена={c.price:.2f}₽")
-                print(f"      {i}. {c.ticker}: score={c.analysis.score:.1f}, {c.side.value}, цена={c.price:.2f}₽")
 
         # ========== ШАГ 6: ФИЛЬТРАЦИЯ ПО SCORE ==========
-        print("📌 ШАГ 6/8: ФИЛЬТРАЦИЯ ПО SCORE")
         info(f"\n{'═' * 60}")
         info(f"🔍 [ШАГ 6/8] ФИЛЬТРАЦИЯ ПО SCORE")
         info(f"{'═' * 60}")
 
         info(f"   🎯 Мин. score для входа: {min_auto_score}")
-        print(f"   🎯 Мин. score для входа: {min_auto_score}")
 
         strong_candidates = [c for c in candidates if abs(c.analysis.score) >= min_auto_score]
-        print(f"\n🔥🔥🔥 STRONG_CANDIDATES: {len(strong_candidates)} из {len(candidates)}")
-        print(f"   min_auto_score = {min_auto_score}")
-        for c in strong_candidates[:10]:
-            print(f"   {c.ticker}: score={c.analysis.score}, abs_score={abs(c.analysis.score)}")
         info(f"   📋 Кандидатов с score >= {min_auto_score}: {len(strong_candidates)}")
-        print(f"   📋 Кандидатов с score >= {min_auto_score}: {len(strong_candidates)}")
 
         if not strong_candidates:
-            print(f"🔥🔥🔥 ВОЗВРАТ: нет кандидатов с score >= {min_auto_score}")
             warning(f"   ⚠️ Нет кандидатов с score >= {min_auto_score}")
             if candidates:
                 best_score = max(abs(c.analysis.score) for c in candidates)
                 info(f"   💡 Максимальный score среди кандидатов: {best_score:.1f}")
-                print(f"   💡 Максимальный score среди кандидатов: {best_score:.1f}")
             return
 
-        # ========== ШАГ 7: ПРОВЕРКА БАЛАНСА (если есть trading_loop) ==========
+        # ========== ШАГ 7: ПРОВЕРКА БАЛАНСА ==========
         if trading_loop:
-            print("📌 ШАГ 7/8: ПРОВЕРКА БАЛАНСА ПОРТФЕЛЯ")
             info(f"\n{'═' * 60}")
             info(f"🔍 [ШАГ 7/8] ПРОВЕРКА БАЛАНСА ПОРТФЕЛЯ")
             info(f"{'═' * 60}")
 
-            # Получаем текущую экспозицию
             exposure = trading_loop.get_market_exposure()
-            info(
-                f"   ⚖️ Текущий баланс: LONG {exposure['long_pct'] * 100:.0f}% / SHORT {exposure['short_pct'] * 100:.0f}%")
+            info(f"   ⚖️ Текущий баланс: LONG {exposure['long_pct'] * 100:.0f}% / SHORT {exposure['short_pct'] * 100:.0f}%")
             info(f"   📈 Всего позиций: {exposure['total_value']:.0f}₽")
-            print(
-                f"   ⚖️ Текущий баланс: LONG {exposure['long_pct'] * 100:.0f}% / SHORT {exposure['short_pct'] * 100:.0f}%")
 
             balanced_candidates = []
             for stock in strong_candidates:
@@ -665,7 +657,6 @@ class StockScanner:
                 info(f"\n   📊 Проверка {stock.ticker} ({stock.side.value}):")
                 info(f"      Стоимость: {total_cost:.0f}₽")
                 info(f"      Капитал: {total_capital:.0f}₽")
-                print(f"\n   📊 Проверка {stock.ticker} ({stock.side.value}): стоимость={total_cost:.0f}₽")
 
                 can_open, reason = trading_loop.check_position_limits_advanced(
                     side=stock.side.value,
@@ -675,116 +666,78 @@ class StockScanner:
 
                 if can_open:
                     info(f"      ✅ {stock.ticker}: ПРОШЁЛ проверку - {reason}")
-                    print(f"      ✅ {stock.ticker}: ПРОШЁЛ проверку - {reason}")
                     balanced_candidates.append(stock)
                 else:
                     info(f"      ❌ {stock.ticker}: НЕ ПРОШЁЛ - {reason}")
-                    print(f"      ❌ {stock.ticker}: НЕ ПРОШЁЛ - {reason}")
 
             if not balanced_candidates:
-                print(f"🔥🔥🔥 ВОЗВРАТ: нет кандидатов, прошедших проверку баланса")
                 info(f"\n   ⏸️ Нет кандидатов, прошедших проверку баланса")
                 return
 
             strong_candidates = balanced_candidates
-            print(f"\n🔥🔥🔥 ПОСЛЕ БАЛАНСИРОВКИ: {len(strong_candidates)} кандидатов")
-            for c in strong_candidates[:10]:
-                print(f"   {c.ticker}: side={c.side.value}, score={c.analysis.score}")
             info(f"\n   ✅ После проверки баланса осталось {len(strong_candidates)} кандидатов")
-            print(f"\n   ✅ После проверки баланса осталось {len(strong_candidates)} кандидатов")
         else:
-            print("📌 ШАГ 7/8: ПРОВЕРКА БАЛАНСА (ПРОПУЩЕНА) - trading_loop не передан")
             info(f"\n{'═' * 60}")
             info(f"🔍 [ШАГ 7/8] ПРОВЕРКА БАЛАНСА (ПРОПУЩЕНА)")
             info(f"{'═' * 60}")
             info(f"   ⚠️ trading_loop не передан, проверка баланса пропущена")
 
         # ========== ШАГ 8: ОТКРЫТИЕ ПОЗИЦИЙ ==========
-        print("📌 ШАГ 8/8: ОТКРЫТИЕ ПОЗИЦИЙ")
         info(f"\n{'═' * 60}")
         info(f"🔍 [ШАГ 8/8] ОТКРЫТИЕ ПОЗИЦИЙ")
         info(f"{'═' * 60}")
 
-        # Сортируем по score
         strong_candidates.sort(key=lambda x: x.rank_score, reverse=True)
         max_new = config.max_positions - current_positions
         candidates_to_open = strong_candidates[:max_new]
-        print(f"\n🔥🔥🔥 КАНДИДАТЫ ДЛЯ ОТКРЫТИЯ: {len(candidates_to_open)}")
-        print(f"   max_new = {max_new}, current_positions = {current_positions}, max_positions = {config.max_positions}")
-        for c in candidates_to_open[:10]:
-            print(f"   {c.ticker}: score={c.analysis.score}, side={c.side.value}, quantity={c.quantity if hasattr(c, 'quantity') else '?'}")
 
         info(f"   📊 Текущих позиций: {current_positions}")
         info(f"   📈 Максимум позиций: {config.max_positions}")
         info(f"   🆕 Свободно мест: {max_new}")
         info(f"   🎯 Будет попытка открыть: {len(candidates_to_open)} позиций")
-        print(f"   📊 Текущих: {current_positions}, Максимум: {config.max_positions}, Свободно: {max_new}")
-        print(f"   🎯 Будет попытка открыть: {len(candidates_to_open)} позиций")
 
-        # Показываем список для открытия
         if candidates_to_open:
             info(f"\n   📋 СПИСОК ДЛЯ ОТКРЫТИЯ:")
-            print(f"\n   📋 СПИСОК ДЛЯ ОТКРЫТИЯ:")
             for i, stock in enumerate(candidates_to_open, 1):
                 info(f"      {i}. {stock.ticker}: score={stock.analysis.score:.1f}, {stock.side.value}, "
                      f"цена={stock.price:.2f}₽, лот={stock.lot}")
-                print(f"      {i}. {stock.ticker}: score={stock.analysis.score:.1f}, {stock.side.value}, "
-                      f"цена={stock.price:.2f}₽, лот={stock.lot}")
 
         opened = 0
         failed = 0
 
         for idx, stock in enumerate(candidates_to_open, 1):
-            print(f"\n   {'─' * 50}")
-            print(f"   📍 ОТКРЫТИЕ #{idx}/{len(candidates_to_open)}: {stock.ticker}")
             info(f"\n   {'─' * 50}")
             info(f"   📍 ОТКРЫТИЕ #{idx}/{len(candidates_to_open)}: {stock.ticker}")
             info(f"   {'─' * 50}")
 
-            # Проверка: не открыта ли уже позиция
-            print(f"      🔍 Проверка существующей позиции...")
-            info(f"      🔍 Проверка существующей позиции...")
             if position_manager.get_position(stock.figi):
-                print(f"      ⏸️ {stock.ticker}: позиция уже существует, пропускаем")
                 warning(f"      ⏸️ {stock.ticker}: позиция уже существует, пропускаем")
                 continue
-            print(f"      ✅ Позиции нет, можно открывать")
+
             info(f"      ✅ Позиции нет, можно открывать")
 
-            # Расчёт размера позиции
-            print(f"      📐 Расчёт размера позиции...")
-            info(f"      📐 Расчёт размера позиции...")
             quantity = self.bot._calculate_position_size(stock, available_funds, stock.analysis.score)
 
             if quantity <= 0:
-                print(f"      ⚠️ {stock.ticker}: размер позиции = {quantity}, пропускаем")
                 warning(f"      ⚠️ {stock.ticker}: размер позиции = {quantity}, пропускаем")
                 failed += 1
                 continue
-            print(f"      ✅ Размер позиции: {quantity} шт")
-            info(f"      ✅ Размер позиции: {quantity} шт")
 
-            # Сохраняем количество в кандидате
+            info(f"      ✅ Размер позиции: {quantity} шт")
             stock.quantity = quantity
 
-            # Проверка достаточности средств
             total_cost = quantity * stock.price
-            print(f"      💰 Стоимость позиции: {total_cost:.2f}₽")
-            print(f"      💵 Доступно средств: {available_funds:.2f}₽")
             info(f"      💰 Стоимость позиции: {total_cost:.2f}₽")
             info(f"      💵 Доступно средств: {available_funds:.2f}₽")
 
             if total_cost > available_funds * 0.95:
-                print(f"      ❌ Недостаточно средств: {total_cost:.0f}₽ > {available_funds:.0f}₽")
                 warning(f"      ❌ Недостаточно средств: {total_cost:.0f}₽ > {available_funds:.0f}₽")
                 failed += 1
                 continue
-            print(f"      ✅ Средств достаточно")
+
             info(f"      ✅ Средств достаточно")
 
-            # Вторая проверка баланса (с реальным количеством)
             if trading_loop:
-                print(f"      ⚖️ Повторная проверка баланса...")
                 info(f"      ⚖️ Повторная проверка баланса...")
                 can_open, reason = trading_loop.check_position_limits_advanced(
                     side=stock.side.value,
@@ -792,25 +745,19 @@ class StockScanner:
                     total_capital=total_capital
                 )
                 if not can_open:
-                    print(f"      ❌ {stock.ticker}: {reason}")
                     warning(f"      ❌ {stock.ticker}: {reason}")
                     failed += 1
                     continue
-                print(f"      ✅ Баланс OK: {reason}")
                 info(f"      ✅ Баланс OK: {reason}")
 
-            # Открытие позиции
-            print(f"      🚀 Отправка заявки на открытие...")
             info(f"      🚀 Отправка заявки на открытие...")
             open_start = time.time()
 
             try:
                 if stock.side == OrderSide.LONG:
-                    print(f"         📈 LONG позиция, количество={quantity}")
                     info(f"         📈 LONG позиция, количество={quantity}")
                     success_flag = self.bot.position_opener.open_long_market(stock, quantity)
                 else:
-                    print(f"         📉 SHORT позиция, количество={quantity}")
                     info(f"         📉 SHORT позиция, количество={quantity}")
                     success_flag = self.bot.position_opener.open_short_market(stock, quantity)
 
@@ -819,39 +766,27 @@ class StockScanner:
                 if success_flag:
                     opened += 1
                     available_funds -= total_cost
-                    print(f"\n      ✅ {stock.ticker}: ПОЗИЦИЯ УСПЕШНО ОТКРЫТА!")
-                    print(f"         📊 Затрачено времени: {open_time:.2f}с")
-                    print(f"         💰 Осталось средств: {available_funds:.2f}₽")
-                    success(f"\n      ✅ {stock.ticker}: ПОЗИЦИЯ УСПЕШНО ОТКРЫТА!")
+                    info(f"\n      ✅ {stock.ticker}: ПОЗИЦИЯ УСПЕШНО ОТКРЫТА!")
                     info(f"         📊 Затрачено времени: {open_time:.2f}с")
                     info(f"         💰 Осталось средств: {available_funds:.2f}₽")
+                    success(f"\n      ✅ {stock.ticker}: ПОЗИЦИЯ УСПЕШНО ОТКРЫТА!")
                 else:
                     failed += 1
-                    print(f"\n      ❌ {stock.ticker}: НЕ УДАЛОСЬ ОТКРЫТЬ ПОЗИЦИЮ!")
-                    print(f"         ⏱ Время попытки: {open_time:.2f}с")
-                    error(f"\n      ❌ {stock.ticker}: НЕ УДАЛОСЬ ОТКРЫТЬ ПОЗИЦИЮ!")
+                    info(f"\n      ❌ {stock.ticker}: НЕ УДАЛОСЬ ОТКРЫТЬ ПОЗИЦИЮ!")
                     info(f"         ⏱ Время попытки: {open_time:.2f}с")
+                    error(f"\n      ❌ {stock.ticker}: НЕ УДАЛОСЬ ОТКРЫТЬ ПОЗИЦИЮ!")
 
             except Exception as e:
                 failed += 1
-                print(f"\n      ❌ {stock.ticker}: ОШИБКА ПРИ ОТКРЫТИИ!")
-                print(f"         Ошибка: {str(e)[:200]}")
+                info(f"\n      ❌ {stock.ticker}: ОШИБКА ПРИ ОТКРЫТИИ!")
+                info(f"         Ошибка: {str(e)[:200]}")
                 error(f"\n      ❌ {stock.ticker}: ОШИБКА ПРИ ОТКРЫТИИ!")
                 error(f"         Ошибка: {str(e)[:200]}")
                 import traceback
                 debug(f"         {traceback.format_exc()}")
 
-            # Небольшая пауза между открытиями
             if idx < len(candidates_to_open):
                 time.sleep(0.5)
-
-        # ========== ИТОГОВЫЙ ОТЧЁТ ==========
-        print(f"\n{'═' * 60}")
-        print(f"📊 ИТОГОВЫЙ ОТЧЁТ ОТКРЫТИЯ ПОЗИЦИЙ")
-        print(f"{'═' * 60}")
-        print(f"   ✅ Успешно открыто: {opened}")
-        print(f"   ❌ Не удалось открыть: {failed}")
-        print(f"   📋 Всего кандидатов: {len(candidates_to_open)}")
 
         info(f"\n{'═' * 60}")
         info(f"📊 ИТОГОВЫЙ ОТЧЁТ ОТКРЫТИЯ ПОЗИЦИЙ")
@@ -861,10 +796,7 @@ class StockScanner:
         info(f"   📋 Всего кандидатов: {len(candidates_to_open)}")
 
         if opened > 0:
-            print(f"\n🎉 УСПЕШНО ОТКРЫТО {opened} НОВЫХ ПОЗИЦИЙ!")
             success(f"\n🎉 УСПЕШНО ОТКРЫТО {opened} НОВЫХ ПОЗИЦИЙ!")
-
-            # Отправляем уведомление в Telegram
             try:
                 telegram = _get_telegram()
                 if telegram:
@@ -880,35 +812,254 @@ class StockScanner:
                             f"📊 Капитал: {total_capital:.0f}₽\n"
                             f"💵 Свободно: {available_funds:.0f}₽"
                         )
-                        print(f"   📱 Уведомление отправлено в Telegram")
             except Exception as e:
                 debug(f"   ⚠️ Ошибка отправки Telegram: {e}")
-                print(f"   ⚠️ Ошибка отправки Telegram: {e}")
         else:
             if failed > 0:
-                print(f"\n⚠️ НЕ УДАЛОСЬ ОТКРЫТЬ НИ ОДНОЙ ПОЗИЦИИ ({failed} попыток)")
                 warning(f"\n⚠️ НЕ УДАЛОСЬ ОТКРЫТЬ НИ ОДНОЙ ПОЗИЦИИ ({failed} попыток)")
             else:
-                print(f"\n📭 Нет позиций для открытия")
                 debug(f"\n📭 Нет позиций для открытия")
 
-        print(f"{'═' * 60}\n")
         info(f"{'═' * 60}\n")
 
     def _check_instrument_filter(self, figi: str, ticker: str, current_price: float) -> bool:
         """Проверка инструмента на соответствие фильтрам"""
         try:
             from trading_bot.analysis.instrument_filter import instrument_filter
-            return instrument_filter.check_trading_quality(ticker) # instrument_filter.check_instrument(figi, ticker, current_price)
+            return instrument_filter.check_trading_quality(ticker)
         except Exception as e:
             debug(f"Ошибка фильтрации {ticker}: {e}")
             return True
 
+    # ========== МЕТОДЫ РАБОТЫ СО СВЕЧАМИ С УЛУЧШЕННЫМ КЭШИРОВАНИЕМ ==========
+
+    def _get_candles(self, figi: str) -> List:
+        """Получение свечей с УЛУЧШЕННЫМ КЭШИРОВАНИЕМ"""
+        from trading_bot.logger import debug, info, error
+        from trading_bot.api.tbank_client import tbank
+        import time
+
+        try:
+            debug(f"   🔍 _get_candles: figi={figi[:12]}...")
+
+            cache_key = f"candles_5min_{figi}"
+            cached = self._candles_cache.get(cache_key)
+            
+            if cached is not None:
+                cache_age = time.time() - self._candles_cache._get_timestamp(cache_key)
+                if cache_age < 30:
+                    debug(f"   📦 СВЕЖИЙ КЭШ: {len(cached)} свечей (возраст {cache_age:.1f}с)")
+                    return cached
+                else:
+                    debug(f"   ⏰ КЭШ УСТАРЕЛ ({cache_age:.1f}с), обновляем...")
+                    
+                    if hasattr(self.bot, '_background_tasks'):
+                        asyncio.create_task(self._update_candles_background(figi, cache_key))
+                        return cached
+
+            info(f"   🔄 Запрос свечей для {figi[:12]}...")
+            candles = tbank.get_candles(figi, days=2, interval_minutes=5)
+
+            if not candles:
+                return []
+
+            result = []
+            for c in candles:
+                if isinstance(c, (list, tuple)) and len(c) >= 2:
+                    result.append({
+                        'close': c[0],
+                        'volume': c[1],
+                        'high': c[0] * 1.005,
+                        'low': c[0] * 0.995,
+                        'open': c[0],
+                    })
+                elif isinstance(c, dict):
+                    result.append(c)
+                else:
+                    result.append(c)
+
+            if result:
+                self._candles_cache.set(cache_key, result, ttl=120)
+                debug(f"   💾 Сохранено в кэш: {len(result)} свечей (TTL=120с)")
+
+            return result
+
+        except Exception as e:
+            error(f"❌ Ошибка получения свечей для {figi}: {e}")
+            return []
+
+    async def _update_candles_background(self, figi: str, cache_key: str):
+        """Фоновое обновление кэша свечей"""
+        try:
+            from trading_bot.api.tbank_client import tbank
+            
+            await asyncio.sleep(0.5)
+            
+            candles = tbank.get_candles(figi, days=2, interval_minutes=5)
+            if candles:
+                result = []
+                for c in candles:
+                    if isinstance(c, (list, tuple)) and len(c) >= 2:
+                        result.append({
+                            'close': c[0],
+                            'volume': c[1],
+                            'high': c[0] * 1.005,
+                            'low': c[0] * 0.995,
+                            'open': c[0],
+                        })
+                    elif isinstance(c, dict):
+                        result.append(c)
+                    else:
+                        result.append(c)
+                
+                if result:
+                    self._candles_cache.set(cache_key, result, ttl=120)
+                    debug(f"   🔄 Фоновое обновление: {len(result)} свечей для {figi[:12]}...")
+        except Exception as e:
+            debug(f"   ⚠️ Фоновое обновление не удалось: {e}")
+
+    def _get_candles_15min(self, figi: str) -> List:
+        """Получение 15-минутных свечей с улучшенным кэшированием"""
+        from trading_bot.logger import info, error
+        from trading_bot.api.tbank_client import tbank
+
+        try:
+            debug(f"   🔍 _get_candles_15min: figi={figi[:12]}...")
+
+            cache_key = f"candles_15min_{figi}"
+            cached = self._candles_cache.get(cache_key)
+            if cached is not None:
+                debug(f"   📦 Кэш: 15min свечи для {figi[:12]}... ({len(cached)} шт)")
+                return cached
+
+            candles = tbank.get_candles(figi, days=2, interval_minutes=15)
+
+            if not candles or len(candles) < 20:
+                debug(f"   ⚠️ Недостаточно 15min свечей: {len(candles) if candles else 0}/20")
+                return []
+
+            result = []
+            for c in candles:
+                if isinstance(c, (list, tuple)) and len(c) >= 2:
+                    result.append({
+                        'close': c[0],
+                        'volume': c[1],
+                        'high': c[0] * 1.005,
+                        'low': c[0] * 0.995,
+                        'open': c[0],
+                    })
+                elif hasattr(c, 'close'):
+                    result.append({
+                        'close': c.close,
+                        'volume': getattr(c, 'volume', 0),
+                        'high': getattr(c, 'high', c.close),
+                        'low': getattr(c, 'low', c.close),
+                        'open': getattr(c, 'open', c.close),
+                    })
+                elif isinstance(c, dict):
+                    result.append(c)
+
+            if result:
+                self._candles_cache.set(cache_key, result, ttl=300)
+                debug(f"   💾 Сохранено в кэш: {len(result)} 15min свечей (TTL=300с)")
+
+            return result
+
+        except Exception as e:
+            info(f"   ❌ Ошибка получения 15min свечей: {e}")
+            return []
+
+    # ========== МЕТОДЫ КЭШИРОВАНИЯ КАНДИДАТОВ ==========
+
+    def _get_cached_candidates(self) -> List[StockCandidate]:
+        """Получение кэшированных кандидатов"""
+        if hasattr(self, '_cached_candidates'):
+            return self._cached_candidates
+        return []
+
+    def _cache_candidates(self, candidates: List[StockCandidate]):
+        """Кэширование кандидатов"""
+        self._cached_candidates = candidates
+
+    def clear_cache(self):
+        """Очистка кэша"""
+        self._analysis_cache.clear()
+        self._price_cache.clear()
+        self._cached_candidates = []
+        self._last_scan_time = 0
+        self._scan_result_cache.clear()
+        self._candles_cache.clear()
+        self._liquidity_cache.clear()
+        info("🧹 Весь кэш сканера очищен")
+
+    # ========== БЫСТРЫЙ АНАЛИЗ ДЛЯ WEBSOCKET ==========
+
+    async def quick_analyze_from_websocket(self, ticker: str, current_price: float) -> Optional[StockCandidate]:
+        """Быстрый анализ для WebSocket/REST"""
+        from trading_bot.analysis.technical_analyzer import analyzer
+        from trading_bot.config import config
+        from trading_bot.models import OrderSide, StockAnalysis as StockAnalysisModel
+
+        try:
+            figi = self.bot._get_figi_by_ticker(ticker)
+            if not figi:
+                return None
+
+            candles = self._get_candles(figi)
+            if not candles or len(candles) < 20:
+                return None
+
+            if hasattr(analyzer, 'analyze_with_candles'):
+                technical = analyzer.analyze_with_candles(ticker, candles, current_price)
+            else:
+                return None
+
+            if not technical:
+                return None
+
+            score = technical.get('score', 0)
+
+            if score >= config.long_score_threshold:
+                side = OrderSide.LONG
+            elif score <= config.short_score_threshold and config.use_short:
+                side = OrderSide.SHORT
+            else:
+                return None
+
+            candidate = StockCandidate(
+                figi=figi,
+                name=ticker,
+                ticker=ticker,
+                price=current_price,
+                lot=1,
+                lot_price=current_price,
+                analysis=StockAnalysisModel(
+                    figi=figi,
+                    name=ticker,
+                    score=score,
+                    buy_signal=(side == OrderSide.LONG),
+                    sell_signal=(side == OrderSide.SHORT),
+                    recommendation=f"{'BUY' if side == OrderSide.LONG else 'SHORT'} (quick)",
+                    signals=technical.get('signals', [])[:5],
+                    rsi=technical.get('rsi', 50),
+                    macd=technical.get('macd', 0),
+                    volume_ratio=technical.get('volume_ratio', 1.0)
+                ),
+                side=side,
+                rank_score=abs(score)
+            )
+
+            return candidate
+
+        except Exception as e:
+            debug(f"❌ Ошибка быстрого анализа {ticker}: {e}")
+            return None
+
+    # ========== КОМБИНИРОВАННЫЙ АНАЛИЗ ==========
+
     async def _get_combined_analysis(self, figi: str, ticker: str, current_price: float,
                                      trading_loop=None) -> Optional[StockAnalysis]:
-        """
-        ПОЛНЫЙ КОМБИНИРОВАННЫЙ АНАЛИЗ
-        """
+        """ПОЛНЫЙ КОМБИНИРОВАННЫЙ АНАЛИЗ"""
         from trading_bot.config import config
         from trading_bot.analysis.technical_analyzer import analyzer
         from trading_bot.analysis.fundamental_analyzer import fundamental_analyzer
@@ -921,12 +1072,10 @@ class StockScanner:
         info(f"🔬 АНАЛИЗ ТИКЕРА: {ticker}")
         info(f"{'─' * 50}")
 
-        # Принудительно очищаем кэш фундаментальных данных для этого тикера
         if hasattr(fundamental_analyzer, 'clear_cache'):
             fundamental_analyzer.clear_cache(ticker)
             debug(f"   🧹 Очищен кэш FA для {ticker}")
 
-        # Также очищаем кэш MOEX в candle_builder
         try:
             from trading_bot.core.candle_sync_wrapper import invalidate_cache_for_ticker
             invalidate_cache_for_ticker(ticker)
@@ -934,11 +1083,9 @@ class StockScanner:
         except (ImportError, AttributeError):
             pass
 
-        # 1. Получаем свечи
         candles = self._get_candles(figi)
         info(f"   📊 Свечей получено: {len(candles) if candles else 0}")
 
-        # ДИАГНОСТИКА ФОРМАТА СВЕЧЕЙ
         if candles and len(candles) > 0:
             first = candles[0]
             info(f"   🔍 формат свечей (5min) = {type(first).__name__}")
@@ -947,8 +1094,6 @@ class StockScanner:
                 info(f"      close = {first.get('close', 'N/A')}")
             elif hasattr(first, 'close'):
                 info(f"   ✅ Это объект! .close = {first.close}")
-            else:
-                info(f"   ❌ НЕИЗВЕСТНЫЙ ФОРМАТ: {type(first)}")
 
         min_candles = 15 if self._is_low_liquidity_ticker(ticker, figi) else 20
 
@@ -958,7 +1103,6 @@ class StockScanner:
 
         debug(f"   ✅ Свечей: {len(candles)} (min={min_candles})")
 
-        # ========== ТЕХНИЧЕСКИЙ АНАЛИЗ (обязательный) ==========
         technical = None
         base_score = 0
         signals = []
@@ -966,7 +1110,6 @@ class StockScanner:
         if settings_manager.get('technical_enabled', True):
             try:
                 async with asyncio.timeout(8.0):
-                    # Используем analyze_with_candles с универсальной конвертацией
                     if hasattr(analyzer, 'analyze_with_candles'):
                         info(f"   📊 {ticker}: вызываем analyze_with_candles")
                         technical = analyzer.analyze_with_candles(ticker, candles, current_price, figi=figi)
@@ -980,7 +1123,6 @@ class StockScanner:
                 import traceback
                 info(f"      {traceback.format_exc()[:200]}")
 
-        # Если технический анализ не удался, но есть MTF анализ
         if not technical and trading_loop and hasattr(trading_loop, '_analyze_ticker_with_mtf'):
             try:
                 debug(f"   📊 {ticker}: пробуем MTF анализ")
@@ -1009,8 +1151,7 @@ class StockScanner:
                     if mtf_details:
                         debug(f"   📊 MTF {ticker}: {mtf_details.get('final', 'HOLD')}")
                 else:
-                    debug(
-                        f"   ⚠️ {ticker}: недостаточно свечей для MTF ({len(candles_15min) if candles_15min else 0}/20)")
+                    debug(f"   ⚠️ {ticker}: недостаточно свечей для MTF ({len(candles_15min) if candles_15min else 0}/20)")
             except Exception as e:
                 debug(f"   ❌ Ошибка MTF анализа {ticker}: {e}")
 
@@ -1025,7 +1166,6 @@ class StockScanner:
         signals = technical.get('signals', [])
         info(f"   📊 Технический score: {base_score}, сигналов: {len(signals)}")
 
-        # ========== ФУНДАМЕНТАЛЬНЫЙ АНАЛИЗ ==========
         if settings_manager.get('fundamental_enabled', True) and fundamental_analyzer:
             try:
                 async with asyncio.timeout(6.0):
@@ -1044,7 +1184,6 @@ class StockScanner:
             except Exception as e:
                 debug(f"   ❌ Ошибка FA {ticker}: {e}")
 
-        # ========== НОВОСТНОЙ АНАЛИЗ ==========
         if settings_manager.get('news_enabled', True) and news_sentiment and news_sentiment.enabled:
             try:
                 async with asyncio.timeout(6.0):
@@ -1061,7 +1200,6 @@ class StockScanner:
             except Exception as e:
                 debug(f"   ❌ Ошибка новостей {ticker}: {e}")
 
-        # ========== КОРРЕЛЯЦИОННЫЙ АНАЛИЗ ==========
         if settings_manager.get('correlation_analysis', False):
             try:
                 from trading_bot.analysis.correlation_analyzer import correlation_analyzer
@@ -1085,7 +1223,6 @@ class StockScanner:
             except Exception as e:
                 debug(f"   ❌ Ошибка корреляции {ticker}: {e}")
 
-        # ========== ИТОГОВЫЙ SCORE ==========
         final_score = max(-10, min(10, base_score))
 
         buy_signal = final_score >= config.long_score_threshold
@@ -1128,202 +1265,3 @@ class StockScanner:
             take_profit_pct=technical.get('take_profit_pct', 1.2),
             stop_loss_pct=technical.get('stop_loss_pct', 0.6)
         )
-
-    def _get_candles_15min(self, figi: str) -> List:
-        """Получение 15-минутных свечей для MTF анализа - С КЭШИРОВАНИЕМ"""
-        from trading_bot.logger import info, error
-        from trading_bot.api.tbank_client import tbank
-
-        try:
-            debug(f"   🔍 _get_candles_15min: figi={figi[:12]}...")
-
-            # ✅ ПРОВЕРКА КЭША
-            cache_key = f"candles_15min_{figi}"
-            cached = self._candles_cache.get(cache_key)
-            if cached is not None:
-                debug(f"   📦 Кэш: 15min свечи для {figi[:12]}... ({len(cached)} шт)")
-                return cached
-
-            candles = tbank.get_candles(figi, days=2, interval_minutes=15)
-            info(f"   📊 Получено {len(candles) if candles else 0} 15min свечей")
-
-            if not candles or len(candles) < 20:
-                debug(f"   ⚠️ Недостаточно 15min свечей: {len(candles) if candles else 0}/20")
-                return []
-
-            result = []
-            for c in candles:
-                if isinstance(c, (list, tuple)) and len(c) >= 2:
-                    result.append({
-                        'close': c[0],
-                        'volume': c[1],
-                        'high': c[0] * 1.005,
-                        'low': c[0] * 0.995,
-                        'open': c[0],
-                    })
-                elif hasattr(c, 'close'):
-                    result.append({
-                        'close': c.close,
-                        'volume': getattr(c, 'volume', 0),
-                        'high': getattr(c, 'high', c.close),
-                        'low': getattr(c, 'low', c.close),
-                        'open': getattr(c, 'open', c.close),
-                    })
-                elif isinstance(c, dict):
-                    result.append(c)
-                else:
-                    info(f"   ⚠️ Неизвестный формат 15min свечи: {type(c)}")
-                    result.append(c)
-
-            # ✅ СОХРАНЯЕМ В КЭШ (120 секунд для 15-минутных свечей)
-            if result:
-                self._candles_cache.set(cache_key, result, ttl=120)
-                debug(f"   💾 Сохранено в кэш: {len(result)} 15min свечей для {figi[:12]}...")
-
-            debug(f"   ✅ Возвращаем {len(result)} 15min свечей")
-            if result:
-                debug(f"      Первая свеча: close={result[0].get('close', 'N/A')}")
-            return result
-
-        except Exception as e:
-            info(f"   ❌ Ошибка получения 15min свечей: {e}")
-            return []
-
-    def _get_candles(self, figi: str) -> List:
-        """Получение свечей для анализа - С КЭШИРОВАНИЕМ"""
-        from trading_bot.logger import info, error
-        from trading_bot.api.tbank_client import tbank
-
-        try:
-            debug(f"   🔍 _get_candles: figi={figi[:12]}...")
-
-            # ✅ ПРОВЕРКА КЭША
-            cache_key = f"candles_5min_{figi}"
-            cached = self._candles_cache.get(cache_key)
-            if cached is not None:
-                debug(f"   📦 Кэш: свечи для {figi[:12]}... ({len(cached)} шт)")
-                return cached
-
-            # ✅ ИСПОЛЬЗУЕМ TBankClient
-            info(f"   🔄 Используем TBankClient.get_candles()")
-            candles = tbank.get_candles(figi, days=2, interval_minutes=5)
-            debug(f"   📊 TBankClient вернул {len(candles) if candles else 0} свечей")
-
-            if not candles:
-                info(f"   ❌ Нет свечей для {figi}")
-                return []
-
-            # Конвертируем в словари
-            result = []
-            for c in candles:
-                if isinstance(c, (list, tuple)) and len(c) >= 2:
-                    result.append({
-                        'close': c[0],
-                        'volume': c[1],
-                        'high': c[0] * 1.005,
-                        'low': c[0] * 0.995,
-                        'open': c[0],
-                    })
-                elif isinstance(c, dict):
-                    result.append(c)
-                else:
-                    result.append(c)
-
-            # ✅ СОХРАНЯЕМ В КЭШ (60 секунд)
-            if result:
-                self._candles_cache.set(cache_key, result, ttl=60)
-                debug(f"   💾 Сохранено в кэш: {len(result)} свечей для {figi[:12]}...")
-
-            debug(f"   ✅ Возвращаем {len(result)} свечей")
-            if result:
-                debug(f"      Первая свеча: close={result[0].get('close', 'N/A')}")
-            return result
-
-        except Exception as e:
-            error(f"❌ Ошибка получения свечей для {figi}: {e}")
-            return []
-
-    def _get_cached_candidates(self) -> List[StockCandidate]:
-        """Получение кэшированных кандидатов"""
-        if hasattr(self, '_cached_candidates'):
-            return self._cached_candidates
-        return []
-
-    def _cache_candidates(self, candidates: List[StockCandidate]):
-        """Кэширование кандидатов"""
-        self._cached_candidates = candidates
-
-    def clear_cache(self):
-        """Очистка кэша"""
-        self._analysis_cache.clear()
-        self._price_cache.clear()
-        self._cached_candidates = []
-        self._last_scan_time = 0
-        info("🧹 Кэш сканера очищен")
-
-    # ========== БЫСТРЫЙ АНАЛИЗ С ИСПОЛЬЗОВАНИЕМ WEBSOCKET ==========
-
-    async def quick_analyze_from_websocket(self, ticker: str, current_price: float) -> Optional[StockCandidate]:
-        """Быстрый анализ для WebSocket/REST"""
-        from trading_bot.analysis.technical_analyzer import analyzer
-        from trading_bot.config import config
-        from trading_bot.models import OrderSide, StockAnalysis as StockAnalysisModel
-
-        try:
-            figi = self.bot._get_figi_by_ticker(ticker)
-            if not figi:
-                return None
-
-            # Получаем свечи из кэша
-            candles = self._get_candles(figi)
-            if not candles or len(candles) < 20:
-                return None
-
-            # Быстрый технический анализ
-            if hasattr(analyzer, 'analyze_with_candles'):
-                technical = analyzer.analyze_with_candles(ticker, candles, current_price)
-            else:
-                return None
-
-            if not technical:
-                return None
-
-            score = technical.get('score', 0)
-
-            # Определяем сторону
-            if score >= config.long_score_threshold:
-                side = OrderSide.LONG
-            elif score <= config.short_score_threshold and config.use_short:
-                side = OrderSide.SHORT
-            else:
-                return None
-
-            # Создаём кандидата
-            candidate = StockCandidate(
-                figi=figi,
-                name=ticker,
-                ticker=ticker,
-                price=current_price,
-                lot=1,
-                lot_price=current_price,
-                analysis=StockAnalysisModel(
-                    figi=figi,
-                    name=ticker,
-                    score=score,
-                    buy_signal=(side == OrderSide.LONG),
-                    sell_signal=(side == OrderSide.SHORT),
-                    recommendation=f"{'BUY' if side == OrderSide.LONG else 'SHORT'} (quick)",
-                    signals=technical.get('signals', [])[:5],
-                    rsi=technical.get('rsi', 50),
-                    macd=technical.get('macd', 0),
-                    volume_ratio=technical.get('volume_ratio', 1.0)
-                ),
-                side=side,
-                rank_score=abs(score)
-            )
-
-            return candidate
-
-        except Exception as e:
-            debug(f"❌ Ошибка быстрого анализа {ticker}: {e}")
-            return None

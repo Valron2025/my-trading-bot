@@ -192,6 +192,15 @@ class TBankClient:
         self._confirmation_cache = {}
         self._confirmation_cache_time = {}
         self._no_stop_orders = set()
+        
+        # ✅ ГЛОБАЛЬНАЯ ЗАЩИТА ОТ РЕЙТ-ЛИМИТА
+        self._last_api_call = 0
+        self._api_call_lock = Lock()
+        self._min_interval = 1.0  # ← УВЕЛИЧЕНО с 0.5 до 1.0
+        
+        # ✅ НОВЫЙ КЭШ ДЛЯ СТАТУСА ТОРГОВ
+        self._trading_status_cache = {}
+        self._trading_status_ttl = 60  # 60 секунд
 
         # ========== КОНФИГУРАЦИЯ ТАЙМАУТОВ ==========
         self.timeout_config = {
@@ -893,15 +902,6 @@ class TBankClient:
         """
         Реализация рыночного ордера через API T-Invest
         Возвращает словарь с информацией о результате
-
-        Returns:
-            Dict с полями:
-            - success: bool - успех операции
-            - order_id: str - ID заявки (если есть)
-            - quantity: int - реальное количество
-            - error: str - сообщение об ошибке (если есть)
-            - price: float - цена исполнения (если известна)
-            - block_ticker: bool - нужно ли заблокировать тикер
         """
         from t_tech.invest import OrderDirection, OrderType
         import uuid
@@ -932,7 +932,26 @@ class TBankClient:
         if current_price:
             print(f"   💰 Текущая цена: {current_price:.4f}₽")
 
-        # ========== 3. ОТПРАВКА ЗАЯВКИ ==========
+        # ========== 3. ПРОВЕРКА ЛИМИТОВ ==========
+        try:
+            max_lots = self.get_max_lots(figi, direction)
+            if max_lots > 0:
+                max_quantity = max_lots * lot_size
+                if quantity > max_quantity:
+                    warning(f"   ⚠️ Количество {quantity} превышает лимит {max_quantity} шт")
+                    quantity = max_quantity
+                    if quantity < lot_size:
+                        return {
+                            'success': False,
+                            'order_id': None,
+                            'quantity': 0,
+                            'error': f'Лимит {max_quantity} шт, даже после коррекции меньше лота'
+                        }
+                    print(f"   🔄 Количество скорректировано до {quantity} шт (лимит {max_quantity})")
+        except Exception as e:
+            debug(f"   ⚠️ Не удалось получить max_lots: {e}")
+
+        # ========== 4. ОТПРАВКА ЗАЯВКИ ==========
         try:
             with Client(self.token) as client:
                 dir_map = {
@@ -958,13 +977,11 @@ class TBankClient:
                 if order and order.order_id:
                     print(f"   ✅ ЗАЯВКА ОТПРАВЛЕНА, order_id={order.order_id[:8]}...")
 
-                    # Получаем информацию об исполнении
                     executed_lots = getattr(order, 'executed_lots', 0)
                     requested_lots = getattr(order, 'lots_requested', quantity)
 
                     print(f"   📊 Запрошено: {requested_lots} шт, Исполнено: {executed_lots} шт")
 
-                    # Пытаемся получить цену исполнения
                     exec_price = None
                     if hasattr(order, 'executed_order_price') and order.executed_order_price:
                         from t_tech.invest.utils import quotation_to_decimal
@@ -992,38 +1009,11 @@ class TBankClient:
             error_msg = str(e)
             print(f"   ❌ ОШИБКА: {error_msg[:150]}")
 
-            # ========== 4. ОБРАБОТКА ОШИБОК ==========
+            # ========== 5. ОБРАБОТКА ОШИБОК ==========
 
-            # 30068 - инструмент не торгуется
-            if "30068" in error_msg:
-                warning(f"   ⚠️ {ticker}: ОШИБКА 30068 - инструмент не торгуется или недоступен")
-                warning(f"   ⛔ Добавляем {ticker} в ЧЁРНЫЙ СПИСОК (блокируем на 60 мин)")
-                self.mark_as_confirmation_required(figi)
-                return {
-                    'success': False,
-                    'order_id': None,
-                    'quantity': 0,
-                    'error': '30068 - инструмент не торгуется',
-                    'block_ticker': True
-                }
-
-            # 90002 - нарушено предусловие
-            elif "90002" in error_msg:
-                warning(f"   ⚠️ {ticker}: ОШИБКА 90002 - нарушено предусловие")
-                warning(f"   ⚠️ Инструмент может требовать подтверждения или недоступен")
-                self.mark_as_confirmation_required(figi)
-                return {
-                    'success': False,
-                    'order_id': None,
-                    'quantity': 0,
-                    'error': '90002 - нарушено предусловие',
-                    'block_ticker': True
-                }
-
-            # 30042 - недостаточно средств/маржи
-            elif "30042" in error_msg:
-                warning(f"   ⚠️ {ticker}: ОШИБКА 30042 - рыночная заявка отклонена")
-                warning(f"   🔄 Пробуем АГРЕССИВНУЮ ЛИМИТНУЮ заявку (проскальзывание 3%)...")
+            # ✅ 30042 - недостаточно средств/маржи
+            if "30042" in error_msg:
+                warning(f"   ⚠️ {ticker}: ОШИБКА 30042 - недостаточно средств или маржи")
 
                 current_price = self.get_current_price(figi)
                 if current_price:
@@ -1034,7 +1024,6 @@ class TBankClient:
 
                     print(f"   📋 АГРЕССИВНАЯ ЛИМИТНАЯ: {direction} {quantity} шт {ticker} по {limit_price:.2f}₽")
 
-                    # Пробуем лимитную заявку
                     limit_result = self.place_limit_order(figi, quantity, direction, limit_price)
 
                     if limit_result:
@@ -1045,66 +1034,69 @@ class TBankClient:
                             'price': limit_price,
                             'note': 'использована агрессивная лимитная заявка'
                         }
-                    else:
-                        return {
-                            'success': False,
-                            'order_id': None,
-                            'quantity': 0,
-                            'error': '30042 - недостаточно средств, и лимитная заявка не удалась'
-                        }
-                else:
+
+                # Проверяем, не OTC ли инструмент
+                if self.is_confirmation_required(figi):
+                    warning(f"   🔐 {ticker}: OTC инструмент, требуется ручное закрытие")
+                    warning(f"   📱 Закройте позицию вручную в приложении Т-Банк")
                     return {
                         'success': False,
                         'order_id': None,
                         'quantity': 0,
-                        'error': '30042 - недостаточно средств, не удалось получить цену для лимитной заявки'
+                        'error': '30042 - недостаточно средств, OTC инструмент',
+                        'requires_manual': True,
+                        'is_otc': True
                     }
 
-            # 30240 - ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ СДЕЛОК (OTC)
+                return {
+                    'success': False,
+                    'order_id': None,
+                    'quantity': 0,
+                    'error': '30042 - недостаточно средств, и лимитная заявка не удалась'
+                }
+
+            # ✅ 30240 - ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ СДЕЛОК (OTC)
             elif "30240" in error_msg:
                 warning(f"   🔐 {ticker}: ОШИБКА 30240 - требуется подтверждение сделок!")
-                warning(f"   ⛔ Добавляем {ticker} в ЧЁРНЫЙ СПИСОК (блокируем на 1 час)")
                 warning(f"   📱 Закройте позицию вручную в приложении Т-Банк, если она открыта")
-                self.mark_as_confirmation_required(figi)
-                # ✅ ДОБАВИТЬ: возвращаем специальный флаг для позиции
+
+                # ✅ МАРКИРУЕМ КАК OTC (НО НЕ БЛОКИРУЕМ ЖЁСТКО)
+                self._confirmation_cache[figi] = True
+                self._confirmation_cache_time[figi] = time.time()
+
                 return {
                     'success': False,
                     'order_id': None,
                     'quantity': 0,
                     'error': '30240 - требуется подтверждение сделок (OTC)',
-                    'block_ticker': True,
-                    'requires_manual': True,  # ← НОВЫЙ ФЛАГ
-                    'is_otc': True  # ← НОВЫЙ ФЛАГ
+                    'requires_manual': True,
+                    'is_otc': True,
+                    'block_ticker': False  # ✅ НЕ БЛОКИРУЕМ, ПРОСТО МАРКИРУЕМ
                 }
 
-            # 30083 - инструмент не доступен
+            # ✅ 30068 - инструмент не торгуется
+            elif "30068" in error_msg:
+                warning(f"   ⚠️ {ticker}: ОШИБКА 30068 - инструмент не торгуется или недоступен")
+                return {
+                    'success': False,
+                    'order_id': None,
+                    'quantity': 0,
+                    'error': '30068 - инструмент не торгуется',
+                    'block_ticker': False
+                }
+
+            # ✅ 30083 - инструмент не доступен
             elif "30083" in error_msg:
                 warning(f"   ⚠️ {ticker}: ОШИБКА 30083 - инструмент не доступен для торговли")
-                warning(f"   ⛔ Добавляем {ticker} в чёрный список на 1 час")
-
-                # Блокируем тикер
-                try:
-                    from trading_bot.trading.position_sizer import position_sizer
-                    import time
-                    if not hasattr(position_sizer, '_short_blocked_until'):
-                        position_sizer._short_blocked_until = {}
-                    if not hasattr(position_sizer, '_long_blocked_until'):
-                        position_sizer._long_blocked_until = {}
-                    position_sizer._short_blocked_until[ticker] = time.time() + 3600
-                    position_sizer._long_blocked_until[ticker] = time.time() + 3600
-                    print(f"   🔒 {ticker} заблокирован")
-                except Exception as e:
-                    debug(f"   ⚠️ Не удалось заблокировать {ticker}: {e}")
-
                 return {
                     'success': False,
                     'order_id': None,
                     'quantity': 0,
                     'error': '30083 - инструмент не доступен',
-                    'block_ticker': True
+                    'block_ticker': False
                 }
 
-            # 70002 - внутренняя ошибка API
+            # ✅ 70002 - внутренняя ошибка API
             elif "70002" in error_msg or "internal" in error_msg.lower():
                 import time
                 warning(f"   ⚠️ ВНУТРЕННЯЯ ОШИБКА API (70002) при {direction} {ticker}, повтор через 2 сек...")
@@ -1120,17 +1112,6 @@ class TBankClient:
                         'quantity': 0,
                         'error': f'70002 - внутренняя ошибка API после повтора: {retry_error}'
                     }
-
-            # 30240 уже обработан выше, но оставляем для страховки
-            elif "30240" in error_msg:
-                warning(f"   🔐 {ticker}: ОШИБКА 30240 - стоп-ордера НЕ ПОДДЕРЖИВАЮТСЯ")
-                self._no_stop_orders.add(figi)
-                return {
-                    'success': True,  # Считаем успехом, так как рыночная заявка может быть исполнена
-                    'order_id': None,
-                    'quantity': quantity,
-                    'note': 'стоп-ордера не поддерживаются, но рыночная заявка отправлена'
-                }
 
             # Неизвестная ошибка
             else:
@@ -1163,7 +1144,7 @@ class TBankClient:
 
                 # ✅ Округляем цену до шага
                 target_price = round(target_price / step) * step
-                target_price = max(target_price, step)  # Цена не может быть меньше шага
+                target_price = max(target_price, step)
 
                 # ✅ Для продажи проверяем минимальную цену
                 if direction == "SELL" and target_price < 0.01:
@@ -1174,13 +1155,11 @@ class TBankClient:
                     return False
 
                 # ✅ КРИТИЧЕСКИ ВАЖНО: правильное форматирование Decimal
-                # Используем строковое представление с фиксированной точностью
                 price_str = f"{target_price:.2f}"
                 price_decimal = Decimal(price_str).quantize(Decimal(str(step)), rounding=ROUND_HALF_UP)
                 price_quotation = decimal_to_quotation(price_decimal)
 
                 dir_map = {"BUY": OrderDirection.ORDER_DIRECTION_BUY, "SELL": OrderDirection.ORDER_DIRECTION_SELL}
-                # needs_margin = (direction == "SELL")
                 confirm_margin = (direction == "SELL")
 
                 info(f"📋 ЛИМИТНАЯ: {direction} {quantity} шт {ticker} по {target_price:.2f}₽")
@@ -1193,7 +1172,7 @@ class TBankClient:
                     account_id=self.account_id,
                     order_type=OrderType.ORDER_TYPE_LIMIT,
                     order_id=str(uuid.uuid4()),
-                    confirm_margin_trade=confirm_margin  # ← ИСПРАВЛЕНО
+                    confirm_margin_trade=confirm_margin
                 )
 
                 if order and order.order_id:
@@ -1206,13 +1185,15 @@ class TBankClient:
                 if "30240" in error_msg:
                     warning(f"⚠️ {ticker} требует подтверждения сделок")
                     self.mark_as_confirmation_required(figi)
+                    # ✅ НЕ БЛОКИРУЕМ ЖЁСТКО, просто маркируем
+                    return False
                 elif "30100" in error_msg:
                     warning(f"⚠️ {ticker}: ОШИБКА 30100 - некорректная цена {target_price}")
                     warning(f"   Пробуем рыночную заявку...")
                     return self._place_market_order_impl(figi, quantity, direction)
                 else:
                     warning(f"❌ Ошибка лимитной заявки: {error_msg[:100]}")
-                return False
+                    return False
 
     def place_pending_order(self, figi: str, quantity: int, direction: str, target_price: float,
                             expiry_hours: int = 24) -> bool:
@@ -1808,32 +1789,14 @@ class TBankClient:
 
     @api_monitor.measure("get_last_prices_batch")
     def get_last_prices_batch(self, figis: List[str]) -> Dict[str, float]:
-        """
-        ПОЛУЧЕНИЕ ЦЕН СРАЗУ ДЛЯ НЕСКОЛЬКИХ ИНСТРУМЕНТОВ (BATCH)
-        С ПОДДЕРЖКОЙ КЭШИРОВАНИЯ
-        """
+        """ПОЛУЧЕНИЕ ЦЕН СРАЗУ ДЛЯ НЕСКОЛЬКИХ ИНСТРУМЕНТОВ (BATCH)"""
         from t_tech.invest.utils import quotation_to_decimal
         from trading_bot.utils.time_utils import is_trading_time
-
-        # ✅ Если не торговое время, возвращаем только из кэша
-        if not is_trading_time():
-            result = {}
-            for figi in figis:
-                cached = price_cache.get(figi)
-                if cached is not None:
-                    result[figi] = cached
-            if result:
-                debug(f"   📦 Возвращены цены из кэша ({len(result)} шт) - не торговое время")
-                return result
-            debug(f"   ⏸️ Пропускаем batch-запрос (не торговое время, кэш пуст)")
-            return {}
-
-        self._wait_for_rate_limit()
 
         if not figis:
             return {}
 
-        # ========== 1. ПРОВЕРКА КЭША ДЛЯ КАЖДОГО FIGI ==========
+        # ✅ 1. ПРОВЕРКА КЭША
         result = {}
         uncached_figis = []
 
@@ -1841,48 +1804,37 @@ class TBankClient:
             cached = price_cache.get(figi)
             if cached is not None:
                 result[figi] = cached
-                debug(f"   📦 Кэш: {figi[:8]} = {cached:.4f}₽")
             else:
                 uncached_figis.append(figi)
 
-        # Если все цены в кэше — возвращаем сразу
         if not uncached_figis:
             debug(f"   ✅ Все {len(figis)} цен взяты из кэша")
             return result
 
-        debug(f"   📡 Batch-запрос для {len(uncached_figis)} FIGI: {[f[:8] for f in uncached_figis]}")
+        self._wait_for_rate_limit()
 
-        # ========== 2. BATCH-ЗАПРОС К API ==========
+        # ✅ 2. BATCH-ЗАПРОС
         try:
             with Client(self.token) as client:
-                # ОДИН ЗАПРОС К API ДЛЯ ВСЕХ FIGI
                 last_prices_response = client.market_data.get_last_prices(figi=uncached_figis)
 
-                # Обрабатываем ответ и СОХРАНЯЕМ В КЭШ
                 for price_data in last_prices_response.last_prices:
                     figi = price_data.figi
                     price = float(quotation_to_decimal(price_data.price))
                     result[figi] = price
-                    # ✅ СОХРАНЯЕМ В КЭШ (TTL 10 секунд)
-                    price_cache.set(figi, price, ttl=10)
-                    debug(f"   ✅ {figi[:8]}: {price:.4f}₽ (сохранено в кэш)")
+                    price_cache.set(figi, price, ttl=10)  # TTL 10 секунд
 
-                # Проверяем, все ли FIGI вернулись
+                # ✅ 3. FALLBACK ДЛЯ ОТСУТСТВУЮЩИХ
                 returned_figis = {p.figi for p in last_prices_response.last_prices}
                 missing = set(uncached_figis) - returned_figis
 
                 if missing:
-                    warning(f"   ⚠️ Не получены цены для {len(missing)} FIGI: {list(missing)[:3]}...")
-
-                    # Fallback: получаем по одному для отсутствующих
                     for figi in missing:
                         try:
                             price = self.get_current_price(figi)
                             if price:
                                 result[figi] = price
-                                # ✅ СОХРАНЯЕМ В КЭШ
                                 price_cache.set(figi, price, ttl=10)
-                                debug(f"   ✅ {figi[:8]}: {price:.4f}₽ (fallback, сохранено в кэш)")
                         except Exception as e:
                             warning(f"   ❌ Не удалось получить цену для {figi[:8]}: {e}")
 
@@ -1890,21 +1842,12 @@ class TBankClient:
 
         except Exception as e:
             error(f"❌ Ошибка batch получения цен: {e}")
-
-            # ========== 3. FALLBACK: ПОЛУЧАЕМ ПО ОДНОМУ ==========
-            warning(f"   🔄 Fallback: получаем цены по одному...")
-            for figi in uncached_figis:
-                try:
-                    price = self.get_current_price(figi)
-                    if price:
-                        result[figi] = price
-                        # ✅ СОХРАНЯЕМ В КЭШ
-                        price_cache.set(figi, price, ttl=10)
-                        debug(f"   ✅ {figi[:8]}: {price:.4f}₽ (fallback, сохранено в кэш)")
-                except Exception as e2:
-                    warning(f"   ❌ {figi[:8]}: {e2}")
-
             return result
+        
+    def clear_trading_status_cache(self):
+        """Очистка кэша статусов торгов"""
+        self._trading_status_cache.clear()
+        debug("🧹 Кэш статусов торгов очищен")
 
     def get_all_shares(self, limit: int = 1000) -> List[Dict[str, Any]]:
         """Получение списка акций с кэшированием"""
@@ -2036,23 +1979,22 @@ class TBankClient:
                         return []
                     debug(f"   ❌ Ошибка получения свечей {figi[:8]}: {e}")
                     return []
-
+    @api_monitor.measure("get_trading_status")
     def get_trading_status(self, figi: str) -> Dict[str, Any]:
-        """
-        Получение статуса торгов с ДЕТАЛЬНОЙ ИНФОРМАЦИЕЙ
-        """
+        """Получение статуса торгов с КЭШИРОВАНИЕМ"""
         self._wait_for_rate_limit()
 
+        # ✅ ПРОВЕРКА КЭША
         cache_key = f"trading_status_{figi}"
-        cached_result = instruments_cache.get(cache_key)
-        if cached_result is not None:
-            return cached_result
+        if cache_key in self._trading_status_cache:
+            cached_time, cached_data = self._trading_status_cache[cache_key]
+            if (time.time() - cached_time) < self._trading_status_ttl:
+                return cached_data
 
         try:
             with Client(self.token) as client:
                 status = client.market_data.get_trading_status(instrument_id=figi)
 
-                # ✅ БЕЗОПАСНОЕ ПОЛУЧЕНИЕ АТРИБУТОВ (с защитой от отсутствия)
                 result = {
                     'trading_status': getattr(status, 'trading_status', 0),
                     'api_trade_available': getattr(status, 'api_trade_available_flag', False),
@@ -2061,16 +2003,16 @@ class TBankClient:
                     'trading_status_description': self._get_trading_status_description(
                         getattr(status, 'trading_status', 0)
                     ),
+                    'order_types': []
                 }
 
-                # Добавляем информацию о доступности разных типов заявок
-                result['order_types'] = []
                 if result['market_order_available']:
                     result['order_types'].append('MARKET')
                 if result['limit_order_available']:
                     result['order_types'].append('LIMIT')
 
-                instruments_cache.set(cache_key, result.copy(), ttl=60)
+                # ✅ СОХРАНЯЕМ В КЭШ
+                self._trading_status_cache[cache_key] = (time.time(), result)
                 return result
 
         except Exception as e:
@@ -2083,7 +2025,7 @@ class TBankClient:
                 'order_types': [],
                 'trading_status_description': 'Ошибка получения статуса'
             }
-
+    
     def _get_trading_status_description(self, status_code) -> str:
         """
         Преобразование кода статуса в понятное описание
@@ -2237,6 +2179,16 @@ class TBankClient:
                 # ========== 3. ПРОВЕРКА ЧЕРЕЗ ТОРГОВЫЙ СТАТУС ==========
                 trading_status = self.get_trading_status(figi)
 
+                # ✅ ДИАГНОСТИКА ДЛЯ ОТЛАДКИ
+                ticker = self._get_ticker_by_figi(figi)
+                if ticker == "AFKS":
+                    info(f"🔍 Диагностика AFKS:")
+                    info(f"   📊 api_trade_available: {trading_status.get('api_trade_available', False)}")
+                    info(f"   📊 market_order_available: {trading_status.get('market_order_available', False)}")
+                    info(f"   📊 limit_order_available: {trading_status.get('limit_order_available', False)}")
+                    info(f"   📊 trading_status: {trading_status.get('trading_status', 'unknown')}")
+                    info(f"   📊 description: {trading_status.get('trading_status_description', 'unknown')}")
+
                 # Если API торговля недоступна - считаем OTC
                 if not trading_status.get('api_trade_available', True):
                     instruments_cache.set(cache_key, True, ttl=3600)
@@ -2248,33 +2200,9 @@ class TBankClient:
                     instruments_cache.set(cache_key, True, ttl=3600)
                     return True
 
-                # ========== 4. ✅ РЕАЛЬНАЯ ПРОВЕРКА ЧЕРЕЗ API (ВНУТРИ ТОГО ЖЕ КЛИЕНТА) ==========
-                try:
-                    # Получаем текущую цену для тестового запроса
-                    current_price = self.get_current_price(figi)
-                    if current_price and current_price > 0:
-                        test_price = current_price * 0.9
-                        from decimal import Decimal
-
-                        # ✅ client ДОСТУПЕН, мы всё ещё внутри with Client(self.token) as client
-                        max_lots = client.orders.get_max_lots(
-                            instrument_id=figi,
-                            price=decimal_to_quotation(Decimal(str(test_price)))
-                        )
-                        # Если дошли сюда - инструмент доступен
-                        instruments_cache.set(cache_key, False, ttl=1800)
-                        return False
-                except Exception as e:
-                    error_msg = str(e)
-                    # Ошибка 30240 - требует подтверждения
-                    if "30240" in error_msg:
-                        instruments_cache.set(cache_key, True, ttl=3600)
-                        return True
-                    debug(f"⚠️ Тестовый запрос для {figi}: {error_msg[:100]}")
-
-            # ========== 5. ПО УМОЛЧАНИЮ ==========
-            instruments_cache.set(cache_key, False, ttl=1800)
-            return False
+                # ========== 4. ПО УМОЛЧАНИЮ ==========
+                instruments_cache.set(cache_key, False, ttl=1800)
+                return False
 
         except Exception as e:
             debug(f"Ошибка проверки OTC для {figi}: {e}")

@@ -947,17 +947,33 @@ class CandleBuilder:
         self.stats["moex_calls"] += 1
 
         try:
-            candles = await self._moex_client.get_candles(
+            # ✅ ИСПРАВЛЕНО: используем СИНХРОННЫЙ метод get_candles_sync()
+            # Конвертируем интервал в минуты
+            interval_minutes = self._interval_to_minutes(interval)
+
+            # ✅ ПРАВИЛЬНЫЙ ВЫЗОВ
+            candles = self._moex_client.get_candles_sync(
                 ticker=ticker,
-                interval=interval,
-                days=days,
-                start_date=start_date,
-                end_date=end_date
+                interval_minutes=interval_minutes,
+                days=days
             )
 
             if candles:
                 info(f"📊 Retrieved {len(candles)} candles for {ticker} from MOEX")
-                return candles
+                # Конвертируем в нужный формат
+                result = []
+                for close, volume in candles:
+                    result.append({
+                        'close': close,
+                        'volume': volume,
+                        'high': close * 1.005,
+                        'low': close * 0.995,
+                        'open': close,
+                        'timestamp': datetime.now().isoformat(),
+                        'interval': interval,
+                        'is_closed': True
+                    })
+                return result
             else:
                 debug(f"⚠️ No candles for {ticker} from MOEX")
                 return []
@@ -966,6 +982,16 @@ class CandleBuilder:
             self.stats["moex_errors"] += 1
             error(f"❌ Error getting MOEX candles for {ticker}: {e}")
             return []
+
+    def _interval_to_minutes(self, interval: str) -> int:
+        """Конвертация строки интервала в минуты"""
+        interval_map = {
+            "1min": 1, "2min": 2, "3min": 3, "5min": 5, "10min": 10,
+            "15min": 15, "30min": 30, "1hour": 60, "2hour": 120,
+            "3hour": 180, "4hour": 240, "6hour": 360, "12hour": 720,
+            "1day": 1440, "1week": 10080, "1month": 43200
+        }
+        return interval_map.get(interval, 5)
 
     def _generate_mock_candles(self, ticker: str, days: int) -> List[Dict]:
         """Генерация тестовых свечей для self-test"""
@@ -1002,7 +1028,8 @@ class CandleBuilder:
             return None
 
         try:
-            return await self._moex_client.get_last_price(ticker)
+            # ✅ ИСПРАВЛЕНО: используем СИНХРОННЫЙ метод
+            return self._moex_client.get_current_price_sync(ticker)
         except Exception as e:
             debug(f"⚠️ Error getting current price for {ticker}: {e}")
             return None

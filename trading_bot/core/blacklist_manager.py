@@ -47,12 +47,14 @@ class BlacklistManager:
     def report_error(self, ticker: str, error_code: str = ""):
         ticker = ticker.upper()
 
+        # ✅ НЕ БЛОКИРУЕМ ПРИ ОПРЕДЕЛЁННЫХ ОШИБКАХ
         if error_code in ["30079", "30049", "30014"]:
             return
 
         self._error_counts[ticker] = self._error_counts.get(ticker, 0) + 1
         warning(f"📊 {ticker}: ошибка #{self._error_counts[ticker]} (код: {error_code})")
 
+        # ✅ БЛОКИРУЕМ ТОЛЬКО ПОСЛЕ 3 ОШИБОК ПОДРЯД
         if self._error_counts[ticker] >= self._error_threshold:
             warning(f"🚨 {ticker}: превышен порог ошибок - АВТОБЛОКИРОВКА!")
             self.add_temporary(ticker, ttl_minutes=self._block_ttl_hours * 60)

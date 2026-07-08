@@ -66,6 +66,22 @@ class PositionCloser:
         # ✅ ОТСЛЕЖИВАНИЕ ПОПЫТОК ЗАКРЫТИЯ
         self._close_attempts: Dict[str, int] = {}  # figi -> количество попыток
         self._close_attempt_time: Dict[str, datetime] = {}  # figi -> время последней попытки
+        
+        self._price_cache = {}
+        self._price_cache_ttl = 10  # 10 секунд
+        
+    def _get_price_cached(self, figi: str) -> Optional[float]:
+        """Получение цены с кэшированием"""
+        if figi in self._price_cache:
+            cached_time, price = self._price_cache[figi]
+            if (time.time() - cached_time) < self._price_cache_ttl:
+                return price
+        
+        from trading_bot.api.tbank_client import tbank
+        price = tbank.get_current_price(figi)
+        if price:
+            self._price_cache[figi] = (time.time(), price)
+        return price
 
     # ========== СИНХРОНИЗАЦИЯ ==========
 
@@ -139,17 +155,13 @@ class PositionCloser:
         quantity = position.quantity
         side = position.side.value
 
-        info(f"   📊 Позиция: {side} {quantity} шт")
-
         # Получаем текущую цену
         current_price = tbank.get_current_price(figi)
         if not current_price:
             error(f"❌ Не удалось получить цену для {ticker}")
             return False
 
-        info(f"   💰 Текущая цена: {current_price:.2f}₽")
-
-        # ========== ✅ ПРОВЕРКА: МОЖЕТ БЫТЬ ПОЗИЦИЯ УЖЕ ЗАКРЫТА? ==========
+        # ========== 1. ПРОВЕРКА: ПОЗИЦИЯ УЖЕ ЗАКРЫТА? ==========
         try:
             broker_positions = tbank.get_positions()
             broker_figis = {p['figi'] for p in broker_positions if abs(p.get('quantity', 0)) > 0}
@@ -160,63 +172,50 @@ class PositionCloser:
         except Exception:
             pass
 
-        # ========== ✅ ПРОВЕРКА: ЕСЛИ OTC ИНСТРУМЕНТ ==========
+        # ========== 2. ПРОВЕРКА: OTC ИНСТРУМЕНТ ==========
         try:
             if tbank.is_confirmation_required(figi):
                 warning(f"\n🔐 {ticker} - OTC ИНСТРУМЕНТ!")
                 warning(f"   НЕВОЗМОЖНО ЗАКРЫТЬ АВТОМАТИЧЕСКИ!")
                 warning(f"   📱 Закройте позицию ВРУЧНУЮ в приложении Т-Банк!")
 
-                # Отправляем Telegram уведомление
                 telegram = _get_telegram()
                 if telegram:
                     telegram.send_error(f"""
-    🚨 **OTC ИНСТРУМЕНТ!**
+        🚨 **OTC ИНСТРУМЕНТ!**
 
-    Инструмент {ticker} требует РУЧНОГО подтверждения сделок!
+        Инструмент {ticker} требует РУЧНОГО подтверждения сделок!
 
-    📊 Позиция: {side} {quantity} шт
-    💰 Цена: {current_price:.2f}₽
-    📉 Текущий P&L: {position.current_profit_amount(current_price):.2f}₽
+        📊 Позиция: {side} {quantity} шт
+        💰 Цена: {current_price:.2f}₽
 
-    **Закройте позицию вручную через приложение Т-Банк!**
-    """)
+        **Закройте позицию вручную через приложение Т-Банк!**
+        """)
 
-                # Удаляем из менеджера, чтобы бот не мучился
-                pm.remove_position(figi)
-                info(f"   🗑️ Позиция {ticker} удалена из менеджера")
+                # ✅ НЕ УДАЛЯЕМ ПОЗИЦИЮ! Она остаётся для ручного закрытия.
                 return False
         except Exception as e:
             warning(f"   ⚠️ Ошибка проверки OTC: {e}")
 
-        # Определяем режим торговли
+        # ========== 3. ПЕРЕБОР СТРАТЕГИЙ С ПРОГРЕССИВНЫМ ПРОСКАЛЬЗЫВАНИЕМ ==========
         mode = self._get_trading_mode()
         is_otc = mode == "otc"
-        is_dsvd = mode == "dsvd"
 
-        if is_otc:
-            warning(f"   🌙 OTC РЕЖИМ: используем лимитные заявки с большим проскальзыванием")
-        elif is_dsvd:
-            warning(f"   📊 ДСВД РЕЖИМ: используем лимитные заявки")
-
-        # Перебираем стратегии с прогрессивным проскальзыванием
         for attempt in range(max_attempts):
-            slippage = 0.02 + (attempt * 0.03)  # 2%, 5%, 8%, 11%, 14%
+            slippage = 0.02 + (attempt * 0.03)
             if is_otc:
-                slippage = min(0.30, slippage * 1.5)  # до 30% для OTC
+                slippage = min(0.30, slippage * 1.5)
 
             if side == "SHORT":
-                # Покупаем для закрытия SHORT
                 limit_price = current_price * (1 + slippage)
                 direction = "BUY"
                 action = "покупка"
             else:
-                # Продаём для закрытия LONG
                 limit_price = current_price * (1 - slippage)
                 direction = "SELL"
                 action = "продажа"
 
-            limit_price = tbank._round_to_min_increment(figi, limit_price)
+            limit_price = tbank._round_to_min_increment_advanced(figi, limit_price)
             slippage_pct = abs(limit_price - current_price) / current_price * 100
 
             info(f"\n   📍 Попытка {attempt + 1}/{max_attempts}:")
@@ -224,18 +223,13 @@ class PositionCloser:
             info(f"      Проскальзывание: {slippage_pct:.1f}%")
 
             try:
-                # Пробуем лимитную заявку
                 success_flag = tbank.place_limit_order(figi, quantity, direction, limit_price)
 
                 if success_flag:
                     success(f"\n✅ {ticker} УСПЕШНО ЗАКРЫТ!")
                     info(f"   Цена закрытия: {limit_price:.2f}₽")
                     info(f"   Проскальзывание: {slippage_pct:.1f}%")
-
-                    # Удаляем из менеджера
                     pm.remove_position(figi)
-                    self._close_attempts.pop(figi, None)
-
                     return True
                 else:
                     warning(f"   ❌ Лимитная заявка не прошла")
@@ -244,22 +238,19 @@ class PositionCloser:
                 error_msg = str(e)
                 warning(f"   ❌ Ошибка: {error_msg[:100]}")
 
-                # ========== ✅ ОБРАБОТКА ОШИБКИ 30240 ==========
+                # ========== ОБРАБОТКА ОШИБКИ 30240 ==========
                 if "30240" in error_msg:
                     warning(f"\n🔐 {ticker}: ОШИБКА 30240 - ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ СДЕЛОК!")
                     warning(f"   НЕВОЗМОЖНО ЗАКРЫТЬ АВТОМАТИЧЕСКИ!")
                     warning(f"   📱 Закройте позицию ВРУЧНУЮ в приложении Т-Банк!")
 
-                    # Отправляем Telegram
                     telegram = _get_telegram()
                     if telegram:
                         telegram.send_error(f"🚨 {ticker} требует ручного подтверждения! Закройте вручную!")
 
-                    # Удаляем из менеджера
-                    pm.remove_position(figi)
+                    # ✅ НЕ УДАЛЯЕМ ПОЗИЦИЮ!
                     return False
 
-                # Небольшая пауза между попытками
                 time.sleep(1)
 
         # Последний шанс - рыночная заявка (если не OTC)
@@ -276,18 +267,12 @@ class PositionCloser:
                     pm.remove_position(figi)
                     return True
             except Exception as e:
+                if "30240" in str(e):
+                    warning(f"\n🔐 {ticker}: Рыночная заявка требует подтверждения!")
+                    return False
                 error(f"   ❌ Рыночная заявка не удалась: {e}")
 
-        # Если ничего не помогло - добавляем в чёрный список и удаляем из менеджера
         error(f"\n💀 НЕ УДАЛОСЬ ЗАКРЫТЬ {ticker} после {max_attempts} попыток!")
-        error(f"   Добавляем в чёрный список и удаляем из менеджера")
-
-        blacklist = _get_blacklist_manager()
-        if blacklist:
-            blacklist.add_temporary(ticker, ttl_minutes=60)
-
-        pm.remove_position(figi)
-
         return False
 
     # ========== ПРИНУДИТЕЛЬНОЕ ЗАКРЫТИЕ ==========
@@ -672,13 +657,14 @@ class PositionCloser:
         return "regular"
 
     def _emergency_close_short(self, figi: str, quantity: int, ticker: str, is_critical: bool) -> bool:
-        """Экстренное закрытие SHORT позиции с улучшенной обработкой ошибок"""
+        """Экстренное закрытие SHORT позиции с КЭШИРОВАНИЕМ"""
         from trading_bot.api.tbank_client import tbank
 
         if quantity <= 0:
             return False
 
-        current_price = self.bot._get_current_price(figi)
+        # ✅ ИСПОЛЬЗУЕМ КЭШ ДЛЯ ЦЕНЫ
+        current_price = self._get_price_cached(figi)
         if not current_price:
             return False
 
@@ -686,32 +672,15 @@ class PositionCloser:
         info(f"   Количество: {quantity} шт")
         info(f"   Текущая цена: {current_price:.2f}₽")
 
-        # ========== ПРОВЕРКА: НЕ OTC ЛИ ИНСТРУМЕНТ? ==========
+        # ПРОВЕРКА OTC С КЭШИРОВАНИЕМ
         if tbank.is_confirmation_required(figi):
             warning(f"\n🔐 {ticker} - OTC ИНСТРУМЕНТ!")
             warning(f"   НЕВОЗМОЖНО ЗАКРЫТЬ АВТОМАТИЧЕСКИ!")
-            warning(f"   📱 Закройте позицию ВРУЧНУЮ в приложении Т-Банк!")
-
-            # Отправляем уведомление в Telegram
-            try:
-                from trading_bot.telegram.telegram_notifier import get_telegram_notifier
-                telegram = get_telegram_notifier()
-                if telegram:
-                    telegram.send_error(
-                        f"🚨 **OTC ИНСТРУМЕНТ!**\n\n"
-                        f"{ticker} требует РУЧНОГО закрытия!\n"
-                        f"📊 SHORT {quantity} шт по {current_price:.2f}₽\n"
-                        f"**Закройте вручную в приложении Т-Банк!**"
-                    )
-            except Exception:
-                pass
-
-            # Удаляем позицию из менеджера, чтобы бот не мучился
             from trading_bot.risk.position_manager import position_manager
             position_manager.remove_position(figi)
             return False
 
-        # ========== ПОПЫТКА 1: РЫНОЧНАЯ ЗАЯВКА ==========
+        # ПОПЫТКА 1: РЫНОЧНАЯ
         info(f"   📍 Попытка 1: рыночная заявка")
         try:
             result = tbank.buy(figi, quantity, use_market=True)
@@ -720,51 +689,25 @@ class PositionCloser:
                 return True
         except Exception as e:
             error_msg = str(e)
-            if "30042" in error_msg:
-                warning(f"   ⚠️ Ошибка 30042 - недостаточно средств")
-                info(f"   💡 Рекомендация: пополните счёт или закройте другие позиции")
-            elif "30240" in error_msg:
+            if "30240" in error_msg:
                 warning(f"   ⚠️ OTC инструмент, требуется ручное закрытие")
                 return False
             else:
                 warning(f"   ⚠️ Ошибка: {error_msg[:100]}")
 
-        # ========== ПОПЫТКА 2: ЛИМИТНАЯ ЗАЯВКА С ПРОСКАЛЬЗЫВАНИЕМ ==========
-        offsets = [0.02, 0.05, 0.10, 0.15, 0.20]  # 2%, 5%, 10%, 15%, 20%
-
-        for offset in offsets:
+        # ПОПЫТКИ С ПРОСКАЛЬЗЫВАНИЕМ
+        for offset in [0.02, 0.05, 0.10, 0.15, 0.20]:
             limit_price = current_price * (1 + offset)
-            limit_price = tbank._round_to_min_increment(figi, limit_price)
-
+            limit_price = tbank._round_to_min_increment_advanced(figi, limit_price)
             info(f"   📍 Попытка: лимитная +{offset * 100:.0f}% ({limit_price:.2f}₽)")
-
             try:
-                # Пробуем лимитную заявку
-                result = tbank.place_limit_order(figi, quantity, "BUY", limit_price)
-                if result:
-                    success(f"✅ SHORT {ticker} закрыт лимитной заявкой (+{offset * 100:.0f}%)!")
+                if tbank.place_limit_order(figi, quantity, "BUY", limit_price):
+                    success(f"✅ SHORT {ticker} закрыт лимитной заявкой!")
                     return True
-            except Exception as e:
-                error_msg = str(e)
-                if "30099" in error_msg:
-                    warning(f"   ⚠️ Ошибка 30099 - некорректная цена, пробуем дальше")
-                    continue
-                elif "30042" in error_msg:
-                    warning(f"   ⚠️ Ошибка 30042 - недостаточно средств")
-                    info(f"   💡 Пополните счёт для закрытия SHORT {ticker}")
-                    return False
-                else:
-                    warning(f"   ⚠️ Ошибка: {error_msg[:100]}")
-                    continue
+            except Exception:
+                continue
 
-        # ========== ВСЕ ПОПЫТКИ НЕ УДАЛИСЬ ==========
         error(f"❌ НЕ УДАЛОСЬ ЗАКРЫТЬ SHORT {ticker}!")
-        error(f"   💡 Рекомендация: закройте позицию вручную в приложении Т-Банк")
-
-        # Добавляем в чёрный список
-        from trading_bot.core.blacklist_manager import blacklist_manager
-        blacklist_manager.add_temporary(ticker, ttl_minutes=60)
-
         return False
 
     def _emergency_close_long(self, figi: str, quantity: int, ticker: str) -> bool:

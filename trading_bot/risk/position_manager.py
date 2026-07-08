@@ -1427,41 +1427,13 @@ class PositionManager:
     def _close_short_position_safe(self, position) -> bool:
         """
         БЕЗОПАСНОЕ ЗАКРЫТИЕ SHORT ПОЗИЦИИ
-
-        ВАЖНО:
-        - Возвращает True ТОЛЬКО если позиция реально закрыта у брокера!
-        - НИКОГДА не удаляет позицию при ошибке!
-        - Проверяет наличие средств перед закрытием!
-
-        Returns:
-            bool: True - позиция закрыта, False - не закрыта (ошибка или недостаточно средств)
+        Возвращает True ТОЛЬКО если позиция реально закрыта у брокера!
         """
         from trading_bot.api.tbank_client import tbank
         from trading_bot.logger import info, success, error, warning, debug
         import time
         from datetime import datetime
 
-        # ========== 0. ПРОВЕРКА OTC (нельзя закрыть через API) ==========
-        if tbank.is_confirmation_required(figi):
-            warning(f"\n🔐 {ticker} - OTC ИНСТРУМЕНТ! НЕВОЗМОЖНО ЗАКРЫТЬ АВТОМАТИЧЕСКИ!")
-            warning(f"   📱 Закройте позицию ВРУЧНУЮ в приложении Т-Банк!")
-            # Отправляем Telegram уведомление
-            try:
-                telegram = _get_telegram()
-                if telegram:
-                    telegram.send_error(
-                        f"🚨 **OTC ИНСТРУМЕНТ!**\n\n"
-                        f"Инструмент {ticker} требует РУЧНОГО закрытия!\n"
-                        f"📊 SHORT {quantity} шт по ~{current_price:.2f}₽\n\n"
-                        f"**Закройте вручную в приложении Т-Банк!**"
-                    )
-            except Exception:
-                pass
-            # НЕ удаляем позицию из менеджера! Она остаётся для ручного закрытия.
-            # Возвращаем False, чтобы позиция не удалялась.
-            return False
-
-        # ========== 1. ЗАЩИТА ОТ ПОВТОРНОГО ВЫЗОВА ==========
         if hasattr(position, '_closing'):
             warning(f"   🔒 SHORT {position.ticker}: уже в процессе закрытия, пропускаем")
             return False
@@ -1478,256 +1450,96 @@ class PositionManager:
             info(f"{'🔒' * 60}")
             info(f"   📊 Тикер: {ticker}")
             info(f"   🔢 Количество: {quantity} шт")
-            info(f"   💰 Цена входа: {position.avg_price:.2f}₽")
-            info(f"   ⏰ Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+            # ========== 1. ПРОВЕРКА OTC ==========
+            if tbank.is_confirmation_required(figi):
+                warning(f"\n🔐 {ticker} - OTC ИНСТРУМЕНТ! НЕВОЗМОЖНО ЗАКРЫТЬ АВТОМАТИЧЕСКИ!")
+                warning(f"   📱 Закройте позицию ВРУЧНУЮ в приложении Т-Банк!")
+
+                # Отправляем Telegram уведомление
+                try:
+                    telegram = _get_telegram()
+                    if telegram:
+                        telegram.send_error(
+                            f"🚨 **OTC ИНСТРУМЕНТ!**\n\n"
+                            f"Инструмент {ticker} требует РУЧНОГО закрытия!\n"
+                            f"📊 SHORT {quantity} шт\n\n"
+                            f"**Закройте вручную в приложении Т-Банк!**"
+                        )
+                except Exception:
+                    pass
+
+                # ✅ НЕ УДАЛЯЕМ ПОЗИЦИЮ ИЗ МЕНЕДЖЕРА!
+                return False
 
             # ========== 2. ПОЛУЧАЕМ ТЕКУЩУЮ ЦЕНУ ==========
-            info(f"\n📡 [1/7] ПОЛУЧЕНИЕ ТЕКУЩЕЙ ЦЕНЫ...")
             current_price = tbank.get_current_price(figi)
-
             if not current_price or current_price <= 0:
                 error(f"   ❌ НЕ УДАЛОСЬ ПОЛУЧИТЬ ЦЕНУ для {ticker}!")
-                error(f"   💡 Возвращаем False, позиция НЕ УДАЛЕНА")
                 return False
 
             info(f"   ✅ Текущая цена: {current_price:.4f}₽")
 
-            # ========== 3. РАСЧЁТ НЕОБХОДИМЫХ СРЕДСТВ ==========
-            buy_back_cost = quantity * current_price * 1.05
-            info(f"\n💰 [2/7] РАСЧЁТ НЕОБХОДИМЫХ СРЕДСТВ:")
-            info(f"   Количество: {quantity} шт")
-            info(f"   Цена: {current_price:.2f}₽")
-            info(f"   Стоимость выкупа: {quantity * current_price:.2f}₽")
-            info(f"   С запасом (5%): {buy_back_cost:.2f}₽")
-
-            # ========== 4. ПРОВЕРКА, ЧТО ПОЗИЦИЯ СУЩЕСТВУЕТ ==========
-            info(f"\n🔍 [3/7] ПРОВЕРКА СУЩЕСТВОВАНИЯ ПОЗИЦИИ У БРОКЕРА...")
-
+            # ========== 3. ПРОВЕРКА СУЩЕСТВОВАНИЯ ПОЗИЦИИ ==========
             broker_positions = tbank.get_positions(force_refresh=True)
             position_exists = False
             actual_qty = 0
-            actual_avg_price = 0
 
             for pos in broker_positions:
                 if pos.get('figi') == figi:
                     actual_qty = abs(pos.get('quantity', 0))
-                    actual_avg_price = pos.get('avg_price', 0)
                     if actual_qty > 0:
                         position_exists = True
                     break
 
             if not position_exists:
                 info(f"   ℹ️ Позиция {ticker} уже закрыта у брокера")
-                info(f"   ✅ Возвращаем True, позицию МОЖНО УДАЛИТЬ из менеджера")
                 return True
 
-            info(f"   ✅ Позиция существует у брокера:")
-            info(f"      Количество: {actual_qty} шт")
-            info(f"      Средняя цена: {actual_avg_price:.2f}₽")
+            # ========== 4. ОТПРАВКА ЗАЯВКИ ==========
+            info(f"\n📡 ОТПРАВКА ЗАЯВКИ НА ПОКУПКУ {quantity} шт {ticker}...")
 
-            if actual_qty != quantity:
-                warning(f"   ⚠️ Количество изменилось: {quantity} → {actual_qty} шт")
-                quantity = actual_qty
-                buy_back_cost = quantity * current_price * 1.05
-                info(f"   🔄 Пересчитана стоимость выкупа: {buy_back_cost:.2f}₽")
-
-            # ========== 5. ПРОВЕРКА СРЕДСТВ ==========
-            info(f"\n💰 [4/7] ПРОВЕРКА ДОСТУПНОСТИ СРЕДСТВ...")
-
-            available, total_capital, blocked = tbank.get_available_funds()
-            margin_info = tbank.get_margin_info()
-            margin_rate = margin_info.get('margin_rate', 0)
-
-            info(f"   📊 Финансовое состояние:")
-            info(f"      Доступно средств: {available:.2f}₽")
-            info(f"      Общий капитал: {total_capital:.2f}₽")
-            info(f"      Заблокировано: {blocked:.2f}₽")
-            info(f"      Маржа: {margin_rate:.1f}%")
-
-            if available < buy_back_cost:
-                deficit = buy_back_cost - available
-                error(f"\n   ❌ НЕДОСТАТОЧНО СРЕДСТВ ДЛЯ ЗАКРЫТИЯ SHORT {ticker}!")
-                error(f"      Нужно: {buy_back_cost:.0f}₽")
-                error(f"      Доступно: {available:.0f}₽")
-                error(f"      Дефицит: {deficit:.0f}₽")
-
-                # Пытаемся освободить средства
-                info(f"\n   🔄 ПЫТАЕМСЯ ОСВОБОДИТЬ СРЕДСТВА...")
-                freed = self._try_free_funds_for_short(deficit, ticker)
-
-                if freed > 0:
-                    info(f"   ✅ Освобождено {freed:.0f}₽")
-                    time.sleep(2)
-                    available, _, _ = tbank.get_available_funds()
-                    info(f"   💰 После освобождения доступно: {available:.2f}₽")
-
-                    if available >= buy_back_cost:
-                        info(f"   ✅ ТЕПЕРЬ СРЕДСТВ ДОСТАТОЧНО!")
-                    else:
-                        new_deficit = buy_back_cost - available
-                        error(f"   ❌ ВСЁ ЕЩЁ НЕДОСТАТОЧНО! Дефицит: {new_deficit:.0f}₽")
-                        warning(f"\n   ⚠️ ПОЗИЦИЯ {ticker} НЕ БУДЕТ УДАЛЕНА ИЗ МЕНЕДЖЕРА!")
-                        return False
-                else:
-                    error(f"   ❌ НЕ УДАЛОСЬ ОСВОБОДИТЬ СРЕДСТВА!")
-                    warning(f"\n   ⚠️ ПОЗИЦИЯ {ticker} НЕ БУДЕТ УДАЛЕНА ИЗ МЕНЕДЖЕРА!")
-
-                    # Отправляем Telegram уведомление
-                    try:
-                        telegram = _get_telegram()
-                        if telegram:
-                            telegram.send_error(
-                                f"🚨 **КРИТИЧЕСКАЯ ОШИБКА!**\n\n"
-                                f"❌ НЕДОСТАТОЧНО СРЕДСТВ ДЛЯ ЗАКРЫТИЯ SHORT!\n\n"
-                                f"📊 {ticker}\n"
-                                f"💰 Нужно: {buy_back_cost:.0f}₽\n"
-                                f"💰 Доступно: {available:.0f}₽\n"
-                                f"📉 Дефицит: {deficit:.0f}₽\n\n"
-                                f"⚠️ ПОЗИЦИЯ НЕ БУДЕТ ЗАКРЫТА!\n"
-                                f"⚠️ ПОЗИЦИЯ НЕ УДАЛЕНА ИЗ МЕНЕДЖЕРА!\n\n"
-                                f"💡 РЕКОМЕНДАЦИИ:\n"
-                                f"   1. Пополните счёт\n"
-                                f"   2. Или закройте позицию вручную в приложении Т-Банк"
-                            )
-                    except Exception as e:
-                        debug(f"   ⚠️ Ошибка отправки уведомления: {e}")
-
-                    return False
-            else:
-                info(f"   ✅ СРЕДСТВ ДОСТАТОЧНО для закрытия!")
-
-            # ========== 6. ОТМЕНА СТОП-ПРИКАЗОВ ==========
-            info(f"\n📋 [5/7] ОТМЕНА СТОП-ПРИКАЗОВ...")
             try:
-                self._cancel_stop_orders(position)
-                info(f"   ✅ Стоп-приказы отменены")
-            except Exception as e:
-                warning(f"   ⚠️ Ошибка при отмене стоп-приказов: {e}")
-
-            # ========== 7. ОТПРАВКА ЗАЯВКИ НА ЗАКРЫТИЕ ==========
-            info(f"\n📡 [6/7] ОТПРАВКА ЗАЯВКИ НА ПОКУПКУ {quantity} шт {ticker}...")
-
-            success_flag = False
-            try:
-                info(f"   📍 Тип заявки: РЫНОЧНАЯ (MARKET)")
                 success_flag = tbank.buy(figi, quantity, use_market=True)
+                if not success_flag:
+                    warning(f"   ⚠️ Рыночная заявка не удалась, пробуем лимитную...")
+                    limit_price = current_price * 1.02
+                    success_flag = tbank.place_limit_order(figi, quantity, "BUY", limit_price)
 
                 if not success_flag:
-                    error(f"   ❌ ЗАЯВКА НЕ ОТПРАВЛЕНА!")
-                    info(f"   🔄 Пробуем лимитную заявку...")
-                    limit_price = current_price * 1.02
-                    info(f"   📍 Тип заявки: ЛИМИТНАЯ по {limit_price:.2f}₽ (+2%)")
-                    success_flag = tbank.buy(figi, quantity, price=limit_price)
-
-                    if not success_flag:
-                        error(f"   ❌ И ЛИМИТНАЯ ЗАЯВКА НЕ ОТПРАВЛЕНА!")
-                        warning(f"\n   ⚠️ ПОЗИЦИЯ {ticker} НЕ БУДЕТ УДАЛЕНА ИЗ МЕНЕДЖЕРА!")
-                        return False
-                    else:
-                        info(f"   ✅ ЛИМИТНАЯ ЗАЯВКА ОТПРАВЛЕНА")
-                else:
-                    info(f"   ✅ РЫНОЧНАЯ ЗАЯВКА ОТПРАВЛЕНА")
+                    error(f"   ❌ НЕ УДАЛОСЬ ЗАКРЫТЬ {ticker}!")
+                    return False
 
             except Exception as e:
-                error(f"   ❌ ОШИБКА ПРИ ОТПРАВКЕ ЗАЯВКИ: {e}")
                 error_msg = str(e)
-                if "30049" in error_msg:
-                    error(f"   🔍 ОШИБКА 30049: недостаточно средств для маржинальной сделки")
-                    error(f"   💡 Рекомендация: пополните счёт или закройте другие позиции")
-                elif "30240" in error_msg:
-                    error(f"   🔍 ОШИБКА 30240: инструмент требует подтверждения сделок (OTC)")
-                    error(f"   💡 Рекомендация: закройте позицию вручную в приложении Т-Банк")
+                if "30240" in error_msg:
+                    warning(f"   🔐 {ticker}: ОШИБКА 30240 - ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ!")
+                    warning(f"   📱 Закройте позицию ВРУЧНУЮ в приложении Т-Банк!")
+                    return False
                 else:
-                    error(f"   🔍 Код ошибки: {error_msg[:100]}")
+                    error(f"   ❌ ОШИБКА: {e}")
+                    return False
 
-                warning(f"\n   ⚠️ ПОЗИЦИЯ {ticker} НЕ БУДЕТ УДАЛЕНА ИЗ МЕНЕДЖЕРА!")
-                return False
-
-            # ========== 8. ОЖИДАНИЕ ИСПОЛНЕНИЯ ==========
-            info(f"\n⏳ [7/7] ОЖИДАНИЕ ИСПОЛНЕНИЯ ЗАЯВКИ (до 15 секунд)...")
-
+            # ========== 5. ОЖИДАНИЕ ИСПОЛНЕНИЯ ==========
             for attempt in range(15):
                 time.sleep(1)
-                debug(f"   Попытка {attempt + 1}/15...")
+                broker_positions = tbank.get_positions(force_refresh=True)
+                still_exists = False
+                for pos in broker_positions:
+                    if pos.get('figi') == figi:
+                        if abs(pos.get('quantity', 0)) > 0:
+                            still_exists = True
+                        break
 
-                try:
-                    broker_positions = tbank.get_positions(force_refresh=True)
-                    still_exists = False
-                    remaining_qty = 0
+                if not still_exists:
+                    success(f"\n✅ ПОЗИЦИЯ {ticker} УСПЕШНО ЗАКРЫТА!")
+                    return True
 
-                    for pos in broker_positions:
-                        if pos.get('figi') == figi:
-                            remaining_qty = abs(pos.get('quantity', 0))
-                            if remaining_qty > 0:
-                                still_exists = True
-                            break
-
-                    if not still_exists:
-                        success(f"\n{'✅' * 60}")
-                        success(f"✅ ПОЗИЦИЯ {ticker} УСПЕШНО ЗАКРЫТА!")
-                        success(f"   Время исполнения: {attempt + 1} сек")
-                        success(f"   Количество: {quantity} шт")
-                        success(f"   Цена закрытия: ~{current_price:.2f}₽")
-                        success(f"{'✅' * 60}")
-
-                        try:
-                            telegram = _get_telegram()
-                            if telegram:
-                                profit_pct = position.current_profit_pct(current_price)
-                                profit_amount = position.current_profit_amount(current_price)
-                                telegram.send_trade_closed(
-                                    side="SHORT",
-                                    reason="ЗАКРЫТО",
-                                    profit_pct=profit_pct,
-                                    profit_amount=profit_amount,
-                                    ticker=ticker,
-                                    quantity=quantity
-                                )
-                        except Exception as e:
-                            debug(f"   ⚠️ Ошибка отправки уведомления: {e}")
-
-                        return True
-                    else:
-                        debug(f" ⏳ Всё ещё существует ({remaining_qty} шт)")
-
-                except Exception as e:
-                    debug(f" ⚠️ Ошибка проверки: {e}")
-
-            # ========== 9. НЕ ДОЖДАЛИСЬ ИСПОЛНЕНИЯ ==========
-            warning(f"\n{'⚠️' * 60}")
-            warning(f"⚠️ ЗАЯВКА ОТПРАВЛЕНА, НО ПОЗИЦИЯ {ticker} ВСЁ ЕЩЁ СУЩЕСТВУЕТ!")
-            warning(f"{'⚠️' * 60}")
-            warning(f"   📊 Количество: {quantity} шт")
-            warning(f"   💰 Текущая цена: {current_price:.2f}₽")
-            warning(f"   ⏰ Время ожидания: 15 секунд")
-            warning(f"\n   💡 ЗАЯВКА МОЖЕТ ИСПОЛНИТЬСЯ ПОЗЖЕ!")
-            warning(f"   💡 Рекомендация: проверьте статус в приложении Т-Банк")
-            warning(f"\n   ⚠️ ПОЗИЦИЯ НЕ БУДЕТ УДАЛЕНА из менеджера!")
-            warning(f"   ⚠️ Будет выполнена повторная попытка в следующем цикле")
-
-            try:
-                telegram = _get_telegram()
-                if telegram:
-                    telegram.send_warning(
-                        f"⚠️ **ЗАВИСШАЯ ЗАЯВКА!**\n\n"
-                        f"📊 {ticker} (SHORT)\n"
-                        f"🔢 Количество: {quantity} шт\n"
-                        f"💰 Цена: {current_price:.2f}₽\n\n"
-                        f"Заявка на покупку отправлена,\n"
-                        f"но позиция всё ещё существует!\n\n"
-                        f"💡 Проверьте статус в приложении Т-Банк.\n"
-                        f"⚠️ Позиция НЕ УДАЛЕНА из менеджера."
-                    )
-            except Exception as e:
-                debug(f"   ⚠️ Ошибка отправки уведомления: {e}")
-
+            warning(f"\n⚠️ ЗАЯВКА ОТПРАВЛЕНА, НО ПОЗИЦИЯ {ticker} ВСЁ ЕЩЁ СУЩЕСТВУЕТ!")
             return False
 
         except Exception as e:
-            error(f"\n❌ КРИТИЧЕСКАЯ ОШИБКА В _close_short_position_safe:")
-            error(f"   {type(e).__name__}: {e}")
-            import traceback
-            error(f"   {traceback.format_exc()}")
+            error(f"\n❌ КРИТИЧЕСКАЯ ОШИБКА В _close_short_position_safe: {e}")
             return False
 
         finally:

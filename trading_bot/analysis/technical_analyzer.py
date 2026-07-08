@@ -1,4 +1,4 @@
-﻿"""Модуль технического анализа - ПРОФЕССИОНАЛЬНАЯ ВЕРСИЯ"""
+"""Модуль технического анализа - ПРОФЕССИОНАЛЬНАЯ ВЕРСИЯ"""
 
 import asyncio
 import nest_asyncio
@@ -70,6 +70,9 @@ class TechnicalAnalyzer:
         self.enabled = True
         self._analysis_cache = {}
         self._cache_ttl = 60
+        
+        self._candles_cache = {}
+        self._candles_cache_ttl = 30  # секунд (меньше, чем анализ)
 
         from trading_bot.config import config
         from trading_bot.logger import info
@@ -150,13 +153,25 @@ class TechnicalAnalyzer:
         return []
 
     def fetch_candles(self, ticker: str, interval_minutes: int = None, days: int = CANDLES_DAYS) -> List[Tuple[float, float]]:
-        """Получение свечей с приоритетом T-Invest API"""
+        """Получение свечей с приоритетом T-Invest API + КЭШИРОВАНИЕ"""
         ticker = ticker.upper()
-        start_time = time.time()
-
+        
         if interval_minutes is None:
             interval_minutes = 5
-
+        
+        # ========== ПРОВЕРКА КЭША ==========
+        cache_key = f"{ticker}_{interval_minutes}_{days}"
+        if cache_key in self._candles_cache:
+            cached_time, candles = self._candles_cache[cache_key]
+            if (time.time() - cached_time) < self._candles_cache_ttl:
+                debug(f"📦 КЭШ: {len(candles)} свечей для {ticker} (возраст: {time.time() - cached_time:.1f}с)")
+                return candles
+            else:
+                debug(f"⏰ КЭШ ПРОСРОЧЕН для {ticker}, обновляем...")
+        
+        # ========== ПОЛУЧЕНИЕ СВЕЧЕЙ (существующий код) ==========
+        start_time = time.time()
+        
         try:
             from trading_bot.api.tbank_client import tbank
             figi = tbank._get_figi_by_ticker(ticker)
@@ -171,6 +186,10 @@ class TechnicalAnalyzer:
                 if candles and len(candles) >= min_candles_needed:
                     elapsed = time.time() - start_time
                     success(f"✅ T-Invest API: {len(candles)} свечей для {ticker} (время={elapsed:.2f}с)")
+                    
+                    # ========== СОХРАНЯЕМ В КЭШ ==========
+                    self._candles_cache[cache_key] = (time.time(), candles)
+                    
                     return candles
                 elif candles:
                     actual_days = actual_days * 2
@@ -182,6 +201,29 @@ class TechnicalAnalyzer:
             warning(f"⚠️ T-Invest API ошибка для {ticker}: {e}")
 
         return []
+    
+    def clear_cache(self):
+        """Очистка кэша свечей"""
+        self._candles_cache.clear()
+        info("🧹 Кэш свечей очищен")
+        
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Статистика использования кэша"""
+        total = len(self._candles_cache)
+        if total == 0:
+            return {'total': 0, 'size': 0}
+        
+        total_size = sum(len(c) for _, c in self._candles_cache.values())
+        oldest = min(t for t, _ in self._candles_cache.values())
+        newest = max(t for t, _ in self._candles_cache.values())
+        
+        return {
+            'total_entries': total,
+            'total_candles': total_size,
+            'oldest_age': time.time() - oldest,
+            'newest_age': time.time() - newest,
+            'ttl_seconds': self._candles_cache_ttl
+        }
 
     def analyze_with_candles(self, figi: str, ticker: str, candles: List, current_price: float) -> Dict[str, Any]:
         """

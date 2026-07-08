@@ -257,7 +257,7 @@ def get_volumes_from_moex_sync(ticker: str, days: int = 5) -> List[int]:
 
 
 def get_current_price_sync(ticker: str) -> Optional[float]:
-    global _initialized, _loop  # ✅ global в начале функции
+    global _initialized, _loop
 
     if not ticker:
         print("⚠️ get_current_price_sync: пустой тикер")
@@ -393,13 +393,14 @@ def get_candle_builder_status() -> Dict[str, Any]:
         'has_builder': candle_builder is not None
     }
 
+
 def invalidate_cache_for_ticker(ticker: str):
     """
     Инвалидация кэша MOEX для конкретного тикера
     Вызывается перед анализом нового тикера, чтобы избежать путаницы с данными
     """
     global _candle_builder_instance
-    
+
     if _candle_builder_instance and hasattr(_candle_builder_instance, '_moex_client'):
         moex = _candle_builder_instance._moex_client
         if moex and hasattr(moex, '_cache'):

@@ -5,7 +5,7 @@ services:
     buildCommand: |
       pip install --upgrade pip
       pip install -r requirements.txt
-    startCommand: gunicorn web_server:app --bind 0.0.0.0:$PORT --workers 1 --threads 1 --timeout 300 --max-requests 200 --max-requests-jitter 50
+    startCommand: gunicorn web_server:app --bind 0.0.0.0:$PORT --workers 1 --threads 1 --timeout 600 --max-requests 500 --max-requests-jitter 50
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
@@ -21,6 +21,21 @@ services:
         value: "WARNING"
       - key: PYTHONPATH
         value: "."
+      # ✅ НОВЫЕ ПЕРЕМЕННЫЕ ДЛЯ ОПТИМИЗАЦИИ
+      - key: SCAN_INTERVAL
+        value: "120"              # Сканировать каждые 2 минуты
+      - key: MAX_TICKERS_TO_SCAN
+        value: "8"                # Анализировать только 8 тикеров
+      - key: PARALLEL_WORKERS
+        value: "3"                # 3 параллельных запроса
+      - key: SCAN_CACHE_TTL
+        value: "180"              # Кэш сканирования на 3 минуты
+      - key: API_MIN_INTERVAL
+        value: "1.0"              # Минимальный интервал между API запросами
+      - key: CANDLES_CACHE_TTL
+        value: "120"              # Кэш свечей на 2 минуты
+      - key: MAX_REQUESTS
+        value: "500"              # Максимум запросов на воркер
     healthCheckPath: /health
     autoDeploy: true
     plan: free

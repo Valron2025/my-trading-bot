@@ -98,7 +98,17 @@ class OrderValidator:
                             return False, "Лимитные заявки недоступны для этого инструмента", additional_info
                     else:
                         if not trading_status.market_order_available_flag:
-                            return False, "Рыночные заявки недоступны для этого инструмента", additional_info
+                            # ❌ СТАРЫЙ КОД (блокирует):
+                            # return False, "Рыночные заявки недоступны для этого инструмента", additional_info
+                            
+                            # ✅ НОВЫЙ КОД (автоматический переход на лимитную):
+                            if trading_status.limit_order_available_flag:
+                                info(f"   ⚠️ Рыночные заявки недоступны, используем лимитную")
+                                additional_info['use_limit_order'] = True
+                                additional_info['limit_price_hint'] = self._get_current_price(client, figi) * 0.99
+                                # НЕ БЛОКИРУЕМ, а просто меняем тип заявки
+                            else:
+                                return False, "Нет доступных типов заявок для этого инструмента", additional_info
 
             except Exception as e:
                 warning(f"⚠️ Ошибка получения статуса торгов: {e}")

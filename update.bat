@@ -8,10 +8,10 @@ echo   🚀 FORCE UPDATE TO GITHUB & RENDER
 echo ========================================
 echo.
 
-:: Переход в папку проекта
-cd /d F:\PROJECTS\my-trading-bot 2>nul
+:: Переход в папку проекта (✅ ИСПРАВЛЕНО)
+cd /d E:\ДОКУМЕНТЫ\PROJECTS\my-trading-bot 2>nul
 if %errorlevel% neq 0 (
-    echo [ERROR] Project folder not found: F:\PROJECTS\my-trading-bot
+    echo [ERROR] Project folder not found: E:\ДОКУМЕНТЫ\PROJECTS\my-trading-bot
     echo.
     pause
     exit /b 1
@@ -37,13 +37,13 @@ if not exist ".git" (
     echo.
 )
 
-:: Добавляем ВСЕ файлы (включая новые и удалённые)
+:: Добавляем ВСЕ файлы
 echo Adding all files...
 git add -A
 echo [OK] Files added
 echo.
 
-:: Создаём коммит (всегда, даже если нет изменений)
+:: Создаём коммит
 set "timestamp=%date% %time%"
 set "commitMsg=force-update %timestamp%"
 echo Committing: %commitMsg%
@@ -51,7 +51,7 @@ git commit -m "%commitMsg%" --allow-empty
 echo [OK] Commit created
 echo.
 
-:: ПРИНУДИТЕЛЬНЫЙ PUSH (полная замена на GitHub)
+:: ПРИНУДИТЕЛЬНЫЙ PUSH
 echo Force pushing to GitHub...
 git push origin main --force
 
