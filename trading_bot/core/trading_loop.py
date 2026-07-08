@@ -1486,7 +1486,7 @@ class TradingLoop:
     # ==================== ОСТАЛЬНЫЕ МЕТОДЫ ====================
 
     def _is_api_available(self) -> bool:
-        """Проверка доступности API Т-Банка (с учётом OTC и ДСВД)"""
+        """Проверка доступности API Т-Банка"""
         try:
             from trading_bot.api.tbank_client import tbank
             import threading
@@ -1504,42 +1504,31 @@ class TradingLoop:
             thread.start()
             thread.join(timeout=3.0)
 
-            from trading_bot.utils.time_utils import is_weekend_trading_time, is_otc_trading_time
-            can_trade_weekend = is_weekend_trading_time() or is_otc_trading_time()
-
-            info(f"🔍 Проверка API: can_trade_weekend={can_trade_weekend}")
-
+            # ✅ Проверяем, что поток завершился
             if thread.is_alive():
                 debug("⏰ API проверка превысила таймаут 3с")
-                if can_trade_weekend:
-                    info("   📊 ДСВД/OTC активны, считаем API доступным")
-                    return True
                 return False
 
+            # ✅ Ошибка при запросе
             if error[0]:
                 debug(f"⚠️ API недоступен: {error[0]}")
-                if can_trade_weekend:
-                    info("   📊 ДСВД/OTC активны, считаем API доступным")
-                    return True
                 return False
 
+            # ✅ API вернул данные - РАБОТАЕТ!
             if result[0] and result[0][1] > 0:
                 info(f"   ✅ API работает, капитал: {result[0][1]:.2f}₽")
                 return True
 
-            if can_trade_weekend:
-                info("   📊 ДСВД/OTC активны (капитал=0), считаем API доступным")
+            # ✅ Если капитал 0, но API ответил - тоже работает
+            if result[0] is not None:
+                info(f"   ✅ API работает (капитал: {result[0][1]:.2f}₽)")
                 return True
 
             return False
 
         except Exception as e:
             debug(f"Ошибка проверки API: {e}")
-            try:
-                from trading_bot.utils.time_utils import is_dsvd_trading_time, is_otc_trading_time
-                can_trade_weekend = is_dsvd_trading_time() or is_otc_trading_time()
-            except:
-                return False
+            return False
 
     def start_loop(self):
         """Запуск торгового цикла"""
