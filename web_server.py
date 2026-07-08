@@ -10,13 +10,10 @@ from datetime import datetime
 import threading
 import traceback
 
-# ✅ ПРИНУДИТЕЛЬНЫЙ ВЫВОД ВСЕХ ОШИБОК В STDOUT
-sys.stderr = sys.stdout
-
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s | %(levelname)s | %(message)s',
     datefmt='%H:%M:%S'
 )
@@ -72,40 +69,31 @@ def run_bot():
 
     try:
         print("   📦 ШАГ 1: Импорт trading_bot...")
-        sys.stdout.flush()
         from trading_bot import get_trading_bot
         print("   ✅ trading_bot импортирован успешно")
-        sys.stdout.flush()
 
         print("   📦 ШАГ 2: Получение экземпляра бота...")
-        sys.stdout.flush()
         _trading_bot = get_trading_bot()
         print(f"   ✅ Бот получен: {_trading_bot}")
-        sys.stdout.flush()
 
         print("   🚀 ШАГ 3: Запуск бота...")
-        sys.stdout.flush()
         _trading_bot.start()
         _bot_started = True
         print("   ✅ TRADING BOT STARTED")
-        sys.stdout.flush()
 
         print("\n" + "=" * 60)
         print("✅ БОТ УСПЕШНО ЗАПУЩЕН!")
         print("=" * 60)
-        sys.stdout.flush()
 
     except ImportError as e:
         _bot_error = f"ImportError: {e}"
         print(f"\n❌ ОШИБКА ИМПОРТА: {e}")
         traceback.print_exc()
-        sys.stdout.flush()
 
     except Exception as e:
         _bot_error = f"Exception: {e}"
         print(f"\n❌ ОШИБКА ЗАПУСКА БОТА: {e}")
         traceback.print_exc()
-        sys.stdout.flush()
 
     finally:
         print(f"\n📊 ИТОГ RUN_BOT:")
@@ -113,7 +101,6 @@ def run_bot():
         print(f"   _bot_error: {_bot_error}")
         print(f"   _trading_bot: {_trading_bot}")
         print("=" * 60)
-        sys.stdout.flush()
 
 
 # ✅ ЗАПУСКАЕМ БОТА В ОТДЕЛЬНОМ ПОТОКЕ
@@ -121,27 +108,26 @@ print("🔄 Создание потока для бота...")
 _bot_thread = threading.Thread(target=run_bot, daemon=True, name="TradingBotThread")
 _bot_thread.start()
 print(f"✅ Поток создан: {_bot_thread.name}")
-print(f"   Поток активен: {_bot_thread.is_alive()}")
-sys.stdout.flush()
 
-# ========== ОЖИДАНИЕ ЗАПУСКА БОТА ==========
-print("\n⏳ Ожидание запуска бота (до 15 секунд)...")
-for i in range(15):
+# ========== ОЖИДАНИЕ ЗАПУСКА БОТА (60 СЕКУНД) ==========
+print("\n⏳ Ожидание запуска бота (до 60 секунд)...")
+for i in range(60):
     time.sleep(1)
-    print(f"   ⏳ {i + 1}/15 - Поток активен: {_bot_thread.is_alive()}, Бот запущен: {_bot_started}")
-    sys.stdout.flush()
     if _bot_started:
         print("✅ БОТ УСПЕШНО ЗАПУЩЕН!")
         break
     if _bot_error:
         print(f"❌ ОШИБКА ЗАПУСКА БОТА: {_bot_error}")
         break
+    if i % 5 == 0:
+        print(f"   ⏳ Ожидание... {i + 1}/60")
 
+# Проверяем статус
 print("\n📊 ФИНАЛЬНЫЙ СТАТУС:")
 print(f"   Поток активен: {_bot_thread.is_alive()}")
 print(f"   Бот запущен: {_bot_started}")
 print(f"   Ошибка: {_bot_error}")
-sys.stdout.flush()
+print("=" * 60 + "\n")
 
 # ========== FLASK APP ==========
 app = Flask(__name__)
