@@ -1182,7 +1182,7 @@ class MasterDiagnostic:
         start = time.time()
 
         try:
-            from trading_bot.cache.ttl_cache import TTLCache
+            from trading_bot.cache.cache_manager import TTLCache
 
             cache = TTLCache(default_ttl=2)
 
