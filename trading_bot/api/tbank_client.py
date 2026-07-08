@@ -192,37 +192,37 @@ class TBankClient:
         self._confirmation_cache = {}
         self._confirmation_cache_time = {}
         self._no_stop_orders = set()
-        
-        # ✅ ГЛОБАЛЬНАЯ ЗАЩИТА ОТ РЕЙТ-ЛИМИТА
+
+        # ✅ УВЕЛИЧЕННЫЙ ИНТЕРВАЛ МЕЖДУ ЗАПРОСАМИ
         self._last_api_call = 0
         self._api_call_lock = Lock()
-        self._min_interval = 1.0  # ← УВЕЛИЧЕНО с 0.5 до 1.0
-        
+        self._min_interval = 2.0  # ← БЫЛО 0.5, СТАЛО 2.0
+
         # ✅ НОВЫЙ КЭШ ДЛЯ СТАТУСА ТОРГОВ
         self._trading_status_cache = {}
         self._trading_status_ttl = 60  # 60 секунд
 
-        # ========== КОНФИГУРАЦИЯ ТАЙМАУТОВ ==========
+        # ========== КОНФИГУРАЦИЯ ТАЙМАУТОВ (УВЕЛИЧЕНА) ==========
         self.timeout_config = {
-            'get_candles': 0.5,
-            'get_last_prices': 0.5,
-            'get_trading_status': 0.5,
-            'post_order': 1.5,
-            'cancel_order': 1.5,
-            'get_orders': 0.5,
-            'get_portfolio': 1.5,
-            'get_positions': 1.0,
-            'get_stop_orders': 1.5,
-            'post_stop_order': 1.5,
-            'get_margin_attributes': 0.3,
-            'get_info': 1.0,
-            'get_accounts': 0.3,
+            'get_candles': 5.0,  # было 0.5
+            'get_last_prices': 3.0,  # было 0.5
+            'get_trading_status': 2.0,  # было 0.5
+            'post_order': 5.0,  # было 1.5
+            'cancel_order': 5.0,  # было 1.5
+            'get_orders': 2.0,  # было 0.5
+            'get_portfolio': 5.0,  # было 1.5
+            'get_positions': 5.0,  # было 1.0
+            'get_stop_orders': 5.0,  # было 1.5
+            'post_stop_order': 5.0,  # было 1.5
+            'get_margin_attributes': 1.0,  # было 0.3
+            'get_info': 2.0,  # было 1.0
+            'get_accounts': 1.0,  # было 0.3
         }
 
         # ✅ ГЛОБАЛЬНАЯ ЗАЩИТА ОТ РЕЙТ-ЛИМИТА
         self._last_api_call = 0
         self._api_call_lock = Lock()
-        self._min_interval = 1.0
+        self._min_interval = 2.0
 
         # ========== НОВОЕ: ИНИЦИАЛИЗАЦИЯ ВАЛИДАТОРА ==========
         self._validator = None
@@ -682,14 +682,6 @@ class TBankClient:
         """
         Размещение лимитной заявки с fallback на рыночную.
         УЛУЧШЕННАЯ ОБРАБОТКА ВСЕХ ОШИБОК API.
-
-        Обрабатываемые ошибки:
-        - 30042: недостаточно средств/маржа → проверка OTC, удаление мёртвых позиций, рекомендации
-        - 30099: некорректная цена → коррекция по стакану, fallback на рыночную
-        - 30100: некорректная цена → fallback на рыночную
-        - 30240: инструмент не поддерживает стоп-ордера → помечаем, используем программный трейлинг
-        - 30068: инструмент не торгуется → блокировка
-        - 90002: нарушено предусловие → блокировка
         """
         self._wait_for_rate_limit()
 
@@ -754,19 +746,19 @@ class TBankClient:
                 info(f"❌ Ошибка лимитной заявки {ticker}: {error_msg[:200]}")
 
                 # ====================================================================
-                # 2. ОБРАБОТКА 30100 - НЕКОРРЕКТНАЯ ЦЕНА
+                # 1. ОБРАБОТКА 30100 - НЕКОРРЕКТНАЯ ЦЕНА
                 # ====================================================================
                 if "30100" in error_msg:
                     warning(f"⚠️ {ticker}: ОШИБКА 30100 - некорректная цена {target_price}")
                     info(f"   🔄 Fallback: {direction} {quantity} шт {ticker} через РЫНОК")
                     market_result = self._place_market_order_impl(figi, quantity, direction)
-                    if market_result:
+                    if market_result and market_result.get('success', False):
                         success(f"✅ Рыночная заявка {direction} {quantity} {ticker} УСПЕШНА (fallback после 30100)")
                         return True
                     return False
 
                 # ====================================================================
-                # 3. ОБРАБОТКА 30099 - НЕКОРРЕКТНАЯ ЦЕНА (ОСОБЫЙ СЛУЧАЙ)
+                # 2. ОБРАБОТКА 30099 - НЕКОРРЕКТНАЯ ЦЕНА (ОСОБЫЙ СЛУЧАЙ)
                 # ====================================================================
                 elif "30099" in error_msg:
                     warning(f"⚠️ {ticker}: ОШИБКА 30099 - некорректная цена для лимитной заявки")
@@ -778,11 +770,11 @@ class TBankClient:
                         if direction == "BUY" and orderbook and orderbook.get('best_ask'):
                             corrected_price = orderbook['best_ask'] * 1.01
                             info(f"   📊 Корректируем цену по стакану: {corrected_price:.2f}₽")
-                            return self._place_market_order_impl(figi, quantity, direction)
+                            return self._place_limit_order_with_fallback(figi, quantity, direction, corrected_price)
                         elif direction == "SELL" and orderbook and orderbook.get('best_bid'):
                             corrected_price = orderbook['best_bid'] * 0.99
                             info(f"   📊 Корректируем цену по стакану: {corrected_price:.2f}₽")
-                            return self._place_market_order_impl(figi, quantity, direction)
+                            return self._place_limit_order_with_fallback(figi, quantity, direction, corrected_price)
                         else:
                             info(f"   📊 Стакан пуст, пробуем рыночную заявку")
                             return self._place_market_order_impl(figi, quantity, direction)
@@ -791,10 +783,13 @@ class TBankClient:
 
                     # Fallback на рыночную
                     info(f"   🔄 Пробуем рыночную заявку вместо лимитной")
-                    return self._place_market_order_impl(figi, quantity, direction)
+                    market_result = self._place_market_order_impl(figi, quantity, direction)
+                    if market_result and market_result.get('success', False):
+                        return True
+                    return False
 
                 # ====================================================================
-                # 4. ОБРАБОТКА 30042 - НЕДОСТАТОЧНО СРЕДСТВ ИЛИ МАРЖИ
+                # 3. ОБРАБОТКА 30042 - НЕДОСТАТОЧНО СРЕДСТВ ИЛИ МАРЖИ
                 # ====================================================================
                 elif "30042" in error_msg:
                     warning(f"⚠️ {ticker}: ОШИБКА 30042 - недостаточно средств или маржи")
@@ -818,27 +813,28 @@ class TBankClient:
                         debug(f"   ⚠️ Ошибка проверки позиций: {e}")
 
                     # Рекомендация для пользователя
-                    info(f"   💡 РЕКОМЕНДАЦИЯ:")
-                    info(f"      → Пополните счёт (нужно ~{quantity * target_price:.0f}₽ для этой операции)")
-                    info(f"      → Или закройте часть позиций для освобождения маржи")
+                    current_price = self.get_current_price(figi)
+                    if current_price:
+                        info(f"   💡 РЕКОМЕНДАЦИЯ:")
+                        info(f"      → Пополните счёт (нужно ~{quantity * current_price:.0f}₽ для этой операции)")
+                        info(f"      → Или закройте часть позиций для освобождения маржи")
 
                     # Последний шанс - рыночная заявка
                     market_result = self._place_market_order_impl(figi, quantity, direction)
-                    if market_result:
+                    if market_result and market_result.get('success', False):
                         success(f"✅ Рыночная заявка {direction} {quantity} {ticker} УСПЕШНА (fallback после 30042)")
                         return True
 
                     return False
 
                 # ====================================================================
-                # 5. ОБРАБОТКА 30068 - ИНСТРУМЕНТ НЕ ТОРГУЕТСЯ
+                # 4. ОБРАБОТКА 30068 - ИНСТРУМЕНТ НЕ ТОРГУЕТСЯ
                 # ====================================================================
                 elif "30068" in error_msg:
                     warning(f"⚠️ {ticker}: ОШИБКА 30068 - инструмент не торгуется или недоступен")
                     warning(f"   ⛔ Добавляем {ticker} в чёрный список на 60 минут")
                     self.mark_as_confirmation_required(figi)
 
-                    # Дополнительная блокировка
                     try:
                         from trading_bot.risk.position_manager import position_manager
                         position_manager.add_temp_skip(figi, minutes=60)
@@ -849,7 +845,7 @@ class TBankClient:
                     return False
 
                 # ====================================================================
-                # 6. ОБРАБОТКА 90002 - НАРУШЕНО ПРЕДУСЛОВИЕ
+                # 5. ОБРАБОТКА 90002 - НАРУШЕНО ПРЕДУСЛОВИЕ
                 # ====================================================================
                 elif "90002" in error_msg:
                     warning(f"⚠️ {ticker}: ОШИБКА 90002 - нарушено предусловие")
@@ -858,16 +854,21 @@ class TBankClient:
                     return False
 
                 # ====================================================================
-                # 7. ОБРАБОТКА 30240 - НЕ ПОДДЕРЖИВАЕТ СТОП-ОРДЕРА
+                # 6. ОБРАБОТКА 30240 - НЕ ПОДДЕРЖИВАЕТ СТОП-ОРДЕРА
                 # ====================================================================
                 elif "30240" in error_msg:
                     warning(f"⚠️ {ticker}: ОШИБКА 30240 - стоп-ордера НЕ ПОДДЕРЖИВАЮТСЯ")
                     warning(f"   🔧 Будет использован ТОЛЬКО ПРОГРАММНЫЙ трейлинг-стоп")
                     self._no_stop_orders.add(figi)
+                    # ✅ НЕ БЛОКИРУЕМ ВСЁ, ПРОСТО ОТМЕЧАЕМ
+                    # Пробуем рыночную заявку
+                    market_result = self._place_market_order_impl(figi, quantity, direction)
+                    if market_result and market_result.get('success', False):
+                        return True
                     return False
 
                 # ====================================================================
-                # 8. НЕИЗВЕСТНАЯ ОШИБКА
+                # 7. НЕИЗВЕСТНАЯ ОШИБКА
                 # ====================================================================
                 else:
                     error(f"❌ НЕИЗВЕСТНАЯ ошибка: {error_msg[:100]}")
@@ -880,7 +881,7 @@ class TBankClient:
                     elif "70002" in error_msg:
                         warning(f"   🔄 Внутренняя ошибка API, повтор через 2 секунды...")
                         time.sleep(2)
-                        return self._place_market_order_impl(figi, quantity, direction)
+                        return self._place_limit_order_with_fallback(figi, quantity, direction, target_price)
 
                     return False
 
@@ -1017,6 +1018,37 @@ class TBankClient:
 
                 current_price = self.get_current_price(figi)
                 if current_price:
+                    # Проверяем, не OTC ли инструмент
+                    if self.is_confirmation_required(figi):
+                        warning(f"   🔐 {ticker}: OTC инструмент, требуется ручное закрытие")
+                        warning(f"   📱 Закройте позицию вручную в приложении Т-Банк")
+                        return {
+                            'success': False,
+                            'order_id': None,
+                            'quantity': 0,
+                            'error': '30042 - недостаточно средств, OTC инструмент',
+                            'requires_manual': True,
+                            'is_otc': True
+                        }
+
+                    # Проверяем наличие позиции у брокера (мёртвые позиции)
+                    try:
+                        positions = self.get_positions()
+                        real_figis = {p['figi'] for p in positions if abs(p.get('quantity', 0)) > 0}
+                        if figi not in real_figis:
+                            warning(f"   🧹 Позиции {ticker} нет у брокера! Удаляем из менеджера")
+                            from trading_bot.risk.position_manager import position_manager
+                            position_manager.remove_position(figi)
+                            return {
+                                'success': True,
+                                'order_id': None,
+                                'quantity': 0,
+                                'note': 'Позиция уже закрыта у брокера'
+                            }
+                    except Exception as e:
+                        debug(f"   ⚠️ Ошибка проверки позиций: {e}")
+
+                    # Последний шанс - агрессивная лимитная заявка
                     if direction == "SELL":
                         limit_price = self._round_to_min_increment_advanced(figi, current_price * 0.97)
                     else:
@@ -1034,19 +1066,6 @@ class TBankClient:
                             'price': limit_price,
                             'note': 'использована агрессивная лимитная заявка'
                         }
-
-                # Проверяем, не OTC ли инструмент
-                if self.is_confirmation_required(figi):
-                    warning(f"   🔐 {ticker}: OTC инструмент, требуется ручное закрытие")
-                    warning(f"   📱 Закройте позицию вручную в приложении Т-Банк")
-                    return {
-                        'success': False,
-                        'order_id': None,
-                        'quantity': 0,
-                        'error': '30042 - недостаточно средств, OTC инструмент',
-                        'requires_manual': True,
-                        'is_otc': True
-                    }
 
                 return {
                     'success': False,
@@ -1378,7 +1397,7 @@ class TBankClient:
         if not force_refresh:
             cached_result = positions_cache.get(cache_key)
             if cached_result is not None:
-                return cached_result.copy()
+                return cached_result.copy()  # ✅ ВОЗВРАЩАЕМ КОПИЮ, А НЕ ОРИГИНАЛ
 
         with Client(self.token) as client:
             try:
@@ -1388,10 +1407,18 @@ class TBankClient:
                     if pos.figi != "RUB000UTSTOM" and pos.quantity.units != 0:
                         is_blocked = getattr(pos, 'blocked', False)
 
+                        # ✅ ПРОВЕРКА ЧТО AVG_PRICE - ЧИСЛО
+                        avg_price = 0.0
+                        try:
+                            if pos.average_position_price and hasattr(pos.average_position_price, 'units'):
+                                avg_price = float(quotation_to_decimal(pos.average_position_price))
+                        except Exception as e:
+                            debug(f"   ⚠️ Ошибка получения avg_price для {pos.figi}: {e}")
+
                         positions.append({
                             'figi': pos.figi,
                             'quantity': pos.quantity.units,
-                            'avg_price': float(quotation_to_decimal(pos.average_position_price)),
+                            'avg_price': avg_price,
                             'blocked': is_blocked,
                             'ticker': self._get_ticker_by_figi(pos.figi) or pos.figi[:8]
                         })
@@ -1811,9 +1838,17 @@ class TBankClient:
             debug(f"   ✅ Все {len(figis)} цен взяты из кэша")
             return result
 
-        self._wait_for_rate_limit()
+        # ✅ 2. ОГРАНИЧЕНИЕ КОЛИЧЕСТВА FIGI В ОДНОМ ЗАПРОСЕ
+        MAX_FIGI_PER_REQUEST = 50
+        if len(uncached_figis) > MAX_FIGI_PER_REQUEST:
+            chunks = [uncached_figis[i:i + MAX_FIGI_PER_REQUEST] for i in
+                      range(0, len(uncached_figis), MAX_FIGI_PER_REQUEST)]
+            for chunk in chunks:
+                chunk_result = self._get_last_prices_batch_chunk(chunk)
+                result.update(chunk_result)
+            return result
 
-        # ✅ 2. BATCH-ЗАПРОС
+        # ✅ 3. ОДИН BATCH-ЗАПРОС
         try:
             with Client(self.token) as client:
                 last_prices_response = client.market_data.get_last_prices(figi=uncached_figis)
@@ -1824,7 +1859,7 @@ class TBankClient:
                     result[figi] = price
                     price_cache.set(figi, price, ttl=10)  # TTL 10 секунд
 
-                # ✅ 3. FALLBACK ДЛЯ ОТСУТСТВУЮЩИХ
+                # ✅ 4. FALLBACK ДЛЯ ОТСУТСТВУЮЩИХ
                 returned_figis = {p.figi for p in last_prices_response.last_prices}
                 missing = set(uncached_figis) - returned_figis
 
@@ -1843,6 +1878,22 @@ class TBankClient:
         except Exception as e:
             error(f"❌ Ошибка batch получения цен: {e}")
             return result
+
+    def _get_last_prices_batch_chunk(self, figis: List[str]) -> Dict[str, float]:
+        """Вспомогательный метод для получения цен по чанку"""
+        try:
+            with Client(self.token) as client:
+                last_prices_response = client.market_data.get_last_prices(figi=figis)
+                result = {}
+                for price_data in last_prices_response.last_prices:
+                    figi = price_data.figi
+                    price = float(quotation_to_decimal(price_data.price))
+                    result[figi] = price
+                    price_cache.set(figi, price, ttl=10)
+                return result
+        except Exception as e:
+            warning(f"❌ Ошибка batch запроса для чанка: {e}")
+            return {}
         
     def clear_trading_status_cache(self):
         """Очистка кэша статусов торгов"""
@@ -3714,9 +3765,9 @@ class TBankClient:
         """
         ticker = self._get_ticker_by_figi(figi) or figi[:8]
 
-        # ✅ ОКРУГЛЕНИЕ ДО ЛОТА (используем _get_lot_size вместо прямого доступа к _shares_cache)
+        # ✅ ОКРУГЛЕНИЕ ДО ЛОТА
         original_qty = quantity
-        lot_size = self._get_lot_size(figi)  # ← ИСПРАВЛЕНО
+        lot_size = self._get_lot_size(figi)
 
         if lot_size > 1:
             lots = quantity // lot_size
@@ -3788,6 +3839,50 @@ class TBankClient:
                 error_msg = str(e)
                 errors.append(f"Попытка {attempt + 1}: {error_msg[:50]}")
 
+                # ====================================================================
+                # ОБРАБОТКА 30240 - ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ СДЕЛОК
+                # ====================================================================
+                if "30240" in error_msg:
+                    warning(f"\n🔐 {ticker}: ОШИБКА 30240 - ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ!")
+                    warning(f"   НЕВОЗМОЖНО ЗАКРЫТЬ АВТОМАТИЧЕСКИ!")
+                    warning(f"   📱 Закройте позицию ВРУЧНУЮ в приложении Т-Банк!")
+
+                    # Отправляем Telegram
+                    try:
+                        from trading_bot.telegram.telegram_notifier import get_telegram_notifier
+                        telegram = get_telegram_notifier()
+                        if telegram:
+                            telegram.send_error(
+                                f"🚨 **ТРЕБУЕТСЯ РУЧНОЕ ЗАКРЫТИЕ!**\n\n"
+                                f"Инструмент {ticker} требует подтверждения сделок!\n"
+                                f"Невозможно закрыть автоматически.\n\n"
+                                f"📊 Позиция: {direction} {quantity} шт\n"
+                                f"💰 Цена: {current_price:.2f}₽\n\n"
+                                f"**Закройте вручную в приложении Т-Банк!**"
+                            )
+                    except Exception as e:
+                        debug(f"Ошибка отправки Telegram: {e}")
+
+                    # Пытаемся удалить позицию из менеджера, чтобы бот не пытался закрыть её снова
+                    try:
+                        from trading_bot.risk.position_manager import position_manager
+                        position_manager.remove_position(figi)
+                        warning(f"   🗑️ Позиция {ticker} удалена из менеджера (требует ручного закрытия)")
+                    except Exception as e:
+                        debug(f"   Ошибка удаления позиции: {e}")
+
+                    return {
+                        'success': False,
+                        'requires_manual': True,
+                        'error': '30240',
+                        'ticker': ticker,
+                        'price': current_price,
+                        'quantity': quantity
+                    }
+
+                # ====================================================================
+                # ОБРАБОТКА 30042 - НЕДОСТАТОЧНО СРЕДСТВ
+                # ====================================================================
                 if "30042" in error_msg:
                     warning(f"   ⚠️ {ticker}: ОШИБКА 30042 - проверяем наличие позиции у брокера...")
 
@@ -3797,6 +3892,7 @@ class TBankClient:
 
                         if figi not in real_figi_set:
                             warning(f"   🧹 Позиции {ticker} нет у брокера! Удаляем из менеджера")
+                            from trading_bot.risk.position_manager import position_manager
                             position_manager.remove_position(figi)
                             return {
                                 'success': True,
@@ -3808,6 +3904,7 @@ class TBankClient:
 
                         if self.is_confirmation_required(figi):
                             info(f"   📋 {ticker} - OTC инструмент, требуется ручное закрытие")
+                            from trading_bot.risk.position_manager import position_manager
                             position_manager.remove_position(figi)
                             return {
                                 'success': False,
@@ -3823,7 +3920,7 @@ class TBankClient:
                     if attempt == max_attempts - 1:
                         warning(f"   ⚡ Последний шанс: рыночная заявка")
                         market_result = self._place_market_order_impl(figi, quantity, direction)
-                        if market_result:
+                        if market_result and market_result.get('success', False):
                             success(f"✅ {ticker} ЗАКРЫТ рыночной заявкой!")
                             blacklist_manager.report_success(ticker)
                             return {
@@ -3838,7 +3935,7 @@ class TBankClient:
                 elif attempt == max_attempts - 1:
                     warning(f"   ⚡ Последний шанс: рыночная заявка")
                     market_result = self._place_market_order_impl(figi, quantity, direction)
-                    if market_result:
+                    if market_result and market_result.get('success', False):
                         success(f"✅ {ticker} ЗАКРЫТ рыночной заявкой!")
                         blacklist_manager.report_success(ticker)
                         return {
@@ -3850,7 +3947,7 @@ class TBankClient:
                             'quantity': quantity
                         }
 
-            time.sleep(1)
+                time.sleep(1)
 
         error(f"\n❌ НЕ УДАЛОСЬ ЗАКРЫТЬ {ticker} после {max_attempts} попыток!")
         blacklist_manager.add_temporary(ticker, ttl_minutes=60)

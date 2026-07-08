@@ -1852,6 +1852,9 @@ class TradingLoop:
                 current_positions = len(positions)
                 info(f"   📊 ПОЗИЦИЙ: {current_positions}")
 
+                # В методе _run, в блоке получения позиций (около строки 1800-1850):
+
+                # ✅ ЗАМЕНИТЬ ПОСЛЕДОВАТЕЛЬНЫЕ ЗАПРОСЫ НА BATCH
                 if current_positions > 0:
                     # ✅ СОБИРАЕМ ВСЕ FIGI В СПИСОК
                     figis_to_update = []
@@ -1872,8 +1875,7 @@ class TradingLoop:
                             debug(f"   ⚠️ Пропуск позиции: ожидался dict, получен {type(pos)}")
                             continue
                         figi = pos.get('figi', 'unknown')
-                        from trading_bot.api.tbank_client import tbank
-                        ticker = tbank._get_ticker_by_figi(figi) or figi[:12]
+                        ticker = _get_tbank()._get_ticker_by_figi(figi) or figi[:12]
                         qty = pos.get('quantity', 0)
                         avg = pos.get('avg_price', 0)
                         side = "SHORT" if qty < 0 else "LONG"
@@ -2611,7 +2613,8 @@ class TradingLoop:
 
             now = get_moscow_time()
             cancelled = 0
-            MAX_ORDER_AGE_SECONDS = 3600
+            # ✅ УВЕЛИЧИТЬ ВРЕМЯ ДО 1 ЧАСА (было 3600 секунд)
+            MAX_ORDER_AGE_SECONDS = 3600  # 1 час
 
             info(f"   🔍 Проверка {len(orders)} заявок на устаревание...")
 
@@ -2631,8 +2634,22 @@ class TradingLoop:
                     order_id = order.get('order_id')
                     age_minutes = int((now - created_at).total_seconds() / 60)
 
+                    # ✅ ДОБАВИТЬ ПРОВЕРКУ: НЕ УДАЛЯТЬ ЗАЯВКИ С ХОРОШЕЙ ЦЕНОЙ
+                    price = order.get('price', 0)
+                    if price > 0:
+                        figi = order.get('figi')
+                        if figi:
+                            current_price = tbank.get_current_price(figi)
+                            if current_price:
+                                if order.get('direction') == "BUY" and price < current_price * 0.95:
+                                    debug(f"      ⏸️ {ticker}: хорошая цена покупки, оставляем")
+                                    continue
+                                if order.get('direction') == "SELL" and price > current_price * 1.05:
+                                    debug(f"      ⏸️ {ticker}: хорошая цена продажи, оставляем")
+                                    continue
+
                     info(
-                        f"      🧹 Отмена устаревшей заявки: {ticker} ({order.get('direction')} {order.get('quantity')}шт по {order.get('price', 0):.2f}₽, висела {age_minutes} мин)")
+                        f"      🧹 Отмена устаревшей заявки: {ticker} ({order.get('direction')} {order.get('quantity')}шт по {price:.2f}₽, висела {age_minutes} мин)")
 
                     if tbank.cancel_order(order_id):
                         cancelled += 1

@@ -82,31 +82,49 @@ class OrderValidator:
 
                 # Проверяем доступность API торговли
                 if not trading_status.api_trade_available_flag:
-                    return False, "API торговля недоступна", additional_info
+                    # ✅ ЕСЛИ НЕДОСТУПНО - ПРОВЕРЯЕМ, МОЖЕТ БЫТЬ OTC
+                    if trading_status.limit_order_available_flag and price:
+                        info(f"   ⚠️ {ticker}: API торговля недоступна, но доступны лимитные заявки")
+                        additional_info['use_limit_order'] = True
+                        additional_info['limit_order_only'] = True
+                    else:
+                        return False, "API торговля недоступна", additional_info
 
                 # ✅ НОВОЕ: Для SHORT если нет рыночных, но есть лимитные - пропускаем
                 if direction == "SELL" and is_short:
                     if not trading_status.market_order_available_flag and not trading_status.limit_order_available_flag:
                         return False, f"Нет доступных типов заявок для SHORT {ticker}", additional_info
                     elif not trading_status.market_order_available_flag:
-                        # Предупреждаем, но не блокируем - используем лимитные
                         info(f"   ⚠️ {ticker}: рыночные заявки недоступны, будет использована лимитная")
+                        additional_info['use_limit_order'] = True
                 else:
                     # Для LONG и обычной продажи
                     if price:
                         if not trading_status.limit_order_available_flag:
-                            return False, "Лимитные заявки недоступны для этого инструмента", additional_info
+                            # ✅ ЕСЛИ НЕТ ЛИМИТНЫХ, ПРОВЕРЯЕМ РЫНОЧНЫЕ
+                            if trading_status.market_order_available_flag:
+                                info(f"   ⚠️ {ticker}: лимитные недоступны, используем рыночную")
+                                additional_info['use_market_order'] = True
+                                additional_info['market_order_only'] = True
+                            else:
+                                return False, "Нет доступных типов заявок для этого инструмента", additional_info
                     else:
                         if not trading_status.market_order_available_flag:
-                            # ❌ СТАРЫЙ КОД (блокирует):
-                            # return False, "Рыночные заявки недоступны для этого инструмента", additional_info
-                            
-                            # ✅ НОВЫЙ КОД (автоматический переход на лимитную):
+                            # ✅ НОВЫЙ КОД: автоматический переход на лимитную
                             if trading_status.limit_order_available_flag:
+                                # Получаем текущую цену для предложения лимитной
+                                current_price = self._get_current_price(client, figi)
+                                if current_price:
+                                    if direction == "BUY":
+                                        limit_price_hint = current_price * 1.01
+                                    else:
+                                        limit_price_hint = current_price * 0.99
+                                else:
+                                    limit_price_hint = 1.0
+
                                 info(f"   ⚠️ Рыночные заявки недоступны, используем лимитную")
                                 additional_info['use_limit_order'] = True
-                                additional_info['limit_price_hint'] = self._get_current_price(client, figi) * 0.99
-                                # НЕ БЛОКИРУЕМ, а просто меняем тип заявки
+                                additional_info['limit_price_hint'] = limit_price_hint
                             else:
                                 return False, "Нет доступных типов заявок для этого инструмента", additional_info
 
@@ -170,7 +188,6 @@ class OrderValidator:
                 warning(f"⚠️ Ошибка получения max lots (пропускаем): {e}")
                 additional_info['max_lots_error'] = str(e)
 
-
             # 6. Проверка средств для покупки
             if direction == "BUY":
                 try:
@@ -200,8 +217,35 @@ class OrderValidator:
                 except Exception as e:
                     warning(f"⚠️ Ошибка проверки маржи: {e}")
 
+            # 8. ✅ НОВАЯ ПРОВЕРКА: OTC ИНСТРУМЕНТЫ
+            try:
+                # Проверяем, не требует ли инструмент подтверждения
+                instrument_info = self._get_instrument_info(client, figi)
+                if instrument_info and instrument_info.get('for_qual_investor_flag', False):
+                    info(f"   ⚠️ {ticker}: требует квалифицированного инвестора")
+                    additional_info['requires_qualification'] = True
+                    # НЕ БЛОКИРУЕМ, просто отмечаем
+            except Exception as e:
+                debug(f"   Ошибка проверки квалификации: {e}")
+
         info(f"✅ Заявка прошла предварительную валидацию")
         return True, "OK", additional_info
+
+    def _get_instrument_info(self, client, figi: str) -> Dict[str, Any]:
+        """Вспомогательный метод для получения информации об инструменте"""
+        try:
+            instrument = client.instruments.get_instrument_by(id=figi, id_type=1)
+            if instrument and instrument.instrument:
+                return {
+                    'for_qual_investor_flag': getattr(instrument.instrument, 'for_qual_investor_flag', False),
+                    'api_trade_available_flag': getattr(instrument.instrument, 'api_trade_available_flag', True),
+                    'exchange': getattr(instrument.instrument, 'exchange', ''),
+                }
+        except Exception:
+            pass
+        return {}
+
+
 
     # ========== 2. ОТПРАВКА С ПОДТВЕРЖДЕНИЕМ ==========
 
