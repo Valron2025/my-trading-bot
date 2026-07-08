@@ -1,0 +1,21 @@
+{
+  "timestamp": "2026-06-16T18:57:14.938565",
+  "issues": [],
+  "warnings": [
+    "Высокая задержка get_candles: 1129ms",
+    "Кэш свечей не работает эффективно"
+  ],
+  "config": {
+    "capital": 0,
+    "take_profit": 2.0,
+    "stop_loss": 0.8,
+    "use_short": true,
+    "max_positions": 5
+  },
+  "api": {
+    "figi": "BBG004730N88",
+    "price": 319.5,
+    "price_time_ms": 135.2366000000984,
+    "candles_time_ms": 1128.5199000003558
+  }
+}

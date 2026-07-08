@@ -1,0 +1,125 @@
+{
+  "timestamp": "2026-06-16T20:14:34.802625",
+  "duration_seconds": 59.047423,
+  "real_trading_enabled": true,
+  "fix_issues_enabled": false,
+  "stats": {
+    "files_scanned": 101,
+    "total_lines": 60212,
+    "modules_tested": 0,
+    "imports_total": 28,
+    "imports_failed": 1,
+    "apis_working": 1,
+    "apis_failed": 0,
+    "methods_tested": 0,
+    "methods_passed": 0,
+    "thresholds_passed": 5,
+    "thresholds_failed": 0
+  },
+  "results": [
+    {
+      "name": "Окружение и конфигурация",
+      "passed": true,
+      "duration": 0.0029871463775634766,
+      "message": "Найдено проблем: 0"
+    },
+    {
+      "name": "Все импорты модулей",
+      "passed": false,
+      "duration": 0.000919342041015625,
+      "message": "Успешно: 27/28"
+    },
+    {
+      "name": "T-Bank API (полный)",
+      "passed": true,
+      "duration": 11.179199695587158,
+      "message": "Успешно: 7/7"
+    },
+    {
+      "name": "Логгер",
+      "passed": true,
+      "duration": 0.0009987354278564453,
+      "message": ""
+    },
+    {
+      "name": "Модели данных",
+      "passed": true,
+      "duration": 0.0,
+      "message": ""
+    },
+    {
+      "name": "Пороги фильтрации (Thresholds)",
+      "passed": true,
+      "duration": 18.00053310394287,
+      "message": "Прошли: 5/5"
+    },
+    {
+      "name": "Фундаментальный анализ (Integration)",
+      "passed": true,
+      "duration": 7.9019553661346436,
+      "message": "Метрики: ✅, Тех.анализ: ✅"
+    },
+    {
+      "name": "Strategy Engine (полный)",
+      "passed": true,
+      "duration": 0.12400531768798828,
+      "message": ""
+    },
+    {
+      "name": "Торговые методы (LONG/SHORT)",
+      "passed": true,
+      "duration": 1.1720373630523682,
+      "message": "Методов: 15/15, LONG: ✅, SHORT: ✅"
+    },
+    {
+      "name": "Technical Analyzer (полный)",
+      "passed": true,
+      "duration": 4.861320972442627,
+      "message": ""
+    },
+    {
+      "name": "Market Checker",
+      "passed": true,
+      "duration": 0.0010004043579101562,
+      "message": ""
+    },
+    {
+      "name": "Position Manager",
+      "passed": true,
+      "duration": 3.190819263458252,
+      "message": ""
+    },
+    {
+      "name": "Кэширование",
+      "passed": false,
+      "duration": 0.0009968280792236328,
+      "message": "No module named 'trading_bot.cache.ttl_cache'"
+    },
+    {
+      "name": "Дублирование методов и конфликты",
+      "passed": false,
+      "duration": 1.534071683883667,
+      "message": "Проблем: CRITICAL=10, HIGH=39, MEDIUM=2, LOW=2"
+    },
+    {
+      "name": "Качество кода",
+      "passed": false,
+      "duration": 2.7330634593963623,
+      "message": "Проблем: 10"
+    },
+    {
+      "name": "Trading Bot",
+      "passed": true,
+      "duration": 8.15341305732727,
+      "message": ""
+    }
+  ],
+  "issues": [],
+  "scores": {
+    "code_quality": 100,
+    "api_working": 100.0,
+    "thresholds": 100.0,
+    "tests_passed": 75.0,
+    "final": 93.75
+  }
+}

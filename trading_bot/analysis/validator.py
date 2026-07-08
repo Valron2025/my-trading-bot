@@ -9,7 +9,8 @@ from ..logger import info, success, error, warning, debug
 from ..utils.time_utils import is_trading_time_for_ticker, is_friday_evening
 from ..core.blacklist_manager import blacklist_manager
 from trading_bot.cache import TTLCache
-from trading_bot.cache.unified_cache import UnifiedCache, USE_UNIFIED_CACHE
+from trading_bot.cache.cache_manager import TTLCache as UnifiedCache
+USE_UNIFIED_CACHE = False
 
 
 def _get_tbank():

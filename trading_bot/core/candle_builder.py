@@ -2,19 +2,13 @@
 # -*- coding: utf-8 -*-
 """
 CandleBuilder.py - УНИВЕРСАЛЬНЫЙ ПОСТРОИТЕЛЬ СВЕЧЕЙ (PRODUCTION READY)
-Объединяет:
-- Получение свечей из MOEX ISS API (бесплатно)
-- Получение свечей из Alfa API (FinInfoCandleEntity)
-- Построение свечей из реального потока сделок
-- Кэширование и оптимизация
 """
 
-# ✅ ДОБАВИТЬ ЭТОТ БЛОК В САМОЕ НАЧАЛО (перед всеми импортами)
+# Добавляем корневую директорию проекта в PATH
 import sys
 from pathlib import Path
 
-# Добавляем корневую директорию проекта в PATH
-PROJECT_ROOT = Path(__file__).parent
+PROJECT_ROOT = Path(__file__).parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -31,9 +25,11 @@ from dataclasses import dataclass
 from collections import defaultdict, deque
 import aiohttp
 
-# Импорт Logger - ИСПРАВЛЕНО: используем локальный логгер
+# Импорт Logger
 from trading_bot.logger import info, error, warning, debug
-from trading_bot.cache.unified_cache import UnifiedCache, USE_UNIFIED_CACHE
+
+# ✅ ИСПРАВЛЕНО: импортируем из cache_manager, а не из unified_cache
+from trading_bot.cache.cache_manager import TTLCache, candles_cache
 
 
 # ==================== ОПРЕДЕЛЕНИЕ CANDLE (ВСТРОЕННОЕ) ====================
@@ -651,10 +647,6 @@ class MoexAPIClient:
 class CandleBuilder:
     """
     Универсальный построитель свечей - PRODUCTION READY (СИНГЛТОН)
-    Поддерживает:
-    - MOEX ISS API (бесплатно)
-    - Alfa API (FinInfoCandleEntity)
-    - Построение из реальных сделок
     """
 
     # ========== СИНГЛТОН ==========
@@ -662,7 +654,6 @@ class CandleBuilder:
     _initialized = False
 
     def __new__(cls, *args, **kwargs):
-        """Синглтон — всегда возвращаем один и тот же экземпляр"""
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
@@ -670,13 +661,12 @@ class CandleBuilder:
     def __init__(
             self,
             api_client: Any = None,
-            max_history: int = 200, # Уменьшаем историю с 1000 до 200
+            max_history: int = 200,
             instrument_manager=None,
             enable_moex: bool = True,
             enable_realtime_builder: bool = True,
             test_mode: bool = False
     ):
-        # ⚠️ ВАЖНО: если уже инициализирован — ничего не делаем
         if CandleBuilder._initialized:
             return
 
@@ -684,13 +674,11 @@ class CandleBuilder:
         self.instrument_manager = instrument_manager
         self.max_history = max_history
 
-        self._candle_cache_ttl = 60  # TTL для кэша свечей 60 секунд
-
+        self._candle_cache_ttl = 60
         self.enable_moex = enable_moex
         self.enable_realtime_builder = enable_realtime_builder
         self.test_mode = test_mode
 
-        # MOEX клиент — создаётся лениво при первом вызове
         self._moex_client: Optional[MoexAPIClient] = None
 
         # Хранилища данных
@@ -704,6 +692,10 @@ class CandleBuilder:
         self._candle_cache: Dict[str, Tuple[List[Dict], datetime]] = {}
         self._indicator_cache: Dict[str, Dict] = defaultdict(dict)
         self._last_indicator_update: Dict[str, datetime] = {}
+
+        # ✅ ИСПРАВЛЕНО: используем глобальный candles_cache из cache_manager
+        # или создаём свой, если нужно
+        self._candle_data_cache = TTLCache(default_ttl=60, max_size=500, name="candle_data_cache")
 
         # Состояние
         self._subscribed_tickers: set = set()
@@ -728,13 +720,8 @@ class CandleBuilder:
 
         self._running = False
         self._thread = None
-
-        # Задачи
         self._tasks: List[asyncio.Task] = []
         self._cleanup_task: Optional[asyncio.Task] = None
-
-        if USE_UNIFIED_CACHE:
-            self._unified_cache = UnifiedCache(default_ttl=60, name="candle_builder")
 
         CandleBuilder._initialized = True
         info("✅ CandleBuilder initialized (Production Ready) SINGLETON")
@@ -1139,52 +1126,29 @@ class CandleBuilder:
             days: int = 30,
             use_cache: bool = True,
             cache_ttl: int = 300,
-            **kwargs  # ← ДОБАВИТЬ ЭТУ СТРОКУ (принимает limit и другие параметры)
+            **kwargs
     ) -> List[Dict]:
         """
         Универсальное получение свечей из разных источников
-
-        Args:
-            identifier: Тикер (для MOEX) или FIGI (для Alfa)
-            source: 'moex', 'alfa', 'auto'
-            interval: Интервал свечей
-            days: Количество дней
-            use_cache: Использовать кэш
-            cache_ttl: Время жизни кэша в секундах
-            **kwargs: Дополнительные параметры (limit и т.д.) - игнорируются
-
-        Returns:
-            List[Dict]: Список свечей
         """
         # ========== 1. ВАЛИДАЦИЯ ==========
         if not identifier:
             error("❌ CandleBuilder.get_candles: пустой identifier")
             return []
 
-        # Логируем вызов с дополнительными параметрами
-        if kwargs:
-            debug(f"📊 CandleBuilder.get_candles: {identifier}, "
-                  f"source={source}, interval={interval}, days={days}, "
-                  f"доп.параметры={list(kwargs.keys())} (игнорируются)")
-
-        # ========== 2. КЭШ ==========
+        # ========== 2. КЭШ (используем глобальный candles_cache) ==========
         cache_key = f"{identifier}_{source}_{interval}_{days}"
-        debug(f"🔍 CandleBuilder.get_candles: кэш-ключ={cache_key}")
 
-        if use_cache and cache_key in self._candle_cache:
-            cached_data, timestamp = self._candle_cache[cache_key]
-            cache_age = (datetime.now() - timestamp).total_seconds()
-
-            if cache_age < cache_ttl:
+        if use_cache:
+            # ✅ Используем глобальный candles_cache
+            cached_result = candles_cache.get(cache_key)
+            if cached_result is not None:
                 self.stats["cache_hits"] += 1
-                debug(f"📦 Cache HIT для {identifier} (возраст: {cache_age:.1f}с)")
-                return cached_data.copy() if cached_data else []
+                debug(f"📦 Cache HIT для {identifier}")
+                return cached_result.copy() if isinstance(cached_result, list) else cached_result
             else:
-                debug(f"⏰ Cache EXPIRED для {identifier}")
-        else:
-            debug(f"❌ Cache MISS для {identifier}")
-
-        self.stats["cache_misses"] += 1
+                self.stats["cache_misses"] += 1
+                debug(f"❌ Cache MISS для {identifier}")
 
         # ========== 3. ОПРЕДЕЛЕНИЕ ИСТОЧНИКА ==========
         result = []
@@ -1232,7 +1196,7 @@ class CandleBuilder:
 
         # ========== 6. СОХРАНЕНИЕ В КЭШ ==========
         if use_cache and result:
-            self._candle_cache[cache_key] = (result.copy(), datetime.now())
+            candles_cache.set(cache_key, result.copy(), ttl=cache_ttl)
             debug(f"💾 Сохранено в кэш: {cache_key} ({len(result)} свечей)")
 
         # ========== 7. ЛОГИРОВАНИЕ РЕЗУЛЬТАТА ==========

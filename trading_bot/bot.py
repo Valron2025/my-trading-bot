@@ -22,8 +22,7 @@ from .risk.short_controller import ShortController
 from .risk.daily_loss_limit import DailyLossLimitChecker
 from .monitoring.drawdown_tracker import DrawdownTracker
 from .monitoring.memory_monitor import MemoryMonitor
-from .cache.price_cache import PriceCache
-from .cache.position_cache import PositionCache
+from .cache.cache_manager import PriceCache, PositionCache
 from .utils.figi_resolver import FigiResolver
 from .utils.time_utils import get_moscow_time, is_pre_market_time, is_weekend_trading_time
 from trading_bot.trading.position_closer import position_closer

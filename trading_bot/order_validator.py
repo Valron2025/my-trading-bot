@@ -129,17 +129,22 @@ class OrderValidator:
             # 5. Проверка максимального количества лотов (GetMaxLots)
             try:
                 from decimal import Decimal
+                from t_tech.invest.schemas import GetMaxLotsRequest
 
                 if price:
                     price_quotation = decimal_to_quotation(Decimal(str(price)))
-                    max_lots = client.orders.get_max_lots(
-                        figi=figi,  # ✅ ИСПРАВЛЕНО: instrument_id → figi
+                    max_lots_request = GetMaxLotsRequest(
+                        account_id=self.account_id,
+                        instrument_id=figi,
                         price=price_quotation
                     )
+                    max_lots = client.orders.get_max_lots(max_lots_request)
                 else:
-                    max_lots = client.orders.get_max_lots(
-                        figi=figi  # ✅ ИСПРАВЛЕНО: instrument_id → figi
+                    max_lots_request = GetMaxLotsRequest(
+                        account_id=self.account_id,
+                        instrument_id=figi
                     )
+                    max_lots = client.orders.get_max_lots(max_lots_request)
 
                 if direction == "BUY":
                     max_quantity = max_lots.buy_limits.buy_max_lots * additional_info.get('lot', 1)

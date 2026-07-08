@@ -5,11 +5,14 @@ import time
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
-from trading_bot.cache.unified_cache import UnifiedCache, USE_UNIFIED_CACHE
+from trading_bot.cache.cache_manager import TTLCache as UnifiedCache
+USE_UNIFIED_CACHE = False
 from ..config import config
 from ..models import StockCandidate, StockAnalysis, OrderSide
 from ..logger import info, success, error, warning, debug
 from ..utils.time_utils import get_moscow_time
+
+from trading_bot.cache.cache_manager import TTLCache, candles_cache
 
 
 def _get_tbank():
@@ -43,6 +46,8 @@ class StockScanner:
 
         if USE_UNIFIED_CACHE:
             self._unified_cache = UnifiedCache(default_ttl=30, name="stock_scanner")
+
+        self._candles_cache = TTLCache(default_ttl=60, max_size=500, name="scanner_candles")
 
     def _is_low_liquidity_ticker(self, ticker: str, figi: str = None) -> bool:
         """
@@ -1125,12 +1130,19 @@ class StockScanner:
         )
 
     def _get_candles_15min(self, figi: str) -> List:
-        """Получение 15-минутных свечей для MTF анализа - ВОЗВРАЩАЕТ СЛОВАРИ"""
+        """Получение 15-минутных свечей для MTF анализа - С КЭШИРОВАНИЕМ"""
         from trading_bot.logger import info, error
         from trading_bot.api.tbank_client import tbank
 
         try:
             debug(f"   🔍 _get_candles_15min: figi={figi[:12]}...")
+
+            # ✅ ПРОВЕРКА КЭША
+            cache_key = f"candles_15min_{figi}"
+            cached = self._candles_cache.get(cache_key)
+            if cached is not None:
+                debug(f"   📦 Кэш: 15min свечи для {figi[:12]}... ({len(cached)} шт)")
+                return cached
 
             candles = tbank.get_candles(figi, days=2, interval_minutes=15)
             info(f"   📊 Получено {len(candles) if candles else 0} 15min свечей")
@@ -1163,6 +1175,11 @@ class StockScanner:
                     info(f"   ⚠️ Неизвестный формат 15min свечи: {type(c)}")
                     result.append(c)
 
+            # ✅ СОХРАНЯЕМ В КЭШ (120 секунд для 15-минутных свечей)
+            if result:
+                self._candles_cache.set(cache_key, result, ttl=120)
+                debug(f"   💾 Сохранено в кэш: {len(result)} 15min свечей для {figi[:12]}...")
+
             debug(f"   ✅ Возвращаем {len(result)} 15min свечей")
             if result:
                 debug(f"      Первая свеча: close={result[0].get('close', 'N/A')}")
@@ -1173,15 +1190,21 @@ class StockScanner:
             return []
 
     def _get_candles(self, figi: str) -> List:
-        """Получение свечей для анализа - ВОЗВРАЩАЕТ СЛОВАРИ"""
+        """Получение свечей для анализа - С КЭШИРОВАНИЕМ"""
         from trading_bot.logger import info, error
         from trading_bot.api.tbank_client import tbank
 
         try:
             debug(f"   🔍 _get_candles: figi={figi[:12]}...")
 
-            # ✅ ПРОПУСКАЕМ CandleBuilder (он асинхронный, а этот метод синхронный)
-            # Используем только TBankClient напрямую
+            # ✅ ПРОВЕРКА КЭША
+            cache_key = f"candles_5min_{figi}"
+            cached = self._candles_cache.get(cache_key)
+            if cached is not None:
+                debug(f"   📦 Кэш: свечи для {figi[:12]}... ({len(cached)} шт)")
+                return cached
+
+            # ✅ ИСПОЛЬЗУЕМ TBankClient
             info(f"   🔄 Используем TBankClient.get_candles()")
             candles = tbank.get_candles(figi, days=2, interval_minutes=5)
             debug(f"   📊 TBankClient вернул {len(candles) if candles else 0} свечей")
@@ -1190,6 +1213,7 @@ class StockScanner:
                 info(f"   ❌ Нет свечей для {figi}")
                 return []
 
+            # Конвертируем в словари
             result = []
             for c in candles:
                 if isinstance(c, (list, tuple)) and len(c) >= 2:
@@ -1204,6 +1228,11 @@ class StockScanner:
                     result.append(c)
                 else:
                     result.append(c)
+
+            # ✅ СОХРАНЯЕМ В КЭШ (60 секунд)
+            if result:
+                self._candles_cache.set(cache_key, result, ttl=60)
+                debug(f"   💾 Сохранено в кэш: {len(result)} свечей для {figi[:12]}...")
 
             debug(f"   ✅ Возвращаем {len(result)} свечей")
             if result:

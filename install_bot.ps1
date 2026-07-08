@@ -1,9 +1,10 @@
 # install_bot.ps1 - Полная установка торгового бота
-# НЕ ТРЕБУЕТ АДМИНИСТРАТОРА (если установка в пользовательскую папку)
+# АВТОМАТИЧЕСКИ ОПРЕДЕЛЯЕТ ПАПКУ УСТАНОВКИ
 
-param(
-    [string]$InstallPath = "$env:USERPROFILE\my-trading-bot"
-)
+# ========== АВТОМАТИЧЕСКОЕ ОПРЕДЕЛЕНИЕ ПАПКИ ==========
+# Скрипт устанавливается в ту же папку, где он находится
+$scriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
+$InstallPath = $scriptPath
 
 Write-Host ""
 Write-Host "==========================================" -ForegroundColor Cyan
@@ -13,17 +14,25 @@ Write-Host ""
 Write-Host "📁 Installation path: $InstallPath" -ForegroundColor DarkGray
 Write-Host ""
 
-# НЕ проверяем админа - просто работаем
-
-# Create folder
-Write-Host "📁 Creating installation folder..." -ForegroundColor Yellow
-if (-not (Test-Path $InstallPath)) {
-    New-Item -ItemType Directory -Path $InstallPath -Force | Out-Null
-    Write-Host "   ✅ Folder created: $InstallPath" -ForegroundColor Green
+# Проверяем, есть ли уже проект в этой папке
+$hasProjectFiles = Test-Path "$InstallPath\trading_bot" -PathType Container
+if ($hasProjectFiles) {
+    Write-Host "✅ Project files already exist in this folder" -ForegroundColor Green
+    Write-Host "   (trading_bot folder found)" -ForegroundColor DarkGray
 } else {
-    Write-Host "   ✅ Folder exists: $InstallPath" -ForegroundColor Green
+    Write-Host "⚠️ No trading_bot folder found. This script should be run from the project root." -ForegroundColor Yellow
+    Write-Host "   Make sure you have the project files in this folder." -ForegroundColor DarkGray
 }
-Set-Location $InstallPath
+
+# Create logs folder
+Write-Host ""
+Write-Host "📋 Creating logs folder..." -ForegroundColor Yellow
+if (-not (Test-Path "$InstallPath\logs")) {
+    New-Item -ItemType Directory -Path "$InstallPath\logs" -Force | Out-Null
+    Write-Host "   ✅ Logs folder created" -ForegroundColor Green
+} else {
+    Write-Host "   ✅ Logs folder exists" -ForegroundColor Green
+}
 
 # Check Python
 Write-Host ""
@@ -41,8 +50,8 @@ try {
 # Create virtual environment
 Write-Host ""
 Write-Host "📦 Creating virtual environment..." -ForegroundColor Yellow
-if (-not (Test-Path "venv")) {
-    python -m venv venv
+if (-not (Test-Path "$InstallPath\venv")) {
+    python -m venv "$InstallPath\venv"
     Write-Host "   ✅ Virtual environment created" -ForegroundColor Green
 } else {
     Write-Host "   ✅ Virtual environment exists" -ForegroundColor Green
@@ -54,23 +63,158 @@ Write-Host "📚 Installing dependencies..." -ForegroundColor Yellow
 $venvPython = "$InstallPath\venv\Scripts\python.exe"
 $venvPip = "$InstallPath\venv\Scripts\pip.exe"
 
-# Create requirements.txt (полная версия)
+# Create requirements.txt (исправленное имя пакета)
 @"
+# ============================================
+# BUILD TOOLS
+# ============================================
+setuptools>=65.0.0
+wheel>=0.38.0
+
+# ============================================
+# WEB FRAMEWORK
+# ============================================
 Flask>=2.3.3
-python-dotenv>=1.0.0
-requests>=2.31.0
-grpcio>=1.60.0
-certifi>=2024.0.0
-t-tech-investments>=0.3.3
+gunicorn>=21.2.0
+Werkzeug>=2.3.7
+portalocker>=2.0.0
 websockets>=12.0
-nest-asyncio>=1.6.0
-python-telegram-bot>=20.0
-prometheus-client>=0.19.0
-yfinance>=0.2.28
-beautifulsoup4>=4.12.0
-lxml>=4.9.0
+
+# ============================================
+# CONFIGURATION & ENVIRONMENT
+# ============================================
+python-dotenv>=1.0.0
+
+# ============================================
+# HTTP REQUESTS & NETWORKING
+# ============================================
+requests>=2.31.0
+aiohttp>=3.8.0
+aiofiles>=23.2.0
+async-timeout>=4.0.0
+
+# ============================================
+# CRYPTOGRAPHY & SECURITY
+# ============================================
+cryptography>=41.0.0
+certifi>=2023.0.0
+
+# ============================================
+# DATA ANALYSIS
+# ============================================
 numpy>=1.26.4
 pandas>=2.1.4
+scipy>=1.11.0
+statsmodels>=0.14.0
+ta>=0.10.2
+
+# ============================================
+# VISUALIZATION
+# ============================================
+matplotlib>=3.7.0
+
+# ============================================
+# RICH CONSOLE OUTPUT
+# ============================================
+rich>=13.7.0
+tqdm>=4.66.0
+colorama>=0.4.6
+
+# ============================================
+# TIMEZONE & DATES
+# ============================================
+pytz>=2023.3
+python-dateutil>=2.8.2
+arrow>=1.3.0
+
+# ============================================
+# TYPING & UTILITIES
+# ============================================
+typing_extensions>=4.14.1
+psutil>=5.9.0
+packaging>=23.1
+humanfriendly>=10.0
+
+# ============================================
+# ASYNCIO & THREADING
+# ============================================
+nest-asyncio>=1.6.0
+
+# ============================================
+# MONITORING & METRICS
+# ============================================
+prometheus-client>=0.19.0
+
+# ============================================
+# RETRY & BACKOFF
+# ============================================
+tenacity>=8.2.0
+backoff>=2.2.0
+ratelimit>=2.2.1
+circuitbreaker>=1.4.0
+
+# ============================================
+# CACHE & PERSISTENCE
+# ============================================
+aiocache>=0.12.0
+cachetools>=5.3.0
+aiosqlite>=0.19.0
+
+# ============================================
+# VALIDATION
+# ============================================
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# ============================================
+# T-BANK API (СПЕЦИАЛЬНЫЙ ИНДЕКС - НЕ МЕНЯТЬ!)
+# ============================================
+--index-url https://opensource.tbank.ru/api/v4/projects/238/packages/pypi/simple
+t-tech-investments>=0.3.3
+
+# ============================================
+# FUNDAMENTAL ANALYSIS
+# ============================================
+yfinance>=0.2.28
+
+# ============================================
+# DATA SCRAPING & PARSING
+# ============================================
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+html5lib>=1.1
+selenium>=4.15.0
+
+# ============================================
+# TELEGRAM NOTIFICATIONS
+# ============================================
+python-telegram-bot>=20.0
+
+# ============================================
+# LOGGING
+# ============================================
+loguru>=0.7.0
+
+# ============================================
+# ERROR TRACKING
+# ============================================
+sentry-sdk>=1.30.0
+
+# ============================================
+# FAST JSON PARSING
+# ============================================
+ujson>=5.8.0
+orjson>=3.9.0
+
+# ============================================
+# EXCEL EXPORT
+# ============================================
+openpyxl>=3.1.0
+
+# ============================================
+# MISC
+# ============================================
+python-magic>=0.4.27
 "@ | Out-File -FilePath "$InstallPath\requirements.txt" -Encoding UTF8
 
 Write-Host "   Upgrading pip..." -ForegroundColor DarkGray
@@ -84,7 +228,7 @@ Write-Host "   ✅ Dependencies installed" -ForegroundColor Green
 # Create .env template
 Write-Host ""
 Write-Host "🔐 Creating .env file..." -ForegroundColor Yellow
-if (-not (Test-Path ".env")) {
+if (-not (Test-Path "$InstallPath\.env")) {
     @"
 # Trading Bot Configuration
 TBANK_TOKEN=YOUR_TOKEN_HERE
@@ -92,34 +236,21 @@ TBANK_ACCOUNT_ID=
 TELEGRAM_TOKEN=
 TELEGRAM_CHAT_ID=
 LOG_LEVEL=INFO
-"@ | Out-File -FilePath ".env" -Encoding UTF8
+"@ | Out-File -FilePath "$InstallPath\.env" -Encoding UTF8
     Write-Host "   ⚠️ .env template created - ADD YOUR TOKENS!" -ForegroundColor Yellow
 } else {
     Write-Host "   ✅ .env file exists" -ForegroundColor Green
 }
 
-# Create logs folder
-Write-Host ""
-Write-Host "📋 Creating logs folder..." -ForegroundColor Yellow
-if (-not (Test-Path "logs")) {
-    New-Item -ItemType Directory -Path "logs" -Force | Out-Null
-    Write-Host "   ✅ Logs folder created" -ForegroundColor Green
-} else {
-    Write-Host "   ✅ Logs folder exists" -ForegroundColor Green
-}
-
-# Создаём все остальные скрипты (они будут без проверки админа)
+# Create start scripts
 Write-Host ""
 Write-Host "🚀 Creating scripts..." -ForegroundColor Yellow
 
-# start_bot.ps1 (без админа)
+# start_bot.ps1
 @'
 # start_bot.ps1 - Запуск торгового бота
-# НЕ ТРЕБУЕТ АДМИНИСТРАТОРА
 
-param(
-    [switch]$Background = $false
-)
+param([switch]$Background = $false)
 
 $scriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $scriptPath
@@ -132,14 +263,12 @@ Write-Host ""
 Write-Host "📅 Time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor DarkGray
 Write-Host ""
 
-# Check .env
 if (-not (Test-Path ".env")) {
     Write-Host "❌ ERROR: .env file not found!" -ForegroundColor Red
     pause
     exit 1
 }
 
-# Check venv
 if (-not (Test-Path "venv\Scripts\python.exe")) {
     Write-Host "❌ ERROR: Virtual environment not found!" -ForegroundColor Red
     Write-Host "   Run: .\install_bot.ps1 first" -ForegroundColor Yellow
@@ -150,13 +279,11 @@ if (-not (Test-Path "venv\Scripts\python.exe")) {
 if ($Background) {
     Write-Host "📡 Starting in BACKGROUND mode..." -ForegroundColor Cyan
     $process = Start-Process -FilePath "venv\Scripts\python.exe" -ArgumentList "web_server.py" -WindowStyle Hidden -PassThru
-    Write-Host ""
     Write-Host "✅ BOT STARTED IN BACKGROUND!" -ForegroundColor Green
     Write-Host "   PID: $($process.Id)" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "📊 Check status: .\status.ps1" -ForegroundColor Cyan
     Write-Host "🛑 Stop bot: .\stop_bot.ps1" -ForegroundColor Cyan
-    Write-Host "📋 View logs: .\logs.ps1" -ForegroundColor Cyan
 } else {
     Write-Host "📡 Starting in CONSOLE mode..." -ForegroundColor Cyan
     Write-Host ""
@@ -166,10 +293,9 @@ if ($Background) {
 }
 '@ | Out-File -FilePath "$InstallPath\start_bot.ps1" -Encoding UTF8
 
-# stop_bot.ps1 (без админа - не использует ScheduledTask)
+# stop_bot.ps1
 @'
 # stop_bot.ps1 - Остановка торгового бота
-# НЕ ТРЕБУЕТ АДМИНИСТРАТОРА
 
 $scriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $scriptPath
@@ -182,7 +308,6 @@ Write-Host ""
 Write-Host "📅 Time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor DarkGray
 Write-Host ""
 
-# Stop Python processes from our folder
 Write-Host "🐍 Stopping Python processes..." -ForegroundColor Cyan
 $stopped = 0
 $processes = Get-Process python -ErrorAction SilentlyContinue
@@ -199,7 +324,6 @@ foreach ($proc in $processes) {
 }
 Write-Host "   ✅ Stopped $stopped processes" -ForegroundColor Green
 
-# Free port 10000
 Write-Host "🔌 Freeing port 10000..." -ForegroundColor Cyan
 $connections = netstat -ano 2>$null | Select-String ":10000" | Select-String "LISTENING"
 if ($connections) {
@@ -215,19 +339,15 @@ if ($connections) {
     }
 }
 
-# Remove lock files
 Remove-Item "$scriptPath\trading_bot.lock" -Force -ErrorAction SilentlyContinue
 Remove-Item "$env:TEMP\trading_bot.lock" -Force -ErrorAction SilentlyContinue
 
 Start-Sleep -Seconds 1
-
 Write-Host ""
 Write-Host "✅ BOT STOPPED" -ForegroundColor Green
-Write-Host ""
-Read-Host "Press Enter to exit"
 '@ | Out-File -FilePath "$InstallPath\stop_bot.ps1" -Encoding UTF8
 
-# status.ps1 (без админа)
+# status.ps1
 @'
 # status.ps1 - Проверка статуса бота
 
@@ -242,7 +362,6 @@ Write-Host ""
 Write-Host "📅 Time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor DarkGray
 Write-Host ""
 
-# Check processes
 Write-Host "🐍 PYTHON PROCESSES:" -ForegroundColor Yellow
 $processes = Get-Process python -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "*my-trading-bot*" -or $_.Path -like "*$scriptPath*" }
 if ($processes) {
@@ -256,7 +375,6 @@ if ($processes) {
 }
 Write-Host ""
 
-# Check port
 Write-Host "🔌 PORT 10000:" -ForegroundColor Yellow
 try {
     $response = Invoke-WebRequest -Uri "http://localhost:10000/health" -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
@@ -267,7 +385,6 @@ try {
 }
 Write-Host ""
 
-# Check logs
 $logFile = "logs\web_server.log"
 if (Test-Path $logFile) {
     Write-Host "📋 LAST LOGS (5 lines):" -ForegroundColor Yellow
@@ -275,7 +392,6 @@ if (Test-Path $logFile) {
 } else {
     Write-Host "📋 No logs yet" -ForegroundColor Yellow
 }
-
 Write-Host ""
 Read-Host "Press Enter to exit"
 '@ | Out-File -FilePath "$InstallPath\status.ps1" -Encoding UTF8
@@ -321,6 +437,8 @@ Write-Host ""
 Write-Host "🛑 Stopping..." -ForegroundColor Yellow
 & .\stop_bot.ps1
 
+Start-Sleep -Seconds 2
+
 Write-Host "🚀 Starting..." -ForegroundColor Yellow
 & .\start_bot.ps1 -Background
 
@@ -359,7 +477,8 @@ Write-Host ""
    TRADING BOT - QUICK GUIDE
 ========================================
 
-📁 INSTALLATION FOLDER: USERPROFILE\my-trading-bot
+📁 INSTALLATION FOLDER:
+   Where this script is located
 
 🔐 FIRST STEPS:
    1. Edit .env file with your tokens
@@ -392,6 +511,14 @@ Write-Host "==========================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "📁 Installation path: $InstallPath" -ForegroundColor Cyan
 Write-Host ""
+
+if (-not $hasProjectFiles) {
+    Write-Host "⚠️ IMPORTANT: Project files not found!" -ForegroundColor Yellow
+    Write-Host "   Make sure you have the trading_bot folder in this directory." -ForegroundColor DarkGray
+    Write-Host "   This script should be run from the project root." -ForegroundColor DarkGray
+    Write-Host ""
+}
+
 Write-Host "🔐 NEXT STEPS:" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "   1. Edit .env file with your token:" -ForegroundColor White

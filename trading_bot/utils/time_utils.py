@@ -7,6 +7,11 @@ from typing import Optional, Tuple, Dict, List, Any
 import pytz
 from ..logger import info, success, error, warning, debug
 
+from trading_bot.cache import TTLCache
+
+# Кэш для проверки времени торгов (30 секунд)
+_trading_time_cache = TTLCache(default_ttl=30, max_size=100, name="trading_time_cache")
+
 # Московская временная зона (UTC+3)
 MOSCOW_TZ = timezone(timedelta(hours=3))
 

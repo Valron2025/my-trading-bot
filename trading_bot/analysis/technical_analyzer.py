@@ -9,7 +9,8 @@ import time
 import numpy as np
 
 from trading_bot.cache import TTLCache
-from trading_bot.cache.unified_cache import UnifiedCache, USE_UNIFIED_CACHE
+from trading_bot.cache.cache_manager import TTLCache as UnifiedCache
+USE_UNIFIED_CACHE = False
 from ..models import StockAnalysis
 from ..logger import success, warning, debug, info, error
 from .strategy_engine import create_strategy_engine

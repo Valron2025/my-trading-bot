@@ -5,7 +5,8 @@ import math
 
 from ..logger import info, debug, warning
 from ..cache import TTLCache
-from trading_bot.cache.unified_cache import UnifiedCache, USE_UNIFIED_CACHE
+from trading_bot.cache.cache_manager import TTLCache as UnifiedCache
+USE_UNIFIED_CACHE = False
 
 
 class CorrelationAnalyzer:

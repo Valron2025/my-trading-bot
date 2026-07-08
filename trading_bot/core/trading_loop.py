@@ -977,12 +977,13 @@ class TradingLoop:
                                      current_price: float, avg_price: float) -> Dict[str, Any]:
         """Технический анализ конкретной позиции с определением ЛОКАЛЬНОГО тренда и ATR"""
 
-        # ✅ ПРОВЕРКА КЭША
+        # ✅ КЭШ ДЛЯ ТЕХНИЧЕСКОГО АНАЛИЗА
         cache_key = f"tech_{ticker}_{figi}_{side}_{int(current_price * 100)}_{int(avg_price * 100)}"
 
+        # Проверяем кэш (60 секунд)
         if hasattr(self, '_tech_analysis_cache'):
             cached = self._tech_analysis_cache.get(cache_key)
-            if cached and (time.time() - cached['timestamp']) < self._tech_cache_ttl:
+            if cached and (time.time() - cached['timestamp']) < 60:
                 debug(f"   📦 Тех.анализ {ticker} из кэша (возраст: {time.time() - cached['timestamp']:.1f}с)")
                 return cached['data']
 
@@ -3133,12 +3134,10 @@ class TradingLoop:
     def _check_positions(self):
         """Проверка стоп-лоссов, тейк-профитов и отката от максимума"""
 
-        # ✅ ДОБАВИТЬ: проверяем позиции ТОЛЬКО в торговое время
         if not self._is_trading_time():
             debug(f"   ⏸️ Пропускаем проверку позиций (не торговое время)")
             return
 
-        # ✅ ДОБАВИТЬ: проверяем не чаще раза в 5 секунд
         now = time.time()
         if hasattr(self, '_last_check_time') and (now - self._last_check_time) < 5:
             debug(f"   ⏸️ Пропускаем проверку позиций (прошло <5с)")
@@ -3153,20 +3152,20 @@ class TradingLoop:
             if not positions:
                 return
 
-            # ✅ СОБИРАЕМ ВСЕ FIGI
+            # ✅ СОБИРАЕМ ВСЕ FIGI В ОДИН СПИСОК
             figis = list(positions.keys())
 
-            # ✅ ОДИН BATCH-ЗАПРОС
+            # ✅ ОДИН BATCH-ЗАПРОС ДЛЯ ВСЕХ ПОЗИЦИЙ
             prices_dict = {}
             if figis:
-                prices_dict = tbank.get_last_prices_batch(figis)
+                prices_dict = tbank.get_last_prices_batch(figis)  # ← ОДИН ЗАПРОС!
                 debug(f"   📡 Batch-запрос цен для {len(prices_dict)}/{len(figis)} позиций")
 
             for figi, position in positions.items():
-                # ✅ БЕРЁМ ЦЕНУ ИЗ СЛОВАРЯ
+                # ✅ БЕРЁМ ЦЕНУ ИЗ СЛОВАРЯ (МГНОВЕННО!)
                 current_price = prices_dict.get(figi)
                 if not current_price:
-                    # Fallback: отдельный запрос
+                    # Fallback: отдельный запрос только если не получили
                     current_price = tbank.get_current_price(figi)
                 if not current_price:
                     warning(f"   ⚠️ {position.ticker}: не удалось получить цену")

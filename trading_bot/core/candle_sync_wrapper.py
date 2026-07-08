@@ -85,6 +85,7 @@ def init_candle_builder(test_mode: bool = False):
 
 
 def get_candles_sync(ticker: str, interval_minutes: int = 5, days: int = 30) -> List[Tuple[float, float]]:
+    """Синхронное получение свечей через CandleBuilder - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
     global _initialized, _loop
 
     if not ticker:
@@ -121,7 +122,7 @@ def get_candles_sync(ticker: str, interval_minutes: int = 5, days: int = 30) -> 
     interval_str = interval_map.get(interval_minutes, "5min")
 
     try:
-        # ✅ ИСПРАВЛЕНИЕ 3: Проверяем _loop ещё раз перед использованием
+        # ✅ Проверяем _loop ещё раз перед использованием
         if _loop is None or _loop.is_closed():
             warning("⚠️ Event loop закрыт, переинициализируем...")
             _initialized = False
@@ -140,18 +141,12 @@ def get_candles_sync(ticker: str, interval_minutes: int = 5, days: int = 30) -> 
             if candle_builder is None:
                 return []
 
+        # ✅ ИСПРАВЛЕНО: используем универсальный метод get_candles()
         future = asyncio.run_coroutine_threadsafe(
-            candle_builder.get_candles_from_moex(ticker, interval=interval_str, days=days),
+            candle_builder.get_candles(ticker, source="moex", interval=interval_str, days=days),
             _loop
         )
         candles_data = future.result(timeout=30)
-
-        if not candles_data:
-            future2 = asyncio.run_coroutine_threadsafe(
-                candle_builder.get_candles(ticker, source="moex", interval=interval_str, days=days),
-                _loop
-            )
-            candles_data = future2.result(timeout=30)
 
         if not candles_data:
             debug(f"Нет данных для {ticker}")
@@ -180,8 +175,13 @@ def get_candles_sync(ticker: str, interval_minutes: int = 5, days: int = 30) -> 
 
 
 async def get_volumes_from_moex(ticker: str, days: int = 5) -> List[int]:
+    """
+    Получение объёмов торгов из MOEX
+    ✅ С правильным управлением ClientSession
+    """
     import aiohttp
     from datetime import datetime, timedelta
+    import asyncio
 
     try:
         end_date = datetime.now()
@@ -196,25 +196,51 @@ async def get_volumes_from_moex(ticker: str, days: int = 5) -> List[int]:
             'iss.meta': 'off',
         }
 
+        # ✅ ClientSession управляется через async with
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with session.get(
+                    url,
+                    params=params,
+                    timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     if 'candles' in data:
                         columns = data['candles'].get('columns', [])
                         rows = data['candles'].get('data', [])
+
                         volume_idx = -1
                         for i, col in enumerate(columns):
                             if col == 'volume':
                                 volume_idx = i
                                 break
+
                         if volume_idx == -1:
+                            debug(f"⚠️ Колонка volume не найдена для {ticker}")
                             return []
-                        volumes = [int(row[volume_idx]) for row in rows if len(row) > volume_idx and row[volume_idx]]
+
+                        volumes = []
+                        for row in rows:
+                            if len(row) > volume_idx and row[volume_idx]:
+                                try:
+                                    volumes.append(int(row[volume_idx]))
+                                except (ValueError, TypeError):
+                                    continue
+
                         return volumes
+                else:
+                    debug(f"⚠️ MOEX вернул статус {resp.status} для {ticker}")
+                    return []
+
+    except asyncio.TimeoutError:
+        debug(f"⏰ Таймаут MOEX для {ticker}")
+        return []
+    except aiohttp.ClientError as e:
+        debug(f"🌐 Ошибка MOEX для {ticker}: {e}")
+        return []
     except Exception as e:
-        debug(f"❌ MOEX ошибка: {e}")
-    return []
+        debug(f"❌ MOEX ошибка для {ticker}: {e}")
+        return []
 
 
 def get_volumes_from_moex_sync(ticker: str, days: int = 5) -> List[int]:

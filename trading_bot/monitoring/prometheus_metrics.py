@@ -9,7 +9,7 @@ import time
 import logging
 from typing import Dict, Any
 from datetime import datetime
-from trading_bot.cache.unified_cache import CacheRegistry, USE_UNIFIED_CACHE
+from trading_bot.cache.cache_manager import TTLCache
 
 logger = logging.getLogger(__name__)
 

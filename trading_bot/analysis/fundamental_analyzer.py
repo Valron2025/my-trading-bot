@@ -21,7 +21,8 @@ from dotenv import load_dotenv
 from datetime import datetime, timezone, timedelta
 from trading_bot.utils.time_utils import get_moscow_time
 from zoneinfo import ZoneInfo
-from trading_bot.cache.unified_cache import UnifiedCache, USE_UNIFIED_CACHE
+from trading_bot.cache.cache_manager import TTLCache as UnifiedCache
+USE_UNIFIED_CACHE = False
 
 
 # ========== RATE LIMITER ДЛЯ YAHOO FINANCE ==========

@@ -41,8 +41,11 @@ from socket import timeout as SocketTimeoutError
 # Для TTLCache в mark_as_confirmation_required
 from trading_bot.cache import TTLCache
 
-# Импорты для унифицированного кэша
-from trading_bot.cache.unified_cache import USE_UNIFIED_CACHE, UnifiedCache
+from trading_bot.cache.cache_manager import TTLCache
+
+# Для обратной совместимости
+USE_UNIFIED_CACHE = False
+UnifiedCache = TTLCache
 
 def retry_on_error(max_retries=3, delay=1, backoff=2, timeout_seconds=2.0):
     """Декоратор для повторных попыток при ошибках API с таймаутом"""
@@ -238,7 +241,7 @@ class TBankClient:
 
         # ✅ ПРЕДВАРИТЕЛЬНАЯ ВАЛИДАЦИЯ
         is_valid, reason, validation_info = validator.validate_before_send(
-            figi=figi,
+            instrument_id=figi,
             quantity=quantity,
             direction="BUY",
             is_short=False
@@ -293,7 +296,7 @@ class TBankClient:
 
         # ОТПРАВКА С ПОДТВЕРЖДЕНИЕМ
         result = validator.send_order_with_confirmation(
-            figi=figi,
+            instrument_id=figi,
             quantity=quantity,
             direction="BUY",
             order_type="MARKET" if use_market else "LIMIT",

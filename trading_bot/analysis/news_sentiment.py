@@ -19,7 +19,8 @@ from datetime import datetime, timedelta
 from collections import deque
 
 from trading_bot.logger import info, success, error, warning, debug
-from trading_bot.cache.unified_cache import UnifiedCache, USE_UNIFIED_CACHE
+from trading_bot.cache.cache_manager import TTLCache as UnifiedCache
+USE_UNIFIED_CACHE = False
 from trading_bot.utils.time_utils import get_moscow_time
 
 

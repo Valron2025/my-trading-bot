@@ -45,11 +45,11 @@ from trading_bot.cache import (
     margin_cache, instruments_cache
 )
 
-# Для TTLCache в mark_as_confirmation_required
-from trading_bot.cache import TTLCache
+# Импорты для унифицированного кэша (используем cache_manager)
+from trading_bot.cache.cache_manager import TTLCache as UnifiedCache
 
-# Импорты для унифицированного кэша
-from trading_bot.cache.unified_cache import USE_UNIFIED_CACHE, UnifiedCache
+# Флаг USE_UNIFIED_CACHE - для обратной совместимости всегда False
+USE_UNIFIED_CACHE = False
 
 
 # ========== МОНИТОРИНГ ЗАДЕРЖЕК API ==========
@@ -1786,11 +1786,11 @@ class TBankClient:
 
     @api_monitor.measure("get_current_price")
     def get_current_price(self, figi: str) -> Optional[float]:
-        """Получение текущей цены с кэшированием"""
+        """Получение текущей цены с КЭШИРОВАНИЕМ"""
         self._wait_for_rate_limit()
 
-        cache_key = figi
-        cached_price = price_cache.get(cache_key)
+        # ✅ ПРОВЕРКА КЭША
+        cached_price = price_cache.get(figi)
         if cached_price is not None:
             return cached_price
 
@@ -1799,7 +1799,8 @@ class TBankClient:
                 last_prices = client.market_data.get_last_prices(figi=[figi])
                 if last_prices and last_prices.last_prices:
                     price = float(quotation_to_decimal(last_prices.last_prices[0].price))
-                    price_cache.set(cache_key, price, ttl=5)
+                    # ✅ TTL 10 СЕКУНД
+                    price_cache.set(figi, price, ttl=10)
                     return price
             except Exception as e:
                 debug(f"Ошибка получения цены для {figi}: {e}")
@@ -1810,12 +1811,6 @@ class TBankClient:
         """
         ПОЛУЧЕНИЕ ЦЕН СРАЗУ ДЛЯ НЕСКОЛЬКИХ ИНСТРУМЕНТОВ (BATCH)
         С ПОДДЕРЖКОЙ КЭШИРОВАНИЯ
-
-        Args:
-            figis: Список FIGI (например, ['FIGI1', 'FIGI2', 'FIGI3'])
-
-        Returns:
-            Dict[str, float]: {figi: цена, ...}
         """
         from t_tech.invest.utils import quotation_to_decimal
         from trading_bot.utils.time_utils import is_trading_time
@@ -1868,8 +1863,8 @@ class TBankClient:
                     figi = price_data.figi
                     price = float(quotation_to_decimal(price_data.price))
                     result[figi] = price
-                    # ✅ СОХРАНЯЕМ В КЭШ (TTL 5 секунд)
-                    price_cache.set(figi, price, ttl=5)
+                    # ✅ СОХРАНЯЕМ В КЭШ (TTL 10 секунд)
+                    price_cache.set(figi, price, ttl=10)
                     debug(f"   ✅ {figi[:8]}: {price:.4f}₽ (сохранено в кэш)")
 
                 # Проверяем, все ли FIGI вернулись
@@ -1886,7 +1881,7 @@ class TBankClient:
                             if price:
                                 result[figi] = price
                                 # ✅ СОХРАНЯЕМ В КЭШ
-                                price_cache.set(figi, price, ttl=5)
+                                price_cache.set(figi, price, ttl=10)
                                 debug(f"   ✅ {figi[:8]}: {price:.4f}₽ (fallback, сохранено в кэш)")
                         except Exception as e:
                             warning(f"   ❌ Не удалось получить цену для {figi[:8]}: {e}")
@@ -1904,7 +1899,7 @@ class TBankClient:
                     if price:
                         result[figi] = price
                         # ✅ СОХРАНЯЕМ В КЭШ
-                        price_cache.set(figi, price, ttl=5)
+                        price_cache.set(figi, price, ttl=10)
                         debug(f"   ✅ {figi[:8]}: {price:.4f}₽ (fallback, сохранено в кэш)")
                 except Exception as e2:
                     warning(f"   ❌ {figi[:8]}: {e2}")
@@ -1947,9 +1942,12 @@ class TBankClient:
 
     @api_monitor.measure("get_candles")
     def get_candles(self, figi: str, days: int = 2, interval_minutes: int = 5) -> List[Tuple[float, float]]:
-        """Получение свечей с кэшированием и блокировкой для одного FIGI"""
-
+        """
+        Получение свечей с КЭШИРОВАНИЕМ и блокировкой для одного FIGI
+        ✅ ИСПРАВЛЕННАЯ ВЕРСИЯ
+        """
         from trading_bot.utils.time_utils import is_trading_time
+        import threading
 
         # ✅ В не торговое время используем только кэш
         if not is_trading_time():
@@ -1963,35 +1961,42 @@ class TBankClient:
 
         self._wait_for_rate_limit()
 
-        # ✅ Ограничиваем days для ускорения (уже есть)
+        # ✅ Ограничиваем days для ускорения
         days = min(days, 3)
 
+        # ✅ ЕДИНЫЙ ФОРМАТ КЛЮЧА КЭША
         cache_key = f"{figi}_{days}_{interval_minutes}"
 
-        # Проверяем кэш
+        # ✅ ПЕРВАЯ ПРОВЕРКА КЭША (БЕЗ БЛОКИРОВКИ - БЫСТРО!)
         cached_result = candles_cache.get(cache_key)
         if cached_result is not None:
+            debug(f"   📦 КЭШ HIT: свечи для {figi[:8]}... ({len(cached_result)} шт)")
             return cached_result.copy()
 
-        # Блокировка для одного FIGI, чтобы не было дублирующих запросов
-        lock_key = f"candle_lock_{figi}"
+        debug(f"   📦 КЭШ MISS: запрос к API для {figi[:8]}...")
+
+        # ✅ ИНИЦИАЛИЗИРУЕМ СЛОВАРЬ БЛОКИРОВОК
         if not hasattr(self, '_candle_locks'):
             self._candle_locks = {}
 
+        lock_key = f"candle_lock_{figi}"
         if lock_key not in self._candle_locks:
-            self._candle_locks[lock_key] = Lock()
+            self._candle_locks[lock_key] = threading.Lock()
 
+        # ✅ БЛОКИРОВКА ТОЛЬКО ДЛЯ РЕАЛЬНОГО ЗАПРОСА
         with self._candle_locks[lock_key]:
-            # Повторно проверяем кэш после получения блокировки
+            # ✅ ВТОРАЯ ПРОВЕРКА КЭША (ДРУГОЙ ПОТОК МОГ УЖЕ ЗАПОЛНИТЬ)
             cached_result = candles_cache.get(cache_key)
             if cached_result is not None:
+                debug(f"   📦 КЭШ HIT (после блокировки): свечи для {figi[:8]}... ({len(cached_result)} шт)")
                 return cached_result.copy()
 
-            # Реальный запрос к API
+            # ✅ РЕАЛЬНЫЙ ЗАПРОС К API
             with Client(self.token) as client:
                 try:
                     end_time = datetime.now(MOSCOW_TZ)
                     start_time = end_time - timedelta(days=days)
+
                     interval_map = {
                         1: CandleInterval.CANDLE_INTERVAL_1_MIN,
                         5: CandleInterval.CANDLE_INTERVAL_5_MIN,
@@ -2000,6 +2005,8 @@ class TBankClient:
                         1440: CandleInterval.CANDLE_INTERVAL_DAY,
                     }
                     interval = interval_map.get(interval_minutes, CandleInterval.CANDLE_INTERVAL_5_MIN)
+
+                    debug(f"   📡 API запрос свечей для {figi[:8]}... (days={days}, interval={interval_minutes}min)")
 
                     candles = client.market_data.get_candles(
                         figi=figi,
@@ -2010,13 +2017,24 @@ class TBankClient:
                     result = [(float(quotation_to_decimal(c.close)), float(c.volume)) for c in candles.candles]
 
                     if result:
-                        candles_cache.set(cache_key, result.copy(), ttl=30)
+                        # ✅ СОХРАНЯЕМ В КЭШ С TTL 120 СЕКУНД
+                        candles_cache.set(cache_key, result.copy(), ttl=120)
+                        debug(
+                            f"   💾 Сохранено в кэш: {len(result)} свечей для {figi[:8]}... (TTL=120с, ключ={cache_key})")
+                    else:
+                        # ✅ СОХРАНЯЕМ ПУСТОЙ РЕЗУЛЬТАТ
+                        candles_cache.set(cache_key, [], ttl=30)
+                        debug(f"   ⚠️ Пустой результат для {figi[:8]}... сохранено в кэш (TTL=30с)")
 
                     return result
+
                 except Exception as e:
-                    if "30014" in str(e):
+                    error_msg = str(e)
+                    if "30014" in error_msg:
+                        debug(f"   ⏸️ Нет данных для {figi[:8]} (30014)")
+                        candles_cache.set(cache_key, [], ttl=30)
                         return []
-                    debug(f"Ошибка получения свечей {figi}: {e}")
+                    debug(f"   ❌ Ошибка получения свечей {figi[:8]}: {e}")
                     return []
 
     def get_trading_status(self, figi: str) -> Dict[str, Any]:
@@ -2216,27 +2234,50 @@ class TBankClient:
                 except Exception as e:
                     debug(f"Не удалось получить etf_by для {figi}: {e}")
 
-            # ========== 3. ПРОВЕРКА ЧЕРЕЗ ТОРГОВЫЙ СТАТУС ==========
-            trading_status = self.get_trading_status(figi)
+                # ========== 3. ПРОВЕРКА ЧЕРЕЗ ТОРГОВЫЙ СТАТУС ==========
+                trading_status = self.get_trading_status(figi)
 
-            # Если API торговля недоступна - считаем OTC
-            if not trading_status.get('api_trade_available', True):
-                instruments_cache.set(cache_key, True, ttl=3600)
-                return True
+                # Если API торговля недоступна - считаем OTC
+                if not trading_status.get('api_trade_available', True):
+                    instruments_cache.set(cache_key, True, ttl=3600)
+                    return True
 
-            # Если нет доступных типов заявок - возможно OTC
-            if not trading_status.get('market_order_available', False) and \
-                    not trading_status.get('limit_order_available', False):
-                instruments_cache.set(cache_key, True, ttl=3600)
-                return True
+                # Если нет доступных типов заявок - возможно OTC
+                if not trading_status.get('market_order_available', False) and \
+                        not trading_status.get('limit_order_available', False):
+                    instruments_cache.set(cache_key, True, ttl=3600)
+                    return True
 
-            # ========== 4. ПО УМОЛЧАНИЮ - НЕ ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ ==========
+                # ========== 4. ✅ РЕАЛЬНАЯ ПРОВЕРКА ЧЕРЕЗ API (ВНУТРИ ТОГО ЖЕ КЛИЕНТА) ==========
+                try:
+                    # Получаем текущую цену для тестового запроса
+                    current_price = self.get_current_price(figi)
+                    if current_price and current_price > 0:
+                        test_price = current_price * 0.9
+                        from decimal import Decimal
+
+                        # ✅ client ДОСТУПЕН, мы всё ещё внутри with Client(self.token) as client
+                        max_lots = client.orders.get_max_lots(
+                            instrument_id=figi,
+                            price=decimal_to_quotation(Decimal(str(test_price)))
+                        )
+                        # Если дошли сюда - инструмент доступен
+                        instruments_cache.set(cache_key, False, ttl=1800)
+                        return False
+                except Exception as e:
+                    error_msg = str(e)
+                    # Ошибка 30240 - требует подтверждения
+                    if "30240" in error_msg:
+                        instruments_cache.set(cache_key, True, ttl=3600)
+                        return True
+                    debug(f"⚠️ Тестовый запрос для {figi}: {error_msg[:100]}")
+
+            # ========== 5. ПО УМОЛЧАНИЮ ==========
             instruments_cache.set(cache_key, False, ttl=1800)
             return False
 
         except Exception as e:
             debug(f"Ошибка проверки OTC для {figi}: {e}")
-            # При ошибке - считаем что НЕ требует подтверждения (пессимистично)
             return False
 
     def get_instrument_by_figi(self, figi: str) -> Optional[Dict[str, Any]]:
@@ -3048,7 +3089,6 @@ class TBankClient:
                 price_quotation = decimal_to_quotation(Decimal(str(price))) if price else None
 
                 max_lots = client.orders.get_max_lots(
-                    # account_id=self.account_id,  # ← УДАЛИТЬ ЭТУ СТРОКУ
                     instrument_id=figi,
                     price=price_quotation
                 )

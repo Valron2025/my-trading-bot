@@ -5,7 +5,8 @@ import time
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
-from trading_bot.cache.unified_cache import UnifiedCache, USE_UNIFIED_CACHE
+from trading_bot.cache.cache_manager import TTLCache as UnifiedCache
+USE_UNIFIED_CACHE = False
 from ..config import config
 from ..models import StockCandidate, StockAnalysis, OrderSide
 from ..logger import info, success, error, warning, debug
@@ -142,7 +143,7 @@ class StockScanner:
 
             # Создаём кандидата
             candidate = StockCandidate(
-                figi=figi,
+                instrument_id=figi,
                 name=name,
                 ticker=ticker,
                 price=current_price,
@@ -692,7 +693,7 @@ class StockScanner:
                 if candles_15min and len(candles_15min) >= 20:
                     mtf_score, mtf_signals, mtf_details = await trading_loop._analyze_ticker_with_mtf(
                         ticker=ticker,
-                        figi=figi,
+                        instrument_id=figi,
                         candles_15min=candles_15min,
                         total_capital=self.bot._last_capital if hasattr(self.bot, '_last_capital') else 100000
                     )
@@ -716,7 +717,7 @@ class StockScanner:
         if not technical:
             info(f"   ⚠️ {ticker}: технический анализ вернул None")
             return StockAnalysis(
-                figi=figi, name=ticker, score=0, buy_signal=False, sell_signal=False,
+                instrument_id=figi, name=ticker, score=0, buy_signal=False, sell_signal=False,
                 recommendation="НЕТ ДАННЫХ", signals=["Недостаточно данных для анализа"]
             )
 
@@ -813,7 +814,7 @@ class StockScanner:
         conf_level = min(0.95, 0.5 + abs(final_score) / 20)
 
         return StockAnalysis(
-            figi=figi,
+            instrument_id=figi,
             name=ticker,
             score=final_score,
             buy_signal=buy_signal,
@@ -973,14 +974,14 @@ class StockScanner:
 
             # Создаём кандидата
             candidate = StockCandidate(
-                figi=figi,
+                instrument_id=figi,
                 name=ticker,
                 ticker=ticker,
                 price=current_price,
                 lot=1,
                 lot_price=current_price,
                 analysis=StockAnalysisModel(
-                    figi=figi,
+                    instrument_id=figi,
                     name=ticker,
                     score=score,
                     buy_signal=(side == OrderSide.LONG),
