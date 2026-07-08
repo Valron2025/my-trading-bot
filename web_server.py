@@ -13,7 +13,7 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # ← ИЗМЕНЕНО на DEBUG для логов
     format='%(asctime)s | %(levelname)s | %(message)s',
     datefmt='%H:%M:%S'
 )
@@ -26,11 +26,13 @@ print(f"   Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 print("=" * 60)
 
 # ========== ПРОВЕРКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ==========
-print("🔍 CHECKING ENVIRONMENT VARIABLES...")
+print("🔍 ENVIRONMENT VARIABLES:")
 tbank_token = os.getenv('TBANK_TOKEN')
 tbank_account_id = os.getenv('TBANK_ACCOUNT_ID')
 print(f"   TBANK_TOKEN: {'✅ SET' if tbank_token else '❌ NOT SET'}")
 print(f"   TBANK_ACCOUNT_ID: {'✅ SET' if tbank_account_id else '❌ NOT SET'}")
+if tbank_token:
+    print(f"   TBANK_TOKEN (first 20): {tbank_token[:20]}...")
 print("=" * 60)
 
 # ========== ЗАПУСК TELEGRAM POLLING ==========
@@ -52,14 +54,17 @@ except Exception as e:
 print("\n🚀 STARTING TRADING BOT...")
 _trading_bot = None
 _bot_thread = None
+_bot_started = False
+_bot_error = None
 
 
 def run_bot():
     """Запуск торгового бота с полной отладкой"""
-    global _trading_bot
+    global _trading_bot, _bot_started, _bot_error
 
     print("\n" + "=" * 60)
     print("🤖 RUN_BOT() STARTED")
+    print(f"   Thread: {threading.current_thread().name}")
     print("=" * 60)
 
     try:
@@ -73,6 +78,7 @@ def run_bot():
 
         print("   🚀 ШАГ 3: Запуск бота...")
         _trading_bot.start()
+        _bot_started = True
         print("   ✅ TRADING BOT STARTED")
 
         print("\n" + "=" * 60)
@@ -80,33 +86,50 @@ def run_bot():
         print("=" * 60)
 
     except ImportError as e:
+        _bot_error = f"ImportError: {e}"
         print(f"\n❌ ОШИБКА ИМПОРТА: {e}")
-        print("   📋 Трассировка:")
         traceback.print_exc()
 
     except Exception as e:
+        _bot_error = f"Exception: {e}"
         print(f"\n❌ ОШИБКА ЗАПУСКА БОТА: {e}")
-        print("   📋 Трассировка:")
         traceback.print_exc()
+
+    finally:
+        print(f"\n📊 ИТОГ RUN_BOT:")
+        print(f"   _bot_started: {_bot_started}")
+        print(f"   _bot_error: {_bot_error}")
+        print(f"   _trading_bot: {_trading_bot}")
+        print("=" * 60)
 
 
 # ✅ ЗАПУСКАЕМ БОТА В ОТДЕЛЬНОМ ПОТОКЕ
 print("🔄 Создание потока для бота...")
-_bot_thread = threading.Thread(target=run_bot, daemon=True)
+_bot_thread = threading.Thread(target=run_bot, daemon=True, name="TradingBotThread")
 _bot_thread.start()
-print("✅ TRADING BOT THREAD STARTED")
-print(f"   Поток запущен: {_bot_thread.is_alive()}")
-print(f"   Имя потока: {_bot_thread.name}")
+print(f"✅ Поток создан: {_bot_thread.name}")
 
-# ========== ОЖИДАНИЕ ЗАПУСКА БОТА ==========
-print("\n⏳ Ожидание запуска бота (3 секунды)...")
-time.sleep(3)
+# ========== ОЖИДАНИЕ ЗАПУСКА БОТА (С ТАЙМАУТОМ) ==========
+print("\n⏳ Ожидание запуска бота (до 15 секунд)...")
+for i in range(15):
+    time.sleep(1)
+    if _bot_started:
+        print("✅ БОТ УСПЕШНО ЗАПУЩЕН!")
+        break
+    if _bot_error:
+        print(f"❌ ОШИБКА ЗАПУСКА БОТА: {_bot_error}")
+        break
+    print(f"   ⏳ Ожидание... {i + 1}/15")
 
 # Проверяем статус потока
-if _bot_thread.is_alive():
-    print("✅ Поток бота активен")
-else:
-    print("❌ Поток бота НЕ АКТИВЕН!")
+print("\n📊 СТАТУС ПОТОКА:")
+print(f"   Поток активен: {_bot_thread.is_alive()}")
+print(f"   Бот запущен: {_bot_started}")
+print(f"   Ошибка: {_bot_error}")
+
+if not _bot_started and _bot_error:
+    print(f"\n❌ БОТ НЕ ЗАПУСТИЛСЯ! Ошибка: {_bot_error}")
+    print("   📋 Проверьте переменные окружения TBANK_TOKEN")
 
 print("=" * 60 + "\n")
 
@@ -114,11 +137,12 @@ print("=" * 60 + "\n")
 app = Flask(__name__)
 
 _bot_status = {
-    'running': True,
+    'running': _bot_started,
     'cycle_count': 0,
     'positions': 0,
     'capital': 0,
-    'last_update': None
+    'last_update': None,
+    'error': _bot_error
 }
 
 
@@ -126,12 +150,14 @@ _bot_status = {
 @app.route('/health')
 def health_check():
     return jsonify({
-        "status": "ok",
+        "status": "ok" if _bot_started else "degraded",
         "timestamp": datetime.now().isoformat(),
         "service": "trading-bot",
         "telegram_polling": _telegram_thread is not None and _telegram_thread.is_alive(),
-        "bot_thread": _bot_thread is not None and _bot_thread.is_alive()
-    }), 200
+        "bot_thread": _bot_thread is not None and _bot_thread.is_alive(),
+        "bot_started": _bot_started,
+        "bot_error": _bot_error
+    }), 200 if _bot_started else 503
 
 
 @app.route('/health/simple')
@@ -151,15 +177,15 @@ def status():
         _, total, _ = tbank.get_available_funds()
         capital = total
     except Exception as e:
-        print(f"⚠️ Error getting status: {e}")
         capital = 0
 
     return jsonify({
-        "running": _bot_status.get('running', False),
+        "running": _bot_started,
         "capital": capital,
         "positions": _bot_status.get('positions', 0),
         "telegram_alive": _telegram_thread is not None and _telegram_thread.is_alive(),
         "bot_alive": _bot_thread is not None and _bot_thread.is_alive(),
+        "bot_error": _bot_error,
         "timestamp": datetime.now().isoformat()
     }), 200
 
