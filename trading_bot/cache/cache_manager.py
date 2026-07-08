@@ -317,14 +317,17 @@ def get_optimal_cache_ttl() -> Dict[str, int]:
 
 
 # ============================================================================
-# ГЛОБАЛЬНЫЕ ЭКЗЕМПЛЯРЫ (теперь все классы определены!)
+# ГЛОБАЛЬНЫЕ ЭКЗЕМПЛЯРЫ
 # ============================================================================
 
 _OPTIMAL_TTL = get_optimal_cache_ttl()
 
 price_cache = PriceCache(default_ttl=_OPTIMAL_TTL['price'])
 positions_cache = PositionCache(default_ttl=_OPTIMAL_TTL['positions'])
-candles_cache = TTLCache(default_ttl=300, max_size=500, name="candles_cache")  # ← 300 сек
+
+# ✅ ИСПРАВЛЕНО: TTL = 300 СЕКУНД (5 минут) для свечей
+candles_cache = TTLCache(default_ttl=300, max_size=500, name="candles_cache")
+
 margin_cache = TTLCache(default_ttl=_OPTIMAL_TTL['margin'], max_size=10, name="margin_cache")
 instruments_cache = TTLCache(default_ttl=_OPTIMAL_TTL['instruments'], max_size=500, name="instruments_cache")
 analysis_cache = TTLCache(default_ttl=_OPTIMAL_TTL['analysis'], max_size=500, name="analysis_cache")

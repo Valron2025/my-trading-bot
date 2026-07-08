@@ -27,10 +27,90 @@ class OrderValidator:
     def __init__(self, token: str, account_id: str):
         self.token = token
         self.account_id = account_id
-        self._pending_orders = {}  # {order_id: {status, created_at, ...}}
-        self._order_cache = {}  # кэш статусов заявок
-        self._cache_ttl = 5  # секунд
-        self._figi_resolver = get_figi_resolver()  # Инициализация резолвера FIGI
+        self._pending_orders = {}
+        self._order_cache = {}
+        self._cache_ttl = 5
+        self._figi_resolver = get_figi_resolver()
+
+        # ✅ ДОБАВИТЬ: Кэш для подтверждения сделок (OTC)
+        self._confirmation_cache = {}
+        self._confirmation_cache_time = {}
+        self._confirmation_ttl = 3600  # 1 час
+
+    def _is_confirmation_cached(self, figi: str) -> Optional[bool]:
+        """Проверка кэша подтверждения сделок"""
+        if figi in self._confirmation_cache:
+            cached_time = self._confirmation_cache_time.get(figi, 0)
+            if (time.time() - cached_time) < self._confirmation_ttl:
+                return self._confirmation_cache[figi]
+            else:
+                del self._confirmation_cache[figi]
+                if figi in self._confirmation_cache_time:
+                    del self._confirmation_cache_time[figi]
+        return None
+
+    def _cache_confirmation(self, figi: str, requires: bool):
+        """Сохранение в кэш подтверждения сделок"""
+        self._confirmation_cache[figi] = requires
+        self._confirmation_cache_time[figi] = time.time()
+
+    def is_confirmation_required(self, figi: str) -> bool:
+        """Проверка, требует ли инструмент подтверждения сделок (OTC)"""
+
+        # ========== 1. ПРОВЕРКА КЭША ==========
+        cached = self._is_confirmation_cached(figi)
+        if cached is not None:
+            return cached
+
+        try:
+            # ========== 2. ПОЛУЧАЕМ ИНФОРМАЦИЮ ОБ ИНСТРУМЕНТЕ ==========
+            with Client(self.token) as client:
+                # Пробуем получить instrument через share_by
+                try:
+                    response = client.instruments.share_by(figi=figi)
+                    if response and response.instrument:
+                        instrument = response.instrument
+
+                        # Проверяем флаг for_qual_investor_flag
+                        if getattr(instrument, 'for_qual_investor_flag', False):
+                            self._cache_confirmation(figi, True)
+                            return True
+
+                        # Проверяем exchange
+                        exchange = getattr(instrument, 'exchange', '')
+                        if 'DEALER' in exchange or 'OTC' in exchange:
+                            self._cache_confirmation(figi, True)
+                            return True
+
+                        # Проверяем api_trade_available_flag
+                        if not getattr(instrument, 'api_trade_available_flag', True):
+                            self._cache_confirmation(figi, True)
+                            return True
+
+                except Exception as e:
+                    debug(f"Не удалось получить share_by для {figi}: {e}")
+
+                # ========== 3. ПРОВЕРКА ЧЕРЕЗ ТОРГОВЫЙ СТАТУС ==========
+                trading_status = self.get_trading_status(figi)
+
+                # Если API торговля недоступна - считаем OTC
+                if not trading_status.get('api_trade_available', True):
+                    self._cache_confirmation(figi, True)
+                    return True
+
+                # Если нет доступных типов заявок - возможно OTC
+                if not trading_status.get('market_order_available', False) and \
+                        not trading_status.get('limit_order_available', False):
+                    self._cache_confirmation(figi, True)
+                    return True
+
+                # ========== 4. ПО УМОЛЧАНИЮ ==========
+                self._cache_confirmation(figi, False)
+                return False
+
+        except Exception as e:
+            debug(f"Ошибка проверки OTC для {figi}: {e}")
+            return False
 
     # ========== 1. ПРЕДВАРИТЕЛЬНАЯ ПРОВЕРКА ==========
 

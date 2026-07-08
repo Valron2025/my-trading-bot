@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 metrics_collector.py - Периодический сбор метрик со всех компонентов
 """

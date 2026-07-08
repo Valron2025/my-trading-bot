@@ -550,7 +550,7 @@ class TradingBot:
     # ========== ПУБЛИЧНЫЕ МЕТОДЫ ==========
 
     def start(self):
-        """Запуск бота"""
+        """Запуск бота - ЕДИНСТВЕННЫЙ МЕТОД ЗАПУСКА"""
         try:
             from trading_bot.risk.position_manager import position_manager
             restored = position_manager.sync_and_recover_positions()
@@ -559,7 +559,6 @@ class TradingBot:
         except Exception as e:
             print(f"⚠️ Ошибка синхронизации: {e}")
 
-        # ✅ ИСПРАВЛЕНО: используем правильное имя метода
         if hasattr(self.trading_loop, 'start_loop'):
             self.trading_loop.start_loop()
         elif hasattr(self.trading_loop, 'start'):
@@ -606,8 +605,7 @@ class TradingBot:
             loop.close()
 
     def stop(self):
-        """Остановка бота"""
-        # Останавливаем автооптимизатор
+        """Остановка бота - ЕДИНСТВЕННЫЙ МЕТОД ОСТАНОВКИ"""
         if self.auto_optimizer:
             self.auto_optimizer.stop()
 

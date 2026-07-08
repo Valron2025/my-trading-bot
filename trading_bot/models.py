@@ -1,4 +1,4 @@
-﻿"""Модели данных для торгового бота - ПРОДАКШЕН ВЕРСИЯ"""
+"""Модели данных для торгового бота - ПРОДАКШЕН ВЕРСИЯ"""
 
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any

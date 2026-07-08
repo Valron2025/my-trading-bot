@@ -1,4 +1,4 @@
-﻿# test_server.py
+# test_server.py
 from flask import Flask
 app = Flask(__name__)
 

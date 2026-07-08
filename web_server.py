@@ -105,6 +105,7 @@ def status():
     }), 200
 
 if __name__ == "__main__":
+    # ✅ ИСПРАВЛЕНО: порт 10000 для Render
     port = int(os.environ.get('PORT', 10000))
     print(f"\n🚀 STARTING WEB SERVER ON PORT {port}")
     print("=" * 60 + "\n")

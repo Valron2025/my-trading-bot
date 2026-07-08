@@ -9,7 +9,7 @@ from queue import Queue, Empty
 from datetime import datetime, timedelta, timezone
 
 from trading_bot.config import config
-from ..logger import debug, info, error
+from ..logger import debug, info, error, warning
 
 MOSCOW_TZ = timezone(timedelta(hours=3))
 
@@ -200,6 +200,27 @@ class TelegramNotifier:
         self._running = False
         if self._worker_thread:
             self._worker_thread.join(timeout=3)
+
+    def send_shutdown(self, message: str = None):
+        """Отправка уведомления об остановке бота"""
+        if not self.enabled:
+            return
+        msg = message or "🛑 **Бот остановлен**\n\nТорговля приостановлена до следующего запуска."
+        self.send_message(msg)
+
+    def start_polling_in_background(self):
+        """Запуск polling в фоновом режиме"""
+        if not self.enabled:
+            warning("Telegram не включён, polling не запущен")
+            return None
+
+        import threading
+        from trading_bot.telegram.telegram_polling import start_polling
+
+        thread = threading.Thread(target=start_polling, daemon=True, args=(self.token, self.chat_id))
+        thread.start()
+        info("✅ Telegram polling started in background")
+        return thread
 
 
 def get_telegram_notifier():

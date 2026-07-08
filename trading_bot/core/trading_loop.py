@@ -2209,13 +2209,40 @@ class TradingLoop:
                                 f"   {name:<25} | ср:{data['avg_ms']:>6.1f}ms | макс:{data['max_ms']:>6.1f}ms | n={data['count']}")
                     profiler.print_stats()
 
+
             except Exception as e:
+                error_msg = str(e)
                 error(f"❌ КРИТИЧЕСКАЯ ОШИБКА В ТОРГОВОМ ЦИКЛЕ: {e}")
                 self._consecutive_errors += 1
 
+                # ✅ ДОБАВИТЬ ОБРАБОТКУ 30042 И 30240
+                if "30042" in error_msg:
+                    warning("⚠️ ОШИБКА 30042: недостаточно средств или маржи")
+                    warning("   🔄 Проверяем мёртвые позиции...")
+                    try:
+                        from trading_bot.risk.position_manager import position_manager
+                        position_manager.check_uncovered_positions_before_clearing()
+                        position_manager.cleanup_stuck_positions()
+                    except Exception as cleanup_error:
+                        debug(f"   Ошибка очистки: {cleanup_error}")
+                    time.sleep(30)
+                    continue
+
+                elif "30240" in error_msg:
+                    warning("🔐 ОШИБКА 30240: требуется подтверждение сделок (OTC)")
+                    warning("   📱 Закройте позицию вручную в приложении Т-Банк")
+                    try:
+                        from trading_bot.risk.position_manager import position_manager
+                        # Удаляем позицию из менеджера
+                        for figi, pos in position_manager.get_all_positions().items():
+                            position_manager.remove_position(figi)
+                            warning(f"   🗑️ Позиция {pos.ticker} удалена из менеджера")
+                    except Exception as remove_error:
+                        debug(f"   Ошибка удаления: {remove_error}")
+                    time.sleep(60)
+                    continue
                 import traceback
                 error(f"   📋 Трассировка:\n{traceback.format_exc()}")
-
                 if self._consecutive_errors >= 5:
                     warning("🚨 СЛИШКОМ МНОГО ОШИБОК! Перезапускаем соединение с API...")
                     try:
