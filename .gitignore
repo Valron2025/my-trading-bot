@@ -28,6 +28,8 @@ logs/
 *.log
 *.log.*
 trading_bot.lock
+debug.log
+debug-*.log
 
 # ============================================
 # IDE
@@ -55,23 +57,35 @@ desktop.ini
 # ============================================
 # TRADING BOT SPECIFIC
 # ============================================
+# Результаты бэктестов
 backtest_results/
 optimization_results/
-# *.csv  <- ЗАКОММЕНТИРОВАНО! CSV файлы теперь будут загружаться
+test_results/
+
+# Данные
+*.csv
 *.png
 *.jpg
 *.xlsx
+*.db
+*.sqlite
+*.sqlite3
+
+# Настройки
 bot_settings.json
 optimized_params.json
-trading_bot.lock
+trading_state.db
+trading_state.db-journal
 
-# ============================================
-# PID FILES
-# ============================================
+# PID и блокировки
 *.pid
+*.lock
+trading_bot.lock
 /tmp/*.pid
 .pid
 .pidfile
+gunicorn.pid
+gunicorn.log
 
 # ============================================
 # LOCAL CONFIG
@@ -96,7 +110,6 @@ __pycache__/
 # ============================================
 # DISTRIBUTION / PACKAGING
 # ============================================
-.Python
 build/
 develop-eggs/
 dist/
@@ -112,13 +125,6 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-
-# ============================================
-# DATA & DATABASES
-# ============================================
-*.db
-*.sqlite
-*.sqlite3
 
 # ============================================
 # SECRETS & KEYS
@@ -170,3 +176,19 @@ coverage.xml
 .pip_cache/
 .pytest_cache/
 runtime.txt
+
+# ============================================
+# VPS / SERVER
+# ============================================
+*.service
+/etc/systemd/system/
+.htaccess
+.htpasswd
+
+# ============================================
+# DEBUG & TEST
+# ============================================
+test_*.csv
+test_*.db
+*_test.py
+debug-*.log
