@@ -1254,33 +1254,33 @@ class TradingLoop:
             return result
 
     def _analyze_position_technicals(self, ticker: str, figi: str, side: str,
-                                 current_price: float, avg_price: float) -> Dict[str, Any]:
+                                     current_price: float, avg_price: float) -> Dict[str, Any]:
         """Технический анализ конкретной позиции с определением ЛОКАЛЬНОГО тренда и ATR"""
-    
+
         # ✅ КЭШ ДЛЯ ТЕХНИЧЕСКОГО АНАЛИЗА
         cache_key = f"tech_{ticker}_{figi}_{side}_{int(current_price * 100)}_{int(avg_price * 100)}"
-    
+
         # ✅ ИЗМЕНЕНО: 60 → 300 СЕКУНД (5 минут)
         if hasattr(self, '_tech_analysis_cache'):
             cached = self._tech_analysis_cache.get(cache_key)
             if cached and (time.time() - cached['timestamp']) < 300:
                 debug(f"   📦 Тех.анализ {ticker} из кэша (возраст: {time.time() - cached['timestamp']:.1f}с)")
                 return cached['data']
-    
+
         try:
             side_upper = side.upper() if side else "UNKNOWN"
             distance_from_entry_pct = ((current_price - avg_price) / avg_price * 100) if avg_price > 0 else 0
-    
+
             # ✅ ИСПОЛЬЗУЙТЕ КЭШ ДЛЯ СВЕЧЕЙ
             candles_cache_key = f"candles_{figi}_15min"
-            
+
             # Проверяем кэш свечей
             candles = None
             if hasattr(self, '_candles_cache'):
                 candles = self._candles_cache.get(candles_cache_key)
                 if candles:
                     debug(f"   📦 Свечи для {ticker} из кэша")
-            
+
             # Если нет в кэше - запрашиваем
             if not candles:
                 candles = _get_tbank().get_candles(figi, days=2, interval_minutes=15)
@@ -1290,12 +1290,43 @@ class TradingLoop:
                 if candles:
                     self._candles_cache[candles_cache_key] = candles
                     debug(f"   📡 Загружены свечи для {ticker} ({len(candles)} шт)")
-    
+
             # ✅ УМЕНЬШЕНО: 50 → 30 свечей
             if candles and len(candles) > 30:
                 candles = candles[-30:]
-    
-            if not candles or len(candles) < 20:
+
+            # ========== ✅ ИЗВЛЕКАЕМ ДАННЫЕ ИЗ СВЕЧЕЙ ==========
+            closes = []
+            highs = []
+            lows = []
+            volumes = []
+
+            for c in candles:
+                if isinstance(c, (list, tuple)) and len(c) >= 2:
+                    close_val = c[0]
+                    volume_val = c[1] if len(c) > 1 else 0
+                    closes.append(close_val)
+                    volumes.append(volume_val)
+                    highs.append(close_val * 1.005)
+                    lows.append(close_val * 0.995)
+                elif hasattr(c, 'close'):
+                    closes.append(c.close)
+                    volumes.append(getattr(c, 'volume', 0))
+                    highs.append(getattr(c, 'high', c.close))
+                    lows.append(getattr(c, 'low', c.close))
+                elif isinstance(c, dict):
+                    closes.append(c.get('close', 0))
+                    volumes.append(c.get('volume', 0))
+                    highs.append(c.get('high', closes[-1] if closes else 0))
+                    lows.append(c.get('low', closes[-1] if closes else 0))
+                else:
+                    closes.append(c)
+                    volumes.append(0)
+                    highs.append(c)
+                    lows.append(c)
+
+            # ✅ ТЕПЕРЬ ПРОВЕРЯЕМ, ЧТО У НАС ЕСТЬ ДОСТАТОЧНО ДАННЫХ
+            if not candles or len(candles) < 20 or len(closes) < 20:
                 result = {
                     'near_resistance': False, 'near_support': False,
                     'overbought': False, 'oversold': False,
