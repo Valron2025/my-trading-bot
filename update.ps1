@@ -10,7 +10,6 @@ Write-Host "========================================"
 Write-Host ""
 
 # ========== ПЕРЕХОД В ПАПКУ ПРОЕКТА ==========
-# ✅ ИСПРАВЛЕНО: правильный путь к проекту
 $projectPath = "E:\ДОКУМЕНТЫ\PROJECTS\my-trading-bot"
 if (Test-Path $projectPath) {
     Write-Host "📁 Переход в папку проекта: $projectPath" -ForegroundColor Cyan
@@ -68,6 +67,32 @@ if (-not $remote) {
     Write-Host ""
 }
 
+# ========== ПРОВЕРКА КОНФЛИКТОВ ==========
+Write-Host "🔄 Проверка конфликтов с удалённым репозиторием..." -ForegroundColor Cyan
+git fetch origin 2>$null
+
+if ($LASTEXITCODE -eq 0) {
+    $localCommit = git rev-parse HEAD 2>$null
+    $remoteCommit = git rev-parse origin/$branch 2>$null
+
+    if ($localCommit -ne $remoteCommit -and $remoteCommit) {
+        Write-Host "⚠️ Обнаружены изменения на GitHub!" -ForegroundColor Yellow
+        Write-Host "   Локальный: $localCommit" -ForegroundColor Gray
+        Write-Host "   Удалённый: $remoteCommit" -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "💡 Будет выполнен принудительный push (force push)" -ForegroundColor Yellow
+        Write-Host ""
+
+        $confirm = Read-Host "Продолжить с force push? (y/n)"
+        if ($confirm -ne "y") {
+            Write-Host "❌ Отменено пользователем" -ForegroundColor Red
+            Read-Host "Press Enter to exit"
+            exit 0
+        }
+    }
+}
+Write-Host ""
+
 # ========== ДОБАВЛЯЕМ ВСЕ ФАЙЛЫ ==========
 Write-Host "📦 Добавляем все файлы..." -ForegroundColor Cyan
 git add -A
@@ -93,30 +118,55 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "✅ Коммит создан" -ForegroundColor Green
 Write-Host ""
 
-# ========== ПРИНУДИТЕЛЬНЫЙ PUSH (ПОЛНАЯ ЗАМЕНА) ==========
-Write-Host "🚀 Принудительная отправка на GitHub (force push)..." -ForegroundColor Cyan
+# ========== ПРИНУДИТЕЛЬНЫЙ PUSH (СНАЧАЛА ПРОВЕРЯЕМ) ==========
+Write-Host "🚀 Отправка на GitHub..." -ForegroundColor Cyan
 
-# Пытаемся force push
-git push origin $branch --force
+# Сначала пробуем обычный push
+git push origin $branch
 
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "⚠️ Force push не удался, пробуем force-with-lease..." -ForegroundColor Yellow
+    Write-Host "⚠️ Обычный push не удался, пробуем force-with-lease..." -ForegroundColor Yellow
     git push origin $branch --force-with-lease
 
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "❌ Push не удался!" -ForegroundColor Red
-        Write-Host ""
-        Write-Host "Попробуйте выполнить вручную:" -ForegroundColor Yellow
-        Write-Host "   cd E:\ДОКУМЕНТЫ\PROJECTS\my-trading-bot" -ForegroundColor White
-        Write-Host "   git add -A" -ForegroundColor White
-        Write-Host "   git commit -m 'force-update' --allow-empty" -ForegroundColor White
-        Write-Host "   git push origin main --force" -ForegroundColor White
-        Read-Host "Press Enter to exit"
-        exit 1
-    }
-}
+        Write-Host "⚠️ Force-with-lease не удался, пробуем force..." -ForegroundColor Yellow
 
-Write-Host "✅ Push успешен!" -ForegroundColor Green
+        # Предупреждение перед force push
+        Write-Host ""
+        Write-Host "⚠️ ВНИМАНИЕ! Force push ПЕРЕЗАПИШЕТ историю на GitHub!" -ForegroundColor Red
+        Write-Host "   Это может удалить чужие коммиты (если они есть)" -ForegroundColor Yellow
+        Write-Host ""
+
+        $confirm = Read-Host "Вы уверены? (введите 'yes' для подтверждения)"
+        if ($confirm -eq "yes") {
+            git push origin $branch --force
+
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "✅ Force push успешен!" -ForegroundColor Green
+            } else {
+                Write-Host "❌ Force push не удался!" -ForegroundColor Red
+                Write-Host ""
+                Write-Host "Попробуйте выполнить вручную:" -ForegroundColor Yellow
+                Write-Host "   git pull origin $branch --rebase" -ForegroundColor White
+                Write-Host "   git push origin $branch" -ForegroundColor White
+                Read-Host "Press Enter to exit"
+                exit 1
+            }
+        } else {
+            Write-Host "❌ Force push отменён" -ForegroundColor Red
+            Write-Host ""
+            Write-Host "Попробуйте выполнить вручную:" -ForegroundColor Yellow
+            Write-Host "   git pull origin $branch --rebase" -ForegroundColor White
+            Write-Host "   git push origin $branch" -ForegroundColor White
+            Read-Host "Press Enter to exit"
+            exit 0
+        }
+    } else {
+        Write-Host "✅ Force-with-lease успешен!" -ForegroundColor Green
+    }
+} else {
+    Write-Host "✅ Push успешен!" -ForegroundColor Green
+}
 Write-Host ""
 
 # ========== РЕЗУЛЬТАТ ==========
