@@ -689,6 +689,13 @@ class TradingBot:
             positions = self._get_positions(force_refresh=True)
             tbank = _get_tbank()
 
+            # ========== ✅ ОПТИМИЗАЦИЯ: ОДИН BATCH-ЗАПРОС ДЛЯ ВСЕХ ПОЗИЦИЙ ==========
+            figis = [pos.get('figi') for pos in positions if pos.get('figi')]
+            prices_dict = {}
+            if figis:
+                prices_dict = tbank.get_last_prices_batch(figis)
+                debug(f"   📡 Batch-запрос цен для {len(prices_dict)}/{len(figis)} позиций (P&L)")
+
             total_pnl = 0.0
             total_value = 0.0
             detailed_positions = []
@@ -701,7 +708,11 @@ class TradingBot:
                 if quantity == 0 or avg_price == 0:
                     continue
 
-                current_price = tbank.get_current_price(figi)
+                # ✅ БЕРЁМ ЦЕНУ ИЗ BATCH-ЗАПРОСА (МГНОВЕННО!)
+                current_price = prices_dict.get(figi)
+                if not current_price:
+                    # Fallback: отдельный запрос только если не получили
+                    current_price = tbank.get_current_price(figi)
                 if not current_price:
                     current_price = avg_price
 
