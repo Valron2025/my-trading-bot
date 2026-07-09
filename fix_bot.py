@@ -477,7 +477,7 @@ class BotFixer:
                         line=0,
                         severity=TestSeverity.MEDIUM,
                         type="BARE_EXCEPT",
-                        message="Найден 'except:' без указания исключения",
+                        message="Найден 'except Exception as e:' без указания исключения",
                         suggestion="Используйте 'except Exception as e:'"
                     ))
 
@@ -1714,7 +1714,9 @@ class BotFixer:
         # Ограничение количества FIGI
         MAX_FIGI_PER_REQUEST = 50
         if len(uncached_figis) > MAX_FIGI_PER_REQUEST:
-            chunks = [uncached_figis[i:i + MAX_FIGI_PER_REQUEST] for i in range(0, len(uncached_figis), MAX_FIGI_PER_REQUEST)]
+            chunks = [uncached_figis[i:i + MAX_FIGI_PER_REQUEST] for i in range(0,
+                len(uncached_figis)
+                MAX_FIGI_PER_REQUEST)]
             for chunk in chunks:
                 chunk_result = self._get_last_prices_batch_chunk(chunk)
                 result.update(chunk_result)

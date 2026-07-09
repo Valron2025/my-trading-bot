@@ -114,7 +114,7 @@ try:
         if share.get('figi') == test_figi:
             lot_size = share.get('lot', 1)
             break
-except:
+except Exception as e:
     pass
 
 min_quantity = max(1, lot_size)

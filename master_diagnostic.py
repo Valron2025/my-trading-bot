@@ -716,7 +716,8 @@ class MasterDiagnostic:
             results = {}
 
             print_info("6.1 Текущие пороги фильтрации:")
-            print_ok(f"  Биржевой режим: мин.объём={config.exchange_min_avg_volume}, мин.лота={config.exchange_min_trade_amount}₽")
+            print_ok(f"  Биржевой режим: мин.объём={config.exchange_min_avg_volume},
+                мин.лота={config.exchange_min_trade_amount}₽")
             print_ok(f"  OTC режим: мин.объём={config.otc_min_avg_volume}, мин.лота={config.otc_min_trade_amount}₽")
             results['thresholds_loaded'] = True
 
@@ -836,7 +837,10 @@ class MasterDiagnostic:
                     break
 
             if figi_sber:
-                analysis = await analyzer.analyze_stock(figi=figi_sber, name="Сбербанк", ticker="SBER", is_backtest=False)
+                analysis = await analyzer.analyze_stock(figi=figi_sber,
+                    name="Сбербанк"
+                    ticker="SBER"
+                    is_backtest=False)
                 print_ok(f"  Score: {analysis.score}")
                 print_ok(f"  BUY сигнал: {analysis.buy_signal}")
                 print_ok(f"  SELL сигнал: {analysis.sell_signal}")
@@ -897,7 +901,17 @@ class MasterDiagnostic:
             print_ok(f"  Downtrend: score={signal_down.score}, RSI={signal_down.rsi:.1f}")
 
             rsi_oversold = engine_medium._calculate_rsi([100, 99, 98, 97, 96, 95, 94, 93, 92, 91, 90] + [89] * 10)
-            rsi_overbought = engine_medium._calculate_rsi([100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110] + [111] * 10)
+            rsi_overbought = engine_medium._calculate_rsi([100,
+                101
+                102
+                103
+                104
+                105
+                106
+                107
+                108
+                109
+                110] + [111] * 10)
             print_ok(f"  RSI oversold: {rsi_oversold:.1f}, overbought: {rsi_overbought:.1f}")
 
             macd_up = engine_medium._calculate_macd(prices_uptrend)
@@ -1072,7 +1086,10 @@ class MasterDiagnostic:
                 sltp = analyzer.calculate_dynamic_sltp(prices, volumes, "LONG")
                 print_ok(f"  Динамический TP: +{sltp['take_profit']:.1f}%, SL: -{sltp['stop_loss']:.1f}%")
 
-                analysis = await analyzer.analyze_stock(figi=test_figi, ticker=test_ticker, name=test_name, is_backtest=False)
+                analysis = await analyzer.analyze_stock(figi=test_figi,
+                    ticker=test_ticker
+                    name=test_name
+                    is_backtest=False)
 
                 if analysis:
                     print_ok(f"  Score: {analysis.score}, Рекомендация: {analysis.recommendation}")
@@ -1287,7 +1304,7 @@ class MasterDiagnostic:
             print_ok("  Длинных строк нет")
 
         if bare_excepts:
-            print_warn(f"  Bare except: {len(bare_excepts)}")
+            print_warn(f"  Bare except Exception as e: {len(bare_excepts)}")
         else:
             print_ok("  Bare except не найдены")
 
@@ -1367,7 +1384,8 @@ class MasterDiagnostic:
             from trading_bot.api.tbank_client import tbank
             _, total, _ = tbank.get_available_funds()
             trader._update_dynamic_params(total)
-            print_ok(f"  Динамические параметры: TP={trader.dynamic_take_profit_pct}%, SL={trader.dynamic_stop_loss_pct}%")
+            print_ok(f"  Динамические параметры: TP={trader.dynamic_take_profit_pct}%,
+                SL={trader.dynamic_stop_loss_pct}%")
 
             duration = time.time() - start
             self._add_result("PreMarketTrader", True, duration, f"Тикеров: {len(tickers)}")
@@ -1751,7 +1769,7 @@ class MasterDiagnostic:
                     if 'from trading_bot.bot import' in content and 'from trading_bot.bot import TradingBot' in content:
                         if 'trading_bot/core/trading_loop.py' in str(py_file):
                             circular_imports.append(str(py_file))
-            except:
+            except Exception as e:
                 pass
 
         if circular_imports:
@@ -1790,7 +1808,10 @@ class MasterDiagnostic:
                     print(f"   📌 {issue['method']}: {issue['description'][:80]}")
 
         self._add_result("Дублирование методов и конфликты", passed, duration,
-                         f"Проблем: CRITICAL={critical_count}, HIGH={high_count}, MEDIUM={medium_count}, LOW={low_count}")
+                         f"Проблем: CRITICAL={critical_count},
+                             HIGH={high_count}
+                             MEDIUM={medium_count}
+                             LOW={low_count}")
 
         return passed
 
@@ -1914,7 +1935,8 @@ class MasterDiagnostic:
         api_score = (api_working / api_total * 100) if api_total > 0 else 0
 
         thresholds_total = self.stats.get('thresholds_passed', 0) + self.stats.get('thresholds_failed', 0)
-        thresholds_score = (self.stats.get('thresholds_passed', 0) / thresholds_total * 100) if thresholds_total > 0 else 0
+        thresholds_score = (self.stats.get('thresholds_passed',
+            0) / thresholds_total * 100) if thresholds_total > 0 else 0
 
         test_score = (passed / total * 100) if total > 0 else 0
         final_score = (code_score + api_score + thresholds_score + test_score) / 4

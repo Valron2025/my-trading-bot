@@ -673,7 +673,8 @@ class MasterTester:
 
             # 6.1 Текущие пороги
             print_info("6.1 Текущие пороги фильтрации:")
-            print_ok(f"  Биржевой режим: мин.объём={config.exchange_min_avg_volume}, мин.лота={config.exchange_min_trade_amount}₽")
+            print_ok(f"  Биржевой режим: мин.объём={config.exchange_min_avg_volume},
+                мин.лота={config.exchange_min_trade_amount}₽")
             print_ok(f"  OTC режим: мин.объём={config.otc_min_avg_volume}, мин.лота={config.otc_min_trade_amount}₽")
             results['thresholds_loaded'] = True
 
@@ -1306,7 +1307,7 @@ class MasterTester:
             print_ok("  Длинных строк нет")
 
         if bare_excepts:
-            warning(f"  Bare except: {len(bare_excepts)}")
+            warning(f"  Bare except Exception as e: {len(bare_excepts)}")
         else:
             print_ok("  Bare except не найдены")
 
@@ -1890,7 +1891,7 @@ class MasterTester:
                     if 'from trading_bot.bot import' in content and 'from trading_bot.bot import TradingBot' in content:
                         if 'trading_bot/core/trading_loop.py' in str(py_file):
                             circular_imports.append(str(py_file))
-            except:
+            except Exception as e:
                 pass
 
         if circular_imports:
@@ -1974,7 +1975,10 @@ class MasterTester:
                     print(f"   ℹ️ {issue['method']}: {issue['description'][:80]}")
 
         self._add_result("Дублирование методов и конфликты", passed, duration,
-                         f"Проблем: CRITICAL={critical_count}, HIGH={high_count}, MEDIUM={medium_count}, LOW={low_count}")
+                         f"Проблем: CRITICAL={critical_count},
+                             HIGH={high_count}
+                             MEDIUM={medium_count}
+                             LOW={low_count}")
 
         return passed
 
@@ -2165,7 +2169,8 @@ class MasterTester:
 
         # Оценка порогов
         thresholds_total = self.stats.get('thresholds_passed', 0) + self.stats.get('thresholds_failed', 0)
-        thresholds_score = (self.stats.get('thresholds_passed', 0) / thresholds_total * 100) if thresholds_total > 0 else 0
+        thresholds_score = (self.stats.get('thresholds_passed',
+            0) / thresholds_total * 100) if thresholds_total > 0 else 0
 
         # Общая оценка
         test_score = (passed / total * 100) if total > 0 else 0
