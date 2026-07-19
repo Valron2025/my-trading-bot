@@ -2,145 +2,108 @@
 """Web сервер для VPS - health check, статус и метрики Prometheus"""
 
 # ============================================
-# ПРИНУДИТЕЛЬНЫЙ ПАТЧ ДЛЯ RENDER
+# ПРИНУДИТЕЛЬНЫЙ ПАТЧ ДЛЯ RENDER (ОПТИМИЗИРОВАННАЯ ВЕРСИЯ)
 # ============================================
 import os
 import sys
-
-
-# ============================================
-# ПРИНУДИТЕЛЬНАЯ SSL НАСТРОЙКА ДЛЯ RENDER
-# ============================================
 import ssl
+import socket
 import certifi
 
-# 1. Установка переменных
-os.environ['SSL_CERT_FILE'] = certifi.where()
-os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
-os.environ['GRPC_SSL_CIPHER_SUITES'] = 'HIGH+ECDSA+HIGH'
-os.environ['GRPC_DNS_RESOLVER'] = 'native'
+# 1. Установка всех переменных окружения в одном месте
 os.environ['SSL_TBANK_VERIFY'] = 'True'
-
-# 2. Принудительная установка SSL контекста для gRPC
-try:
-    import grpc
-    from grpc import ssl_channel_credentials
-
-    # Создаём SSL контекст с сертификатами certifi
-    root_certificates = open(certifi.where(), 'rb').read()
-    ssl_creds = ssl_channel_credentials(root_certificates=root_certificates)
-    print(f"🔐 SSL контекст создан с certifi: {certifi.where()}")
-except Exception as e:
-    print(f"⚠️ Ошибка создания SSL контекста: {e}")
-
-print(f"🔐 SSL_CERT_FILE: {os.environ.get('SSL_CERT_FILE')}")
-print(f"🔐 REQUESTS_CA_BUNDLE: {os.environ.get('REQUESTS_CA_BUNDLE')}")
-# ============================================
-
-# Принудительное использование сертификатов
-os.environ['SSL_CERT_FILE'] = certifi.where()
-os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
+os.environ['GRPC_DNS_RESOLVER'] = 'native'
+os.environ['GRPC_VERBOSITY'] = 'ERROR'
 os.environ['GRPC_SSL_CIPHER_SUITES'] = 'HIGH+ECDSA+HIGH'
-
-print(f"🔐 SSL_CERT_FILE: {os.environ.get('SSL_CERT_FILE')}")
-# ============================================
-
-# 1. Принудительная установка переменных
 os.environ['TBANK_API_URL'] = 'invest-public-api.tbank.ru:443'
 os.environ['T_INVEST_API_URL'] = 'invest-public-api.tbank.ru:443'
 os.environ['TINKOFF_API_URL'] = 'invest-public-api.tbank.ru:443'
 os.environ['INVEST_API_URL'] = 'invest-public-api.tbank.ru:443'
-os.environ['GRPC_DNS_RESOLVER'] = 'native'
-os.environ['GRPC_VERBOSITY'] = 'ERROR'
-os.environ['GRPC_SSL_CIPHER_SUITES'] = 'HIGH+ECDSA+HIGH'
+
+# 2. ЗАГРУЗКА СЕРТИФИКАТА НУЦ МИНЦИФРЫ (ОСНОВНОЙ)
+NUC_CERT_PATH = os.path.join(os.path.dirname(__file__), 'certs', 'root_ca.pem')
+
+if os.path.exists(NUC_CERT_PATH):
+    try:
+        with open(NUC_CERT_PATH, 'rb') as f:
+            nuc_cert = f.read()
+
+        with open(certifi.where(), 'rb') as f:
+            certifi_cert = f.read()
+
+        combined_cert = certifi_cert + b'\n' + nuc_cert
+        combined_path = '/tmp/combined_certs.pem'
+        with open(combined_path, 'wb') as f:
+            f.write(combined_cert)
+
+        os.environ['SSL_CERT_FILE'] = combined_path
+        os.environ['REQUESTS_CA_BUNDLE'] = combined_path
+        print(f"🔐 Сертификат НУЦ Минцифры загружен: {NUC_CERT_PATH}")
+    except Exception as e:
+        print(f"⚠️ Ошибка загрузки сертификата НУЦ: {e}")
+        os.environ['SSL_CERT_FILE'] = certifi.where()
+        os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
+else:
+    print(f"⚠️ Сертификат НУЦ Минцифры не найден: {NUC_CERT_PATH}")
+    os.environ['SSL_CERT_FILE'] = certifi.where()
+    os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
+
+print(f"🔐 SSL_CERT_FILE: {os.environ.get('SSL_CERT_FILE')}")
+print(f"🔐 REQUESTS_CA_BUNDLE: {os.environ.get('REQUESTS_CA_BUNDLE')}")
+
+# 3. Сброс gRPC контекста (для предотвращения падения Gunicorn)
+try:
+    import grpc
+    if hasattr(grpc._cython, 'cygrpc'):
+        grpc._cython.cygrpc._reset_grpc_context()
+        print("✅ gRPC context reset")
+except Exception as e:
+    print(f"⚠️ gRPC reset error: {e}")
+
+# 4. Принудительное переопределение констант SDK
+try:
+    import t_tech.invest.constants as constants
+    if hasattr(constants, 'INVEST_GRPC_API'):
+        constants.INVEST_GRPC_API = 'invest-public-api.tbank.ru:443'
+        print(f"✅ INVEST_GRPC_API: {constants.INVEST_GRPC_API}")
+    if hasattr(constants, 'ADDRESS'):
+        constants.ADDRESS = 'invest-public-api.tbank.ru:443'
+        print(f"✅ ADDRESS: {constants.ADDRESS}")
+except Exception as e:
+    print(f"⚠️ SDK constants patch error: {e}")
 
 print("=" * 60)
 print("🔧 ПРИНУДИТЕЛЬНЫЙ ПАТЧ ДЛЯ RENDER")
 print(f"   TBANK_API_URL: {os.environ.get('TBANK_API_URL')}")
-print(f"   GRPC_DNS_RESOLVER: {os.environ.get('GRPC_DNS_RESOLVER')}")
+print(f"   SSL_CERT_FILE: {os.environ.get('SSL_CERT_FILE')}")
 print("=" * 60)
 
-# 2. Прямое переопределение констант в библиотеке (если они есть)
-try:
-    import t_tech.invest.constants as constants
-
-    if hasattr(constants, 'ADDRESS'):
-        old = constants.ADDRESS
-        constants.ADDRESS = 'invest-public-api.tbank.ru:443'
-        print(f"✅ Константа ADDRESS: {old} → {constants.ADDRESS}")
-    if hasattr(constants, 'DEFAULT_ADDRESS'):
-        old = constants.DEFAULT_ADDRESS
-        constants.DEFAULT_ADDRESS = 'invest-public-api.tbank.ru:443'
-        print(f"✅ Константа DEFAULT_ADDRESS: {old} → {constants.DEFAULT_ADDRESS}")
-    if hasattr(constants, 'TINKOFF_API_URL'):
-        old = constants.TINKOFF_API_URL
-        constants.TINKOFF_API_URL = 'invest-public-api.tbank.ru:443'
-        print(f"✅ Константа TINKOFF_API_URL: {old} → {constants.TINKOFF_API_URL}")
-except ImportError:
-    print("⚠️ t_tech.invest.constants не найден (пропускаем)")
-except Exception as e:
-    print(f"⚠️ Не удалось пропатчить константы: {e}")
-
-# 3. Мониторинг gRPC
-try:
-    import grpc
-
-    print(f"✅ gRPC версия: {grpc.__version__}")
-except ImportError:
-    print("⚠️ gRPC не найден")
-
-# 4. Проверка DNS резолвинга
-import socket
-
+# 5. Проверка DNS
 try:
     ip = socket.gethostbyname('invest-public-api.tbank.ru')
-    print(f"✅ DNS резолвинг: invest-public-api.tbank.ru → {ip}")
+    print(f"✅ DNS: invest-public-api.tbank.ru → {ip}")
 except Exception as e:
     print(f"❌ DNS ошибка: {e}")
 
-# 5. Проверка старого IP (должен быть недоступен или игнорироваться)
-try:
-    old_ip = socket.gethostbyname('178.130.128.33')
-    print(f"⚠️ СТАРЫЙ IP ВСЁ ЕЩЁ РЕЗОЛВИТСЯ: {old_ip}")
-    print("   Это может быть причиной проблемы!")
-except:
-    print("✅ Старый IP не резолвится (это хорошо)")
-
-
-# ============================================
-# ДИАГНОСТИКА SSL/TLS НА RENDER
-# ============================================
+# 6. Диагностика TLS
 def test_tls_connectivity(host="invest-public-api.tbank.ru", port=443):
-    """Тест SSL/TLS подключения к API"""
-    print(f"\n🔍 Тест TLS подключения к {host}:{port}...")
+    print(f"\n🔍 Тест TLS к {host}:{port}...")
     try:
-        context = ssl.create_default_context(cafile=certifi.where())
+        context = ssl.create_default_context(cafile=os.environ.get('SSL_CERT_FILE', certifi.where()))
         with socket.create_connection((host, port), timeout=10) as sock:
             with context.wrap_socket(sock, server_hostname=host) as ssock:
-                print("✅ TLS handshake succeeded")
-                print(f"   Version: {ssock.version()}")
+                print(f"✅ TLS OK: {ssock.version()}")
                 print(f"   Cipher: {ssock.cipher()}")
-                cert = ssock.getpeercert()
-                print(f"   Cert subject: {cert.get('subject', [{}])[0].get('commonName', ['N/A'])[0]}")
                 return True
-    except socket.timeout:
-        print("❌ Connection timeout")
-        return False
-    except ssl.SSLError as e:
-        print(f"❌ SSL error: {e}")
-        return False
     except Exception as e:
-        print(f"❌ Connection failed: {e}")
+        print(f"❌ TLS error: {e}")
         return False
 
-
-# Запускаем диагностику
 tls_ok = test_tls_connectivity()
-if not tls_ok:
-    print("⚠️ TLS handshake failed! API будет недоступен.")
+if tls_ok:
+    print("✅ TLS handshake успешен")
 else:
-    print("✅ TLS handshake успешен, API должен быть доступен")
-# ============================================
+    print("⚠️ TLS handshake failed")
 
 print("✅ Render патч применён")
 print("=" * 60)
@@ -173,11 +136,9 @@ print("🔍 ENVIRONMENT VARIABLES:")
 tbank_token = os.getenv('TBANK_TOKEN')
 tbank_account_id = os.getenv('TBANK_ACCOUNT_ID')
 tbank_api_url = os.getenv('TBANK_API_URL')
-t_invest_api_url = os.getenv('T_INVEST_API_URL')
 print(f"   TBANK_TOKEN: {'✅ SET' if tbank_token else '❌ NOT SET'}")
 print(f"   TBANK_ACCOUNT_ID: {'✅ SET' if tbank_account_id else '❌ NOT SET'}")
 print(f"   TBANK_API_URL: {'✅ SET' if tbank_api_url else '❌ NOT SET'}")
-print(f"   T_INVEST_API_URL: {'✅ SET' if t_invest_api_url else '❌ NOT SET'}")
 if tbank_token:
     print(f"   TBANK_TOKEN (first 20): {tbank_token[:20]}...")
 print("=" * 60)
@@ -216,7 +177,6 @@ def test_api_connection():
         print(f"   📡 API URL: {tbank.api_url}")
         print(f"   🔑 Token: {tbank.token[:20]}...")
 
-        # Пробуем получить баланс
         _, total, _ = tbank.get_available_funds()
         print(f"   ✅ Капитал: {total:.2f}₽")
         return True
@@ -226,11 +186,9 @@ def test_api_connection():
             print("   ⚠️ ВНИМАНИЕ! Используется СТАРЫЙ IP-адрес!")
             print("   🔧 Попытка принудительного переопределения...")
             try:
-                # Пытаемся переопределить адрес в уже созданном клиенте
                 from trading_bot.api.tbank_client import tbank
                 tbank.api_url = 'invest-public-api.tbank.ru:443'
                 print(f"   ✅ API URL принудительно изменён на: {tbank.api_url}")
-                # Повторная попытка
                 _, total, _ = tbank.get_available_funds()
                 print(f"   ✅ Капитал (после исправления): {total:.2f}₽")
                 return True
@@ -242,14 +200,12 @@ def test_api_connection():
 
 # ========== ПРОВЕРКА gRPC КАНАЛА ==========
 def test_grpc_channel():
-    """Тест создания gRPC канала"""
     try:
         print("🔍 Тест gRPC канала...")
         import grpc
         from grpc import ssl_channel_credentials
 
-        # Загружаем сертификаты
-        with open(certifi.where(), 'rb') as f:
+        with open(os.environ.get('SSL_CERT_FILE', certifi.where()), 'rb') as f:
             root_certificates = f.read()
 
         credentials = ssl_channel_credentials(root_certificates=root_certificates)
@@ -264,7 +220,6 @@ def test_grpc_channel():
             ]
         )
 
-        # Проверяем состояние канала
         state = channel.get_state(True)
         print(f"   ✅ Канал создан, состояние: {state}")
         return True
@@ -273,14 +228,12 @@ def test_grpc_channel():
         return False
 
 
-# Запускаем тест gRPC
 grpc_ok = test_grpc_channel()
 if not grpc_ok:
     print("⚠️ gRPC канал не создан!")
 
 
 def run_bot():
-    """Запуск торгового бота с полной отладкой"""
     global _trading_bot, _bot_started, _bot_error, _bot_start_time
 
     print("\n" + "=" * 60)
@@ -288,12 +241,10 @@ def run_bot():
     print(f"   Thread: {threading.current_thread().name}")
     print("=" * 60)
 
-    # ========== ТЕСТ API ПЕРЕД ЗАПУСКОМ ==========
     print("\n🔍 ШАГ 0: Тест API подключения...")
     api_ok = test_api_connection()
     if not api_ok:
         print("⚠️ API не доступен, но продолжаем запуск...")
-        print("   Бот перейдёт в режим ожидания до восстановления")
 
     try:
         print("   📦 ШАГ 1: Импорт trading_bot...")
@@ -314,18 +265,13 @@ def run_bot():
             from trading_bot.monitoring.prometheus_metrics import prometheus_metrics
             prometheus_metrics.set_bot_status(1)
             prometheus_metrics.set_bot_uptime(0)
-            print("   ✅ Prometheus метрики обновлены (бот запущен)")
+            print("   ✅ Prometheus метрики обновлены")
         except Exception as e:
             print(f"   ⚠️ Ошибка обновления метрик: {e}")
 
         print("\n" + "=" * 60)
         print("✅ БОТ УСПЕШНО ЗАПУЩЕН!")
         print("=" * 60)
-
-    except ImportError as e:
-        _bot_error = f"ImportError: {e}"
-        print(f"\n❌ ОШИБКА ИМПОРТА: {e}")
-        traceback.print_exc()
 
     except Exception as e:
         _bot_error = f"Exception: {e}"
@@ -340,13 +286,11 @@ def run_bot():
         print("=" * 60)
 
 
-# ✅ ЗАПУСКАЕМ БОТА В ОТДЕЛЬНОМ ПОТОКЕ
-print("🔄 Создание потока для бота...")
 _bot_thread = threading.Thread(target=run_bot, daemon=True, name="TradingBotThread")
 _bot_thread.start()
 print(f"✅ Поток создан: {_bot_thread.name}")
 
-# ========== ОЖИДАНИЕ ЗАПУСКА БОТА (60 СЕКУНД) ==========
+# ========== ОЖИДАНИЕ ЗАПУСКА БОТА ==========
 print("\n⏳ Ожидание запуска бота (до 60 секунд)...")
 for i in range(60):
     time.sleep(1)
@@ -490,7 +434,6 @@ def status():
 
 @app.route('/api/test')
 def test_api():
-    """Тестовый эндпоинт для проверки API"""
     try:
         from trading_bot.api.tbank_client import tbank
         api_url = tbank.api_url
@@ -512,7 +455,6 @@ def test_api():
 
 @app.route('/diagnostics')
 def diagnostics():
-    """Диагностический эндпоинт"""
     result = {
         "tls_ok": tls_ok,
         "grpc_ok": grpc_ok,

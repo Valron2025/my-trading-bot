@@ -50,6 +50,7 @@ def post_fork(server, worker):
     os.environ['GRPC_SSL_CIPHER_SUITES'] = 'HIGH+ECDSA+HIGH'
     os.environ['TBANK_API_URL'] = 'invest-public-api.tbank.ru:443'
     os.environ['TINKOFF_API_URL'] = 'invest-public-api.tbank.ru:443'
+    os.environ['SSL_TBANK_VERIFY'] = 'True'
 
     try:
         import certifi
@@ -58,6 +59,15 @@ def post_fork(server, worker):
         print(f"✅ SSL configured with certifi: {certifi.where()}")
     except ImportError:
         print("⚠️ certifi not installed, using system certificates")
+
+    # ✅ СБРОС gRPC СОСТОЯНИЯ ПОСЛЕ ФОРКА (ИСПРАВЛЯЕТ GUNICORN FALLBACK)
+    try:
+        import grpc
+        if hasattr(grpc._cython, 'cygrpc'):
+            grpc._cython.cygrpc._reset_grpc_context()
+            print(f"✅ gRPC context reset for worker {worker.pid}")
+    except Exception as e:
+        print(f"⚠️ Failed to reset gRPC context: {e}")
 
     print(f"🔐 SSL Environment configured for worker {worker.pid}")
 
@@ -75,6 +85,7 @@ def on_starting(server):
     os.environ['TINKOFF_API_URL'] = 'invest-public-api.tbank.ru:443'
     os.environ['GRPC_DNS_RESOLVER'] = 'native'
     os.environ['GRPC_SSL_CIPHER_SUITES'] = 'HIGH+ECDSA+HIGH'
+    os.environ['SSL_TBANK_VERIFY'] = 'True'
 
     try:
         import certifi
@@ -91,3 +102,4 @@ def pre_exec(server):
     """Перед exec для обновления окружения"""
     os.environ['GRPC_DNS_RESOLVER'] = 'native'
     os.environ['TBANK_API_URL'] = 'invest-public-api.tbank.ru:443'
+    os.environ['SSL_TBANK_VERIFY'] = 'True'
