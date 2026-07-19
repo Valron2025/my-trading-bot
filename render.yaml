@@ -1,20 +1,41 @@
 services:
   - type: web
     name: trading-bot-web
-    runtime: python
+    runtime: image
     buildCommand: |
+      docker build -t trading-bot-web .
       # Установка CA-сертификатов (критично для SSL/TLS)
       apt-get update && apt-get install -y ca-certificates
       update-ca-certificates
+      
+      # Принудительная установка certifi
       pip install --upgrade pip
       pip install -r requirements.txt
+      
+      # ✅ КОПИРУЕМ СЕРТИФИКАТЫ certifi В СИСТЕМНУЮ ДИРЕКТОРИЮ
+      python -c "import certifi; import shutil; shutil.copy(certifi.where(), '/etc/ssl/certs/ca-certificates.crt')"
+      
+      echo "✅ Сертификаты установлены: $(python -c 'import certifi; print(certifi.where())')"
     startCommand: |
+      docker run -p 10000:10000 trading-bot-web
       export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
       export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
       export GRPC_SSL_CIPHER_SUITES='HIGH+ECDSA+HIGH'
       export GRPC_DNS_RESOLVER=native
       export TBANK_API_URL=invest-public-api.tbank.ru:443
-      gunicorn web_server:app --bind 0.0.0.0:$PORT --workers 1 --threads 1 --timeout 600 --max-requests 500 --max-requests-jitter 50 --preload
+      export SSL_TBANK_VERIFY=True
+      
+      # Диагностика SSL перед запуском
+      python -c "import ssl, socket, certifi; ctx=ssl.create_default_context(cafile=certifi.where()); s=socket.create_connection(('invest-public-api.tbank.ru',443), timeout=10); ss=ctx.wrap_socket(s, server_hostname='invest-public-api.tbank.ru'); print(f'🔐 TLS OK: {ss.version()}'); ss.close()" || echo "⚠️ TLS диагностика не удалась, но продолжаем..."
+      
+      gunicorn web_server:app \
+        --bind 0.0.0.0:$PORT \
+        --workers 1 \
+        --threads 1 \
+        --timeout 600 \
+        --max-requests 500 \
+        --max-requests-jitter 50 \
+        --preload
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
