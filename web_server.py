@@ -82,6 +82,42 @@ try:
 except:
     print("✅ Старый IP не резолвится (это хорошо)")
 
+
+# ============================================
+# ДИАГНОСТИКА SSL/TLS НА RENDER
+# ============================================
+def test_tls_connectivity(host="invest-public-api.tbank.ru", port=443):
+    """Тест SSL/TLS подключения к API"""
+    print(f"\n🔍 Тест TLS подключения к {host}:{port}...")
+    try:
+        context = ssl.create_default_context(cafile=certifi.where())
+        with socket.create_connection((host, port), timeout=10) as sock:
+            with context.wrap_socket(sock, server_hostname=host) as ssock:
+                print("✅ TLS handshake succeeded")
+                print(f"   Version: {ssock.version()}")
+                print(f"   Cipher: {ssock.cipher()}")
+                cert = ssock.getpeercert()
+                print(f"   Cert subject: {cert.get('subject', [{}])[0].get('commonName', ['N/A'])[0]}")
+                return True
+    except socket.timeout:
+        print("❌ Connection timeout")
+        return False
+    except ssl.SSLError as e:
+        print(f"❌ SSL error: {e}")
+        return False
+    except Exception as e:
+        print(f"❌ Connection failed: {e}")
+        return False
+
+
+# Запускаем диагностику
+tls_ok = test_tls_connectivity()
+if not tls_ok:
+    print("⚠️ TLS handshake failed! API будет недоступен.")
+else:
+    print("✅ TLS handshake успешен, API должен быть доступен")
+# ============================================
+
 print("✅ Render патч применён")
 print("=" * 60)
 # ============================================
@@ -178,6 +214,45 @@ def test_api_connection():
                 print(f"   ❌ Всё равно ошибка: {e2}")
                 return False
         return False
+
+
+# ========== ПРОВЕРКА gRPC КАНАЛА ==========
+def test_grpc_channel():
+    """Тест создания gRPC канала"""
+    try:
+        print("🔍 Тест gRPC канала...")
+        import grpc
+        from grpc import ssl_channel_credentials
+
+        # Загружаем сертификаты
+        with open(certifi.where(), 'rb') as f:
+            root_certificates = f.read()
+
+        credentials = ssl_channel_credentials(root_certificates=root_certificates)
+
+        channel = grpc.secure_channel(
+            'invest-public-api.tbank.ru:443',
+            credentials,
+            options=[
+                ('grpc.ssl_target_name_override', 'invest-public-api.tbank.ru'),
+                ('grpc.max_receive_message_length', 10 * 1024 * 1024),
+                ('grpc.max_send_message_length', 10 * 1024 * 1024),
+            ]
+        )
+
+        # Проверяем состояние канала
+        state = channel.get_state(True)
+        print(f"   ✅ Канал создан, состояние: {state}")
+        return True
+    except Exception as e:
+        print(f"   ❌ Ошибка создания канала: {e}")
+        return False
+
+
+# Запускаем тест gRPC
+grpc_ok = test_grpc_channel()
+if not grpc_ok:
+    print("⚠️ gRPC канал не создан!")
 
 
 def run_bot():
@@ -346,7 +421,8 @@ def health_check():
         "bot_thread": _bot_thread is not None and _bot_thread.is_alive(),
         "bot_started": _bot_started,
         "bot_error": _bot_error,
-        "api_url": os.getenv('TBANK_API_URL', 'not set')
+        "api_url": os.getenv('TBANK_API_URL', 'not set'),
+        "tls_ok": tls_ok
     }), 200 if _bot_started else 503
 
 
@@ -378,7 +454,8 @@ def status():
         "telegram_alive": _telegram_thread is not None and _telegram_thread.is_alive(),
         "bot_alive": _bot_thread is not None and _bot_thread.is_alive(),
         "bot_error": _bot_error,
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat(),
+        "tls_ok": tls_ok
     }
 
     _status_cache = response
@@ -398,13 +475,33 @@ def test_api():
             "status": "ok",
             "api_url": api_url,
             "capital": total,
-            "token": tbank.token[:20] + "..."
+            "token": tbank.token[:20] + "...",
+            "tls_ok": tls_ok
         }), 200
     except Exception as e:
         return jsonify({
             "status": "error",
-            "error": str(e)
+            "error": str(e),
+            "tls_ok": tls_ok
         }), 503
+
+
+@app.route('/diagnostics')
+def diagnostics():
+    """Диагностический эндпоинт"""
+    result = {
+        "tls_ok": tls_ok,
+        "grpc_ok": grpc_ok,
+        "python_version": sys.version,
+        "certifi": certifi.where(),
+        "env": {
+            "TBANK_API_URL": os.getenv('TBANK_API_URL'),
+            "SSL_CERT_FILE": os.getenv('SSL_CERT_FILE'),
+            "GRPC_DNS_RESOLVER": os.getenv('GRPC_DNS_RESOLVER'),
+            "GRPC_SSL_CIPHER_SUITES": os.getenv('GRPC_SSL_CIPHER_SUITES'),
+        }
+    }
+    return jsonify(result), 200
 
 
 @app.route('/metrics')

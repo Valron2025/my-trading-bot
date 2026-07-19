@@ -3,9 +3,18 @@ services:
     name: trading-bot-web
     runtime: python
     buildCommand: |
+      # Установка CA-сертификатов (критично для SSL/TLS)
+      apt-get update && apt-get install -y ca-certificates
+      update-ca-certificates
       pip install --upgrade pip
       pip install -r requirements.txt
-    startCommand: gunicorn web_server:app --bind 0.0.0.0:$PORT --workers 1 --threads 1 --timeout 600 --max-requests 500 --max-requests-jitter 50 --preload
+    startCommand: |
+      export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+      export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+      export GRPC_SSL_CIPHER_SUITES='HIGH+ECDSA+HIGH'
+      export GRPC_DNS_RESOLVER=native
+      export TBANK_API_URL=invest-public-api.tbank.ru:443
+      gunicorn web_server:app --bind 0.0.0.0:$PORT --workers 1 --threads 1 --timeout 600 --max-requests 500 --max-requests-jitter 50 --preload
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
@@ -20,7 +29,7 @@ services:
       - key: TELEGRAM_CHAT_ID
         sync: false
 
-      # ========== 🔧 ФИКС ДЛЯ RENDER ==========
+      # ========== 🔧 ФИКС ДЛЯ RENDER (SSL/TLS) ==========
       - key: TBANK_API_URL
         value: "invest-public-api.tbank.ru:443"
       - key: TINKOFF_API_URL
@@ -31,6 +40,12 @@ services:
         value: "native"
       - key: GRPC_VERBOSITY
         value: "ERROR"
+      - key: GRPC_SSL_CIPHER_SUITES
+        value: "HIGH+ECDSA+HIGH"
+      - key: SSL_CERT_FILE
+        value: "/etc/ssl/certs/ca-certificates.crt"
+      - key: REQUESTS_CA_BUNDLE
+        value: "/etc/ssl/certs/ca-certificates.crt"
 
       # ========== НАСТРОЙКИ БОТА ==========
       - key: ENABLE_OTC_TRADING
