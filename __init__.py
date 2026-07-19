@@ -16,7 +16,7 @@ from trading_bot.models import (
     calculate_pnl,
     calculate_pnl_with_commission
 )
-# ✅ ОДИН ИМПОРТ (уберите второй)
+
 from trading_bot.cache import TTLCache, price_cache, positions_cache, candles_cache
 
 logger = logging.getLogger(__name__)

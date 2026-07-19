@@ -52,7 +52,10 @@ def post_fork(server, worker):
     os.environ['GRPC_DNS_RESOLVER'] = 'native'
     os.environ['GRPC_SSL_CIPHER_SUITES'] = 'HIGH+ECDSA+HIGH'
 
-    # Импортируем certifi и настраиваем глобально
+    # ✅ УСТАНАВЛИВАЕМ ПРАВИЛЬНЫЙ АДРЕС API
+    os.environ['TBANK_API_URL'] = 'invest-public-api.tbank.ru:443'
+    os.environ['TINKOFF_API_URL'] = 'invest-public-api.tbank.ru:443'
+
     try:
         import certifi
         os.environ['SSL_CERT_FILE'] = certifi.where()
@@ -72,22 +75,24 @@ def on_starting(server):
     print(f"   loglevel: {loglevel}")
     print(f"   Python version: {os.sys.version}")
 
-    # Проверка SSL сертификатов
+    # ✅ УСТАНАВЛИВАЕМ ПРАВИЛЬНЫЙ АДРЕС API
+    os.environ['TBANK_API_URL'] = 'invest-public-api.tbank.ru:443'
+    os.environ['TINKOFF_API_URL'] = 'invest-public-api.tbank.ru:443'
+
     try:
         import certifi
         print(f"✅ certifi found at: {certifi.where()}")
     except ImportError:
         print("⚠️ WARNING: certifi not installed - SSL may fail!")
 
-    # Установка глобальных переменных для мастер-процесса
     os.environ['GRPC_DNS_RESOLVER'] = 'native'
     os.environ['GRPC_SSL_CIPHER_SUITES'] = 'HIGH+ECDSA+HIGH'
 
-# Hook for worker initialization
 post_fork = post_fork
 on_starting = on_starting
 
-# Pre-exec hook for additional setup
 def pre_exec(server):
     """Перед exec для обновления окружения"""
     os.environ['GRPC_DNS_RESOLVER'] = 'native'
+    # ✅ УСТАНАВЛИВАЕМ ПРАВИЛЬНЫЙ АДРЕС API
+    os.environ['TBANK_API_URL'] = 'invest-public-api.tbank.ru:443'

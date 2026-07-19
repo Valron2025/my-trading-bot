@@ -21,8 +21,8 @@ services:
         value: "WARNING"
       - key: PYTHONPATH
         value: "."
-
-      # ✅ ОПТИМИЗАЦИЯ ДЛЯ RENDER (ВЫСОКАЯ ЗАДЕРЖКА API)
+      - key: TBANK_API_URL
+        value: "invest-public-api.tbank.ru:443"
       - key: SCAN_INTERVAL
         value: "300"              # Сканирование каждые 5 минут
       - key: MAX_TICKERS_TO_SCAN

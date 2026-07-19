@@ -19,6 +19,12 @@ class TradingConfig:
     # ========== API КЛЮЧИ ==========
     tbank_token: str = field(default_factory=lambda: os.getenv("TBANK_TOKEN", ""))
     tbank_account_id: Optional[str] = field(default_factory=lambda: os.getenv("TBANK_ACCOUNT_ID"))
+
+    tbank_api_url: str = field(default_factory=lambda: os.getenv(
+        "TBANK_API_URL", 
+        "invest-public-api.tbank.ru:443"
+    ))
+    
     telegram_token: Optional[str] = field(default_factory=lambda: os.getenv("TELEGRAM_TOKEN"))
     telegram_chat_id: Optional[str] = field(default_factory=lambda: os.getenv("TELEGRAM_CHAT_ID"))
 

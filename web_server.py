@@ -29,8 +29,10 @@ print("=" * 60)
 print("🔍 ENVIRONMENT VARIABLES:")
 tbank_token = os.getenv('TBANK_TOKEN')
 tbank_account_id = os.getenv('TBANK_ACCOUNT_ID')
+tbank_api_url = os.getenv('TBANK_API_URL')  # ✅ ДОБАВЬТЕ
 print(f"   TBANK_TOKEN: {'✅ SET' if tbank_token else '❌ NOT SET'}")
 print(f"   TBANK_ACCOUNT_ID: {'✅ SET' if tbank_account_id else '❌ NOT SET'}")
+print(f"   TBANK_API_URL: {'✅ SET' if tbank_api_url else f'❌ NOT SET (default: invest-public-api.tbank.ru:443)'}")
 if tbank_token:
     print(f"   TBANK_TOKEN (first 20): {tbank_token[:20]}...")
 print("=" * 60)

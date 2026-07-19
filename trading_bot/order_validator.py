@@ -27,6 +27,7 @@ class OrderValidator:
     def __init__(self, token: str, account_id: str):
         self.token = token
         self.account_id = account_id
+        self.api_url = os.getenv("TBANK_API_URL", "invest-public-api.tbank.ru:443")
         self._pending_orders = {}
         self._order_cache = {}
         self._cache_ttl = 5
@@ -64,7 +65,7 @@ class OrderValidator:
 
         try:
             # ========== 2. ПОЛУЧАЕМ ИНФОРМАЦИЮ ОБ ИНСТРУМЕНТЕ ==========
-            with Client(self.token) as client:
+            with Client(self.token, target=self.api_url) as client:
                 # Пробуем получить instrument через share_by
                 try:
                     response = client.instruments.share_by(figi=figi)
@@ -130,7 +131,7 @@ class OrderValidator:
 
         additional_info = {}
 
-        with Client(self.token) as client:
+        with Client(self.token, target=self.api_url) as client:
             # 1. Проверка количества
             if quantity <= 0:
                 return False, f"Количество {quantity} <= 0", additional_info
@@ -360,7 +361,7 @@ class OrderValidator:
         order_request_id = str(uuid.uuid4())
 
         try:
-            with Client(self.token) as client:
+            with Client(self.token, target=self.api_url) as client:
                 dir_map = {
                     "BUY": OrderDirection.ORDER_DIRECTION_BUY,
                     "SELL": OrderDirection.ORDER_DIRECTION_SELL

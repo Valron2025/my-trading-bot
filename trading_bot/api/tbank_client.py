@@ -162,6 +162,7 @@ class TBankClient:
 
     def __init__(self):
         self.token = config.tbank_token
+        self.api_url = config.tbank_api_url
 
         if not self.token:
             import os
@@ -258,10 +259,11 @@ class TBankClient:
 
     @contextmanager
     def _get_client_context(self):
-        """Контекстный менеджер для работы с клиентом"""
+        """Контекстный менеджер для работы с клиентом - С ПРАВИЛЬНЫМ АДРЕСОМ"""
         client = None
         try:
-            client = Client(self.token)
+            # ✅ ИСПОЛЬЗУЕМ АДРЕС ИЗ КОНФИГА
+            client = Client(self.token, target=self.api_url)
             yield client
         except Exception as e:
             debug(f"Ошибка создания клиента: {e}")
@@ -284,7 +286,7 @@ class TBankClient:
             self._account_id = env_account_id
             return self._account_id
         if self._account_id is None:
-            with Client(self.token) as client:
+            with Client(self.token, target=self.api_url) as client:  # ← ДОБАВЛЕН target
                 accounts = client.users.get_accounts().accounts
                 if not accounts:
                     raise Exception("Нет доступных брокерских счетов")
@@ -693,7 +695,7 @@ class TBankClient:
             error(f"   🔧 Закройте позицию вручную в приложении Т-Банк")
             return False
 
-        with Client(self.token) as client:
+        with Client(self.token, target=self.api_url) as client:
             try:
                 from decimal import Decimal, ROUND_HALF_UP
 
@@ -954,7 +956,7 @@ class TBankClient:
 
         # ========== 4. ОТПРАВКА ЗАЯВКИ ==========
         try:
-            with Client(self.token) as client:
+            with Client(self.token, target=self.api_url) as client:
                 dir_map = {
                     "BUY": OrderDirection.ORDER_DIRECTION_BUY,
                     "SELL": OrderDirection.ORDER_DIRECTION_SELL
@@ -1152,7 +1154,7 @@ class TBankClient:
             error(f"❌ {ticker} требует подтверждения сделок")
             return False
 
-        with Client(self.token) as client:
+        with Client(self.token, target=self.api_url) as client:
             try:
                 from decimal import Decimal, ROUND_HALF_UP
 
@@ -1298,7 +1300,7 @@ class TBankClient:
     def get_user_tariff(self) -> Tuple[str, float]:
         self._wait_for_rate_limit()
 
-        with Client(self.token) as client:
+        with Client(self.token, target=self.api_url) as client:
             try:
                 info_obj = client.users.get_info()
                 tariff = info_obj.tariff
@@ -1318,20 +1320,20 @@ class TBankClient:
     def get_margin_info(self) -> Dict[str, float]:
         """Получение информации о марже с кэшированием"""
         self._wait_for_rate_limit()
-
+    
         cache_key = "margin_info"
         cached_result = margin_cache.get(cache_key)
         if cached_result is not None:
             return cached_result.copy()
-
-        with Client(self.token) as client:
+    
+        with Client(self.token, target=self.api_url) as client:  # ← ДОБАВЛЕН target
             try:
                 margin = client.users.get_margin_attributes(account_id=self.account_id)
                 if margin:
                     liquid = float(quotation_to_decimal(margin.liquid_portfolio))
                     starting = float(quotation_to_decimal(margin.starting_margin))
                     minimal = float(quotation_to_decimal(margin.minimal_margin))
-
+    
                     result = {
                         'liquid_portfolio': liquid,
                         'starting_margin': starting,
@@ -1340,18 +1342,18 @@ class TBankClient:
                         'used_margin': starting,
                         'margin_rate': (starting / liquid * 100) if liquid > 0 else 0
                     }
-
+    
                     margin_cache.set(cache_key, result.copy(), ttl=30)
                     return result
             except Exception as e:
                 debug(f"Ошибка получения маржи: {e}")
-
-            return {}
+    
+        return {}
 
     def get_available_funds(self) -> Tuple[float, float, float]:
         self._wait_for_rate_limit()
 
-        with Client(self.token) as client:
+        with Client(self.token, target=self.api_url) as client:
             try:
                 margin = client.users.get_margin_attributes(account_id=self.account_id)
                 if margin:
@@ -1375,7 +1377,7 @@ class TBankClient:
     def get_user_info(self) -> Tuple[bool, str]:
         self._wait_for_rate_limit()
 
-        with Client(self.token) as client:
+        with Client(self.token, target=self.api_url) as client:
             try:
                 info_obj = client.users.get_info()
                 return info_obj.qual_status, info_obj.tariff
@@ -1399,7 +1401,7 @@ class TBankClient:
             if cached_result is not None:
                 return cached_result.copy()  # ✅ ВОЗВРАЩАЕМ КОПИЮ, А НЕ ОРИГИНАЛ
 
-        with Client(self.token) as client:
+        with Client(self.token, target=self.api_url) as client:
             try:
                 portfolio = client.operations.get_portfolio(account_id=self.account_id)
                 positions = []
@@ -1453,7 +1455,7 @@ class TBankClient:
         self._wait_for_rate_limit()
 
         try:
-            with Client(self.token) as client:
+            with Client(self.token, target=self.api_url) as client:
                 orders_response = client.orders.get_orders(account_id=self.account_id)
                 result = []
 
@@ -1600,7 +1602,7 @@ class TBankClient:
         self._wait_for_rate_limit()
 
         try:
-            with Client(self.token) as client:
+            with Client(self.token, target=self.api_url) as client:
                 client.orders.cancel_order(
                     account_id=self.account_id,
                     order_id=order_id
@@ -1802,7 +1804,7 @@ class TBankClient:
         if cached_price is not None:
             return cached_price
 
-        with Client(self.token) as client:
+        with Client(self.token, target=self.api_url) as client:
             try:
                 last_prices = client.market_data.get_last_prices(figi=[figi])
                 if last_prices and last_prices.last_prices:
@@ -1850,7 +1852,7 @@ class TBankClient:
 
         # ✅ 3. ОДИН BATCH-ЗАПРОС
         try:
-            with Client(self.token) as client:
+            with Client(self.token, target=self.api_url) as client:
                 last_prices_response = client.market_data.get_last_prices(figi=uncached_figis)
 
                 for price_data in last_prices_response.last_prices:
@@ -1882,7 +1884,7 @@ class TBankClient:
     def _get_last_prices_batch_chunk(self, figis: List[str]) -> Dict[str, float]:
         """Вспомогательный метод для получения цен по чанку"""
         try:
-            with Client(self.token) as client:
+            with Client(self.token, target=self.api_url) as client:
                 last_prices_response = client.market_data.get_last_prices(figi=figis)
                 result = {}
                 for price_data in last_prices_response.last_prices:
@@ -1909,7 +1911,7 @@ class TBankClient:
         if cached_result is not None:
             return cached_result[:limit] if limit else cached_result
 
-        with Client(self.token) as client:
+        with Client(self.token, target=self.api_url) as client:
             try:
                 response = client.instruments.shares()
                 result = []
@@ -1986,7 +1988,7 @@ class TBankClient:
                 return cached_result.copy()
 
             # ✅ РЕАЛЬНЫЙ ЗАПРОС К API
-            with Client(self.token) as client:
+            with Client(self.token, target=self.api_url) as client:
                 try:
                     end_time = datetime.now(MOSCOW_TZ)
                     start_time = end_time - timedelta(days=days)
@@ -2043,7 +2045,7 @@ class TBankClient:
                 return cached_data
 
         try:
-            with Client(self.token) as client:
+            with Client(self.token, target=self.api_url) as client:
                 status = client.market_data.get_trading_status(instrument_id=figi)
 
                 result = {
@@ -2157,7 +2159,7 @@ class TBankClient:
 
         try:
             # ========== 2. ПОЛУЧАЕМ ИНФОРМАЦИЮ ОБ ИНСТРУМЕНТЕ ==========
-            with Client(self.token) as client:
+            with Client(self.token, target=self.api_url) as client:
                 # Пробуем получить instrument через share_by
                 try:
                     response = client.instruments.share_by(figi=figi)
@@ -2267,7 +2269,7 @@ class TBankClient:
             return cached_result
 
         try:
-            with Client(self.token) as client:
+            with Client(self.token, target=self.api_url) as client:
                 # Пробуем получить как акцию
                 try:
                     response = client.instruments.share_by(figi=figi)
@@ -2336,7 +2338,7 @@ class TBankClient:
         }
 
         try:
-            with Client(self.token) as client:
+            with Client(self.token, target=self.api_url) as client:
                 # 1. Получаем статус торгов
                 status = client.market_data.get_trading_status(instrument_id=figi)
                 result['api_trade_available'] = getattr(status, 'api_trade_available_flag', False)
@@ -2396,7 +2398,7 @@ class TBankClient:
             return cached_result
 
         try:
-            with Client(self.token) as client:
+            with Client(self.token, target=self.api_url) as client:
                 # Пробуем получить как акцию
                 try:
                     share = client.instruments.share_by(id_type=1, id=figi)
@@ -2480,7 +2482,7 @@ class TBankClient:
     def get_stop_orders(self) -> List[Dict[str, Any]]:
         self._wait_for_rate_limit()
 
-        with Client(self.token) as client:
+        with Client(self.token, target=self.api_url) as client:
             try:
                 stop_orders = client.stop_orders.get_stop_orders(account_id=self.account_id)
                 result = []
@@ -2524,7 +2526,7 @@ class TBankClient:
 
                 stop_price_quotation = decimal_to_quotation(Decimal(str(test_stop_price)))
 
-                with Client(self.token) as client:
+                with Client(self.token, target=self.api_url) as client:
                     # Пытаемся создать стоп-ордер с заведомо невыполнимой ценой
                     # Если API вернёт ошибку 30240 - значит не поддерживается
                     client.stop_orders.post_stop_order(
@@ -2576,7 +2578,7 @@ class TBankClient:
     def _place_market_order_emergency(self, figi: str, quantity: int, direction: str) -> bool:
         self._wait_for_rate_limit()
 
-        with Client(self.token) as client:
+        with Client(self.token, target=self.api_url) as client:
             try:
                 dir_map = {"BUY": OrderDirection.ORDER_DIRECTION_BUY, "SELL": OrderDirection.ORDER_DIRECTION_SELL}
                 order = client.orders.post_order(
@@ -2613,7 +2615,7 @@ class TBankClient:
     def get_order_price(self, figi: str, direction: str, quantity: int, price: float) -> Dict[str, Any]:
         self._wait_for_rate_limit()
 
-        with Client(self.token) as client:
+        with Client(self.token, target=self.api_url) as client:
             try:
                 dir_map = {"BUY": OrderDirection.ORDER_DIRECTION_BUY, "SELL": OrderDirection.ORDER_DIRECTION_SELL}
                 price_quotation = decimal_to_quotation(Decimal(str(price)))
@@ -2651,7 +2653,7 @@ class TBankClient:
 
         indicator_map = {"RSI": 3, "MACD": 4, "BB": 1, "SMA": 5, "EMA": 2}
 
-        with Client(self.token) as client:
+        with Client(self.token, target=self.api_url) as client:
             try:
                 response = client.market_data.get_tech_analysis(
                     instrument_uid=figi,
@@ -2794,7 +2796,7 @@ class TBankClient:
             debug(f"Неподдерживаемый интервал: {interval_minutes} мин, используем 1 мин")
             interval = CandleInterval.CANDLE_INTERVAL_1_MIN
 
-        with Client(self.token) as client:
+        with Client(self.token, target=self.api_url) as client:
             try:
                 end_time = datetime.now(MOSCOW_TZ)
                 start_time = end_time - timedelta(days=min(days, 1))
@@ -2812,7 +2814,7 @@ class TBankClient:
 
     def _get_min_price_increment_advanced(self, figi: str) -> float:
         try:
-            with Client(self.token) as client:
+            with Client(self.token, target=self.api_url) as client:
                 try:
                     instrument = client.instruments.share_by(figi=figi)
                     if hasattr(instrument.instrument, 'min_price_increment'):
@@ -2887,7 +2889,7 @@ class TBankClient:
     def check_margin_trading_allowed(self) -> Tuple[bool, str]:
         self._wait_for_rate_limit()
 
-        with Client(self.token) as client:
+        with Client(self.token, target=self.api_url) as client:
             try:
                 margin = client.users.get_margin_attributes(account_id=self.account_id)
                 if margin:
@@ -2914,7 +2916,7 @@ class TBankClient:
         """
         self._wait_for_rate_limit()
 
-        with Client(self.token) as client:
+        with Client(self.token, target=self.api_url) as client:
             try:
                 from t_tech.invest import OrderDirection, StopOrderExpirationType
 
@@ -2988,7 +2990,7 @@ class TBankClient:
         """
         self._wait_for_rate_limit()
 
-        with Client(self.token) as client:
+        with Client(self.token, target=self.api_url) as client:
             try:
                 from t_tech.invest import OrderDirection, OrderType
                 from decimal import Decimal, ROUND_HALF_UP
@@ -3064,7 +3066,7 @@ class TBankClient:
         ticker = self._get_ticker_by_figi(figi) or figi[:8]
 
         try:
-            with Client(self.token) as client:
+            with Client(self.token, target=self.api_url) as client:
                 price_quotation = decimal_to_quotation(Decimal(str(price))) if price else None
 
                 max_lots = client.orders.get_max_lots(
@@ -3087,7 +3089,7 @@ class TBankClient:
         ticker = self._get_ticker_by_figi(figi) if figi else order_id[:8]
 
         try:
-            with Client(self.token) as client:
+            with Client(self.token, target=self.api_url) as client:
                 order = client.orders.get_order_state(
                     account_id=self.account_id,
                     order_id=order_id
@@ -3118,7 +3120,7 @@ class TBankClient:
                 warning(f"⚠️ FIGI для {ticker} не найден")
                 return {"cancelled": 0, "failed": 0}
 
-            with Client(self.token) as client:
+            with Client(self.token, target=self.api_url) as client:
                 orders = client.orders.get_orders(account_id=self.account_id)
                 cancelled = 0
                 failed = 0
@@ -3144,7 +3146,7 @@ class TBankClient:
         ticker = self._get_ticker_by_figi(figi) or figi[:8]
 
         try:
-            with Client(self.token) as client:
+            with Client(self.token, target=self.api_url) as client:
                 dir_map = {"BUY": OrderDirection.ORDER_DIRECTION_BUY, "SELL": OrderDirection.ORDER_DIRECTION_SELL}
                 price_quotation = decimal_to_quotation(Decimal(str(price)))
 
@@ -3216,7 +3218,7 @@ class TBankClient:
         self._wait_for_rate_limit()
 
         try:
-            with Client(self.token) as client:
+            with Client(self.token, target=self.api_url) as client:
                 limits = client.operations.get_withdraw_limits(account_id=self.account_id)
 
                 result = {'money': [], 'blocked': []}
@@ -3253,7 +3255,7 @@ class TBankClient:
         self._wait_for_rate_limit()
 
         try:
-            with Client(self.token) as client:
+            with Client(self.token, target=self.api_url) as client:
                 accounts_response = client.users.get_accounts()
 
                 if not accounts_response.accounts:
@@ -3318,7 +3320,7 @@ class TBankClient:
             info(f"   Новое количество: {quantity} шт")
 
         try:
-            with Client(self.token) as client:
+            with Client(self.token, target=self.api_url) as client:
                 # Получаем информацию о заявке
                 orders = client.orders.get_orders(account_id=self.account_id)
                 order_info = None
@@ -3379,7 +3381,7 @@ class TBankClient:
         self._wait_for_rate_limit()
 
         try:
-            with Client(self.token) as client:
+            with Client(self.token, target=self.api_url) as client:
                 orders = client.orders.get_orders(account_id=self.account_id)
                 result = []
 
@@ -3429,7 +3431,7 @@ class TBankClient:
             Dict с bid/ask массивами или None при ошибке
         """
         try:
-            with Client(self.token) as client:
+            with Client(self.token, target=self.api_url) as client:
                 # Пробуем получить стакан
                 orderbook = client.market_data.get_order_book(figi=figi, depth=depth)
 
@@ -4192,7 +4194,7 @@ class TBankClient:
                 return None
 
             # Формируем URL для WebSocket Т-Банка
-            ws_url = f"wss://invest-public-api.tinkoff.ru/ws/trading/v1/marketdata/stream"
+            ws_url = f"wss://invest-public-api.tbank.ru/ws/trading/v1/marketdata/stream"
 
             async with websockets.connect(ws_url) as websocket:
                 # Отправляем запрос на подписку

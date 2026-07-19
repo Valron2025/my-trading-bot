@@ -331,15 +331,15 @@ class SystemOptimizer:
         """Измерение задержки до API Т-Банка"""
         import socket
         import time
-
+    
         try:
-            # Пинг до API
             start = time.time()
-            socket.create_connection(('invest-public-api.tinkoff.ru', 443), timeout=5)
+            # ✅ ИСПРАВЛЕНО: tinkoff.ru → tbank.ru
+            socket.create_connection(('invest-public-api.tbank.ru', 443), timeout=5)
             latency = (time.time() - start) * 1000
-            return min(latency, 5000)  # Ограничиваем 5 секундами
+            return min(latency, 5000)
         except:
-            return 1000  # По умолчанию 1 секунда
+            return 1000
 
     def _calculate_optimal_settings(self, cpu_count: int, total_ram_mb: float,
                                     is_vps: bool, is_low_end: bool,

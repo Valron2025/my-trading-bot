@@ -1,0 +1,338 @@
+{
+  "timestamp": "2026-07-19T04:59:47.866435",
+  "duration": 25.232987,
+  "auto_fix": false,
+  "stats": {
+    "files_scanned": 98,
+    "total_lines": 49906,
+    "issues_found": 49,
+    "issues_fixed": 0,
+    "imports_total": 19,
+    "imports_failed": 0
+  },
+  "score": 0,
+  "results": [
+    {
+      "name": "Структура проекта",
+      "passed": true
+    },
+    {
+      "name": "Структура проекта",
+      "passed": true
+    },
+    {
+      "name": "Init файлы",
+      "passed": true
+    },
+    {
+      "name": "Init файлы",
+      "passed": true
+    },
+    {
+      "name": ".env",
+      "passed": true
+    },
+    {
+      "name": ".env",
+      "passed": true
+    },
+    {
+      "name": "Requirements",
+      "passed": false
+    },
+    {
+      "name": "Requirements",
+      "passed": false
+    },
+    {
+      "name": "Config",
+      "passed": true
+    },
+    {
+      "name": "Config",
+      "passed": true
+    },
+    {
+      "name": "Логгер",
+      "passed": true
+    },
+    {
+      "name": "Логгер",
+      "passed": true
+    },
+    {
+      "name": "API Т-Банка",
+      "passed": true
+    },
+    {
+      "name": "API Т-Банка",
+      "passed": true
+    },
+    {
+      "name": "Импорты модулей",
+      "passed": true
+    },
+    {
+      "name": "Импорты",
+      "passed": true
+    },
+    {
+      "name": "Торговые методы",
+      "passed": true
+    },
+    {
+      "name": "Торговые методы",
+      "passed": true
+    },
+    {
+      "name": "Качество кода",
+      "passed": false
+    },
+    {
+      "name": "Качество кода",
+      "passed": false
+    },
+    {
+      "name": "Дублирование методов",
+      "passed": false
+    },
+    {
+      "name": "Дублирование методов",
+      "passed": false
+    },
+    {
+      "name": "Batch-запросы",
+      "passed": true
+    },
+    {
+      "name": "Batch-запросы",
+      "passed": true
+    },
+    {
+      "name": "Обработка 30240",
+      "passed": true
+    },
+    {
+      "name": "Обработка 30240",
+      "passed": true
+    },
+    {
+      "name": "Обработка 30042",
+      "passed": true
+    },
+    {
+      "name": "Обработка 30042",
+      "passed": true
+    },
+    {
+      "name": "Кэширование",
+      "passed": false
+    },
+    {
+      "name": "Кэширование",
+      "passed": false
+    },
+    {
+      "name": "Position Monitor",
+      "passed": true
+    },
+    {
+      "name": "Position Monitor",
+      "passed": true
+    },
+    {
+      "name": "Таймауты API",
+      "passed": true
+    },
+    {
+      "name": "Таймауты API",
+      "passed": true
+    },
+    {
+      "name": "Очистка заявок",
+      "passed": true
+    },
+    {
+      "name": "Очистка заявок",
+      "passed": true
+    },
+    {
+      "name": "Мёртвые позиции",
+      "passed": true
+    },
+    {
+      "name": "Мёртвые позиции",
+      "passed": true
+    },
+    {
+      "name": "Telegram",
+      "passed": true
+    },
+    {
+      "name": "Telegram",
+      "passed": true
+    },
+    {
+      "name": "Обработка ошибок",
+      "passed": true
+    },
+    {
+      "name": "Обработка ошибок",
+      "passed": true
+    },
+    {
+      "name": "Prometheus",
+      "passed": true
+    },
+    {
+      "name": "Prometheus",
+      "passed": true
+    },
+    {
+      "name": "Кэширование валидации",
+      "passed": true
+    },
+    {
+      "name": "Кэширование валидации",
+      "passed": true
+    },
+    {
+      "name": "Web Server",
+      "passed": true
+    },
+    {
+      "name": "Web Server",
+      "passed": true
+    },
+    {
+      "name": "Main.py",
+      "passed": true
+    },
+    {
+      "name": "Main.py",
+      "passed": true
+    }
+  ],
+  "issues": [
+    {
+      "file": "requirements.txt",
+      "severity": "HIGH",
+      "message": "Пакет t_tech.invest отсутствует",
+      "fixed": false
+    },
+    {
+      "file": "requirements.txt",
+      "severity": "HIGH",
+      "message": "Пакет flask отсутствует",
+      "fixed": false
+    },
+    {
+      "file": "fix_bot.py",
+      "severity": "MEDIUM",
+      "message": "Строка слишком длинная: 124 символов",
+      "fixed": false
+    },
+    {
+      "file": "master_diagnostic.py",
+      "severity": "CRITICAL",
+      "message": "unterminated string literal (detected at line 719) (master_diagnostic.py, line 719)",
+      "fixed": false
+    },
+    {
+      "file": "master_diagnostic.py",
+      "severity": "MEDIUM",
+      "message": "Строка слишком длинная: 128 символов",
+      "fixed": false
+    },
+    {
+      "file": "master_test.py",
+      "severity": "CRITICAL",
+      "message": "unterminated string literal (detected at line 676) (master_test.py, line 676)",
+      "fixed": false
+    },
+    {
+      "file": "master_test.py",
+      "severity": "MEDIUM",
+      "message": "Строка слишком длинная: 127 символов",
+      "fixed": false
+    },
+    {
+      "file": "trading_bot\\config.py",
+      "severity": "MEDIUM",
+      "message": "Строка слишком длинная: 126 символов",
+      "fixed": false
+    },
+    {
+      "file": "trading_bot\\order_validator.py",
+      "severity": "MEDIUM",
+      "message": "Строка слишком длинная: 122 символов",
+      "fixed": false
+    },
+    {
+      "file": "trading_bot\\analysis\\advanced_indicators.py",
+      "severity": "MEDIUM",
+      "message": "Строка слишком длинная: 145 символов",
+      "fixed": false
+    },
+    {
+      "file": "trading_bot\\analysis\\advanced_strategy.py",
+      "severity": "MEDIUM",
+      "message": "Строка слишком длинная: 134 символов",
+      "fixed": false
+    },
+    {
+      "file": "trading_bot\\analysis\\fundamental_analyzer.py",
+      "severity": "MEDIUM",
+      "message": "Строка слишком длинная: 134 символов",
+      "fixed": false
+    },
+    {
+      "file": "trading_bot\\analysis\\instrument_filter.py",
+      "severity": "MEDIUM",
+      "message": "Строка слишком длинная: 124 символов",
+      "fixed": false
+    },
+    {
+      "file": "trading_bot\\analysis\\market_analyzer.py",
+      "severity": "MEDIUM",
+      "message": "Строка слишком длинная: 122 символов",
+      "fixed": false
+    },
+    {
+      "file": "trading_bot\\analysis\\news_sentiment.py",
+      "severity": "MEDIUM",
+      "message": "Строка слишком длинная: 168 символов",
+      "fixed": false
+    },
+    {
+      "file": "trading_bot\\analysis\\news_sentiment.py",
+      "severity": "MEDIUM",
+      "message": "Найден 'except Exception as e:' без указания исключения",
+      "fixed": false
+    },
+    {
+      "file": "trading_bot\\analysis\\stock_scanner.py",
+      "severity": "MEDIUM",
+      "message": "Строка слишком длинная: 124 символов",
+      "fixed": false
+    },
+    {
+      "file": "trading_bot\\analysis\\stock_scanner.py",
+      "severity": "MEDIUM",
+      "message": "Найден 'except Exception as e:' без указания исключения",
+      "fixed": false
+    },
+    {
+      "file": "trading_bot\\analysis\\strategy_engine.py",
+      "severity": "MEDIUM",
+      "message": "Строка слишком длинная: 175 символов",
+      "fixed": false
+    },
+    {
+      "file": "trading_bot\\analysis\\technical_analyzer.py",
+      "severity": "MEDIUM",
+      "message": "Строка слишком длинная: 127 символов",
+      "fixed": false
+    }
+  ]
+}
