@@ -12,6 +12,28 @@ echo "PWD: $(pwd)"
 echo "=========================================="
 
 # ============================================
+# ОЧИСТКА КЭША ДЛЯ RENDER
+# ============================================
+echo "🧹 Очистка кэша..."
+
+# Очистка Python кэша
+find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null
+find . -type f -name "*.pyc" -delete 2>/dev/null
+
+# Очистка gRPC кэша
+rm -rf /tmp/grpc* 2>/dev/null
+rm -rf ~/.cache/grpc* 2>/dev/null
+
+# Принудительная установка переменных
+export TBANK_API_URL="invest-public-api.tbank.ru:443"
+export T_INVEST_API_URL="invest-public-api.tbank.ru:443"
+export GRPC_DNS_RESOLVER="native"
+export GRPC_VERBOSITY="ERROR"
+
+echo "✅ Кэш очищен, переменные установлены"
+# ============================================
+
+# ============================================
 # 🔧 ФИКС ДЛЯ RENDER: ПРИНУДИТЕЛЬНАЯ УСТАНОВКА ПЕРЕМЕННЫХ
 # ============================================
 export TBANK_API_URL="invest-public-api.tbank.ru:443"

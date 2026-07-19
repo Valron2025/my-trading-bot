@@ -2,39 +2,78 @@
 """Web сервер для VPS - health check, статус и метрики Prometheus"""
 
 # ============================================
-# 🔧 ФИКС ДЛЯ RENDER: ПРИНУДИТЕЛЬНАЯ УСТАНОВКА АДРЕСА API
+# ПРИНУДИТЕЛЬНЫЙ ПАТЧ ДЛЯ RENDER
 # ============================================
 import os
-import socket
 import sys
-import time
-import logging
 
-# 1. Принудительная установка переменных окружения ДО ВСЕХ ИМПОРТОВ
+# 1. Принудительная установка переменных
 os.environ['TBANK_API_URL'] = 'invest-public-api.tbank.ru:443'
+os.environ['T_INVEST_API_URL'] = 'invest-public-api.tbank.ru:443'
 os.environ['TINKOFF_API_URL'] = 'invest-public-api.tbank.ru:443'
 os.environ['INVEST_API_URL'] = 'invest-public-api.tbank.ru:443'
 os.environ['GRPC_DNS_RESOLVER'] = 'native'
 os.environ['GRPC_VERBOSITY'] = 'ERROR'
+os.environ['GRPC_SSL_CIPHER_SUITES'] = 'HIGH+ECDSA+HIGH'
 
-# 2. Проверка DNS резолвинга
+print("=" * 60)
+print("🔧 ПРИНУДИТЕЛЬНЫЙ ПАТЧ ДЛЯ RENDER")
+print(f"   TBANK_API_URL: {os.environ.get('TBANK_API_URL')}")
+print(f"   GRPC_DNS_RESOLVER: {os.environ.get('GRPC_DNS_RESOLVER')}")
+print("=" * 60)
+
+# 2. Прямое переопределение констант в библиотеке (если они есть)
+try:
+    import t_tech.invest.constants as constants
+
+    if hasattr(constants, 'ADDRESS'):
+        old = constants.ADDRESS
+        constants.ADDRESS = 'invest-public-api.tbank.ru:443'
+        print(f"✅ Константа ADDRESS: {old} → {constants.ADDRESS}")
+    if hasattr(constants, 'DEFAULT_ADDRESS'):
+        old = constants.DEFAULT_ADDRESS
+        constants.DEFAULT_ADDRESS = 'invest-public-api.tbank.ru:443'
+        print(f"✅ Константа DEFAULT_ADDRESS: {old} → {constants.DEFAULT_ADDRESS}")
+    if hasattr(constants, 'TINKOFF_API_URL'):
+        old = constants.TINKOFF_API_URL
+        constants.TINKOFF_API_URL = 'invest-public-api.tbank.ru:443'
+        print(f"✅ Константа TINKOFF_API_URL: {old} → {constants.TINKOFF_API_URL}")
+except ImportError:
+    print("⚠️ t_tech.invest.constants не найден (пропускаем)")
+except Exception as e:
+    print(f"⚠️ Не удалось пропатчить константы: {e}")
+
+# 3. Мониторинг gRPC
+try:
+    import grpc
+
+    print(f"✅ gRPC версия: {grpc.__version__}")
+except ImportError:
+    print("⚠️ gRPC не найден")
+
+# 4. Проверка DNS резолвинга
+import socket
+
 try:
     ip = socket.gethostbyname('invest-public-api.tbank.ru')
     print(f"✅ DNS резолвинг: invest-public-api.tbank.ru → {ip}")
 except Exception as e:
     print(f"❌ DNS ошибка: {e}")
 
-# 3. Попытка очистить DNS кэш
+# 5. Проверка старого IP (должен быть недоступен или игнорироваться)
 try:
-    import dns.resolver
-    dns.resolver.cache.flush()
-    print("✅ DNS кэш очищен")
+    old_ip = socket.gethostbyname('178.130.128.33')
+    print(f"⚠️ СТАРЫЙ IP ВСЁ ЕЩЁ РЕЗОЛВИТСЯ: {old_ip}")
+    print("   Это может быть причиной проблемы!")
 except:
-    pass
+    print("✅ Старый IP не резолвится (это хорошо)")
 
-print("✅ Render окружение настроено для T-Bank API")
+print("✅ Render патч применён")
+print("=" * 60)
 # ============================================
 
+import time
+import logging
 from flask import Flask, jsonify
 from datetime import datetime
 import threading
@@ -60,9 +99,11 @@ print("🔍 ENVIRONMENT VARIABLES:")
 tbank_token = os.getenv('TBANK_TOKEN')
 tbank_account_id = os.getenv('TBANK_ACCOUNT_ID')
 tbank_api_url = os.getenv('TBANK_API_URL')
+t_invest_api_url = os.getenv('T_INVEST_API_URL')
 print(f"   TBANK_TOKEN: {'✅ SET' if tbank_token else '❌ NOT SET'}")
 print(f"   TBANK_ACCOUNT_ID: {'✅ SET' if tbank_account_id else '❌ NOT SET'}")
 print(f"   TBANK_API_URL: {'✅ SET' if tbank_api_url else '❌ NOT SET'}")
+print(f"   T_INVEST_API_URL: {'✅ SET' if t_invest_api_url else '❌ NOT SET'}")
 if tbank_token:
     print(f"   TBANK_TOKEN (first 20): {tbank_token[:20]}...")
 print("=" * 60)
@@ -91,6 +132,40 @@ _bot_error = None
 _bot_start_time = time.time()
 
 
+# ========== ПРОВЕРКА API ПЕРЕД ЗАПУСКОМ ==========
+def test_api_connection():
+    """Тест подключения к API перед запуском бота"""
+    try:
+        print("🔍 Тест подключения к API Т-Банка...")
+        from trading_bot.api.tbank_client import tbank
+
+        print(f"   📡 API URL: {tbank.api_url}")
+        print(f"   🔑 Token: {tbank.token[:20]}...")
+
+        # Пробуем получить баланс
+        _, total, _ = tbank.get_available_funds()
+        print(f"   ✅ Капитал: {total:.2f}₽")
+        return True
+    except Exception as e:
+        print(f"   ❌ Ошибка подключения: {e}")
+        if "178.130.128.33" in str(e):
+            print("   ⚠️ ВНИМАНИЕ! Используется СТАРЫЙ IP-адрес!")
+            print("   🔧 Попытка принудительного переопределения...")
+            try:
+                # Пытаемся переопределить адрес в уже созданном клиенте
+                from trading_bot.api.tbank_client import tbank
+                tbank.api_url = 'invest-public-api.tbank.ru:443'
+                print(f"   ✅ API URL принудительно изменён на: {tbank.api_url}")
+                # Повторная попытка
+                _, total, _ = tbank.get_available_funds()
+                print(f"   ✅ Капитал (после исправления): {total:.2f}₽")
+                return True
+            except Exception as e2:
+                print(f"   ❌ Всё равно ошибка: {e2}")
+                return False
+        return False
+
+
 def run_bot():
     """Запуск торгового бота с полной отладкой"""
     global _trading_bot, _bot_started, _bot_error, _bot_start_time
@@ -99,6 +174,13 @@ def run_bot():
     print("🤖 RUN_BOT() STARTED")
     print(f"   Thread: {threading.current_thread().name}")
     print("=" * 60)
+
+    # ========== ТЕСТ API ПЕРЕД ЗАПУСКОМ ==========
+    print("\n🔍 ШАГ 0: Тест API подключения...")
+    api_ok = test_api_connection()
+    if not api_ok:
+        print("⚠️ API не доступен, но продолжаем запуск...")
+        print("   Бот перейдёт в режим ожидания до восстановления")
 
     try:
         print("   📦 ШАГ 1: Импорт trading_bot...")
@@ -291,6 +373,26 @@ def status():
     return jsonify(response), 200
 
 
+@app.route('/api/test')
+def test_api():
+    """Тестовый эндпоинт для проверки API"""
+    try:
+        from trading_bot.api.tbank_client import tbank
+        api_url = tbank.api_url
+        _, total, _ = tbank.get_available_funds()
+        return jsonify({
+            "status": "ok",
+            "api_url": api_url,
+            "capital": total,
+            "token": tbank.token[:20] + "..."
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 503
+
+
 @app.route('/metrics')
 def metrics():
     try:
@@ -397,7 +499,6 @@ def background_metrics_updater():
 _metrics_updater_thread = threading.Thread(target=background_metrics_updater, daemon=True)
 _metrics_updater_thread.start()
 print("✅ Фоновый поток обновления метрик запущен")
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
