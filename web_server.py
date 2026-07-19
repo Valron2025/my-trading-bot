@@ -51,14 +51,20 @@ else:
 print(f"🔐 SSL_CERT_FILE: {os.environ.get('SSL_CERT_FILE')}")
 print(f"🔐 REQUESTS_CA_BUNDLE: {os.environ.get('REQUESTS_CA_BUNDLE')}")
 
-# 3. Сброс gRPC контекста (для предотвращения падения Gunicorn)
+# 3. Сброс gRPC контекста (безопасная версия)
 try:
     import grpc
-    if hasattr(grpc._cython, 'cygrpc'):
+    # Проверяем существование метода
+    if hasattr(grpc._cython, 'cygrpc') and hasattr(grpc._cython.cygrpc, '_reset_grpc_context'):
         grpc._cython.cygrpc._reset_grpc_context()
         print("✅ gRPC context reset")
+    elif hasattr(grpc, '_reset_grpc_context'):
+        grpc._reset_grpc_context()
+        print("✅ gRPC context reset (alternative)")
+    else:
+        print("ℹ️ gRPC context reset not available (skipping)")
 except Exception as e:
-    print(f"⚠️ gRPC reset error: {e}")
+    print(f"ℹ️ gRPC reset skipped: {e}")
 
 # 4. Принудительное переопределение констант SDK
 try:
