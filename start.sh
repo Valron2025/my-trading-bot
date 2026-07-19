@@ -34,6 +34,21 @@ echo "✅ Кэш очищен, переменные установлены"
 # ============================================
 
 # ============================================
+# SSL НАСТРОЙКА ДЛЯ RENDER
+# ============================================
+echo "🔐 Настройка SSL для Render..."
+
+# Получаем путь к сертификатам
+CERT_PATH=$(python -c "import certifi; print(certifi.where())")
+export SSL_CERT_FILE=$CERT_PATH
+export REQUESTS_CA_BUNDLE=$CERT_PATH
+export GRPC_SSL_CIPHER_SUITES='HIGH+ECDSA+HIGH'
+
+echo "   SSL_CERT_FILE: $SSL_CERT_FILE"
+echo "🔐 SSL настроен"
+# ============================================
+
+# ============================================
 # 🔧 ФИКС ДЛЯ RENDER: ПРИНУДИТЕЛЬНАЯ УСТАНОВКА ПЕРЕМЕННЫХ
 # ============================================
 export TBANK_API_URL="invest-public-api.tbank.ru:443"

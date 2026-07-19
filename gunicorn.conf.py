@@ -43,22 +43,18 @@ daemon = False
 # Debug
 debug = os.environ.get('DEBUG', 'false').lower() == 'true'
 
-# SSL Environment setup for gRPC (CRITICAL for T-Bank API)
 def post_fork(server, worker):
-    """Настройка SSL окружения после форка воркера"""
-    # Устанавливаем переменные окружения для SSL сертификатов
-    os.environ['SSL_CERT_FILE'] = '/etc/ssl/certs/ca-certificates.crt'
-    os.environ['REQUESTS_CA_BUNDLE'] = '/etc/ssl/certs/ca-certificates.crt'
+    """Настройка SSL после форка воркера"""
+    # Устанавливаем переменные окружения
     os.environ['GRPC_DNS_RESOLVER'] = 'native'
     os.environ['GRPC_SSL_CIPHER_SUITES'] = 'HIGH+ECDSA+HIGH'
-
-    # ✅ УСТАНАВЛИВАЕМ ПРАВИЛЬНЫЙ АДРЕС API
     os.environ['TBANK_API_URL'] = 'invest-public-api.tbank.ru:443'
     os.environ['TINKOFF_API_URL'] = 'invest-public-api.tbank.ru:443'
 
     try:
         import certifi
         os.environ['SSL_CERT_FILE'] = certifi.where()
+        os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
         print(f"✅ SSL configured with certifi: {certifi.where()}")
     except ImportError:
         print("⚠️ certifi not installed, using system certificates")
@@ -75,18 +71,18 @@ def on_starting(server):
     print(f"   loglevel: {loglevel}")
     print(f"   Python version: {os.sys.version}")
 
-    # ✅ УСТАНАВЛИВАЕМ ПРАВИЛЬНЫЙ АДРЕС API
     os.environ['TBANK_API_URL'] = 'invest-public-api.tbank.ru:443'
     os.environ['TINKOFF_API_URL'] = 'invest-public-api.tbank.ru:443'
+    os.environ['GRPC_DNS_RESOLVER'] = 'native'
+    os.environ['GRPC_SSL_CIPHER_SUITES'] = 'HIGH+ECDSA+HIGH'
 
     try:
         import certifi
+        os.environ['SSL_CERT_FILE'] = certifi.where()
+        os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
         print(f"✅ certifi found at: {certifi.where()}")
     except ImportError:
         print("⚠️ WARNING: certifi not installed - SSL may fail!")
-
-    os.environ['GRPC_DNS_RESOLVER'] = 'native'
-    os.environ['GRPC_SSL_CIPHER_SUITES'] = 'HIGH+ECDSA+HIGH'
 
 post_fork = post_fork
 on_starting = on_starting
@@ -94,5 +90,4 @@ on_starting = on_starting
 def pre_exec(server):
     """Перед exec для обновления окружения"""
     os.environ['GRPC_DNS_RESOLVER'] = 'native'
-    # ✅ УСТАНАВЛИВАЕМ ПРАВИЛЬНЫЙ АДРЕС API
     os.environ['TBANK_API_URL'] = 'invest-public-api.tbank.ru:443'

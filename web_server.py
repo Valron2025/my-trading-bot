@@ -7,6 +7,20 @@
 import os
 import sys
 
+# ============================================
+# SSL НАСТРОЙКА ДЛЯ RENDER
+# ============================================
+import certifi
+import ssl
+
+# Принудительное использование сертификатов
+os.environ['SSL_CERT_FILE'] = certifi.where()
+os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
+os.environ['GRPC_SSL_CIPHER_SUITES'] = 'HIGH+ECDSA+HIGH'
+
+print(f"🔐 SSL_CERT_FILE: {os.environ.get('SSL_CERT_FILE')}")
+# ============================================
+
 # 1. Принудительная установка переменных
 os.environ['TBANK_API_URL'] = 'invest-public-api.tbank.ru:443'
 os.environ['T_INVEST_API_URL'] = 'invest-public-api.tbank.ru:443'
