@@ -1255,9 +1255,19 @@ class TradingLoop:
 
     def _analyze_position_technicals(self, ticker: str, figi: str, side: str,
                                      current_price: float, avg_price: float) -> Dict[str, Any]:
-        """Технический анализ конкретной позиции с определением ЛОКАЛЬНОГО тренда и ATR"""
+        # ✅ ДОБАВЛЯЕМ ОЧИСТКУ КЭША ПРИ БОЛЬШОМ ИЗМЕНЕНИИ ЦЕНЫ
+        if hasattr(self, '_tech_analysis_cache'):
+            # Если цена изменилась более чем на 1%, сбрасываем кэш для этого тикера
+            for key in list(self._tech_analysis_cache.keys()):
+                if ticker in key:
+                    cached = self._tech_analysis_cache.get(key)
+                    if cached:
+                        cached_data = cached.get('data', {})
+                        old_price = cached_data.get('current_price', 0)
+                        if old_price and abs(current_price - old_price) / old_price > 0.01:
+                            del self._tech_analysis_cache[key]
+                            debug(f"   🧹 Кэш тех.анализа для {ticker} сброшен (изменение цены >1%)")
 
-        # ✅ КЭШ ДЛЯ ТЕХНИЧЕСКОГО АНАЛИЗА
         cache_key = f"tech_{ticker}_{figi}_{side}_{int(current_price * 100)}_{int(avg_price * 100)}"
 
         # ✅ ИЗМЕНЕНО: 60 → 300 СЕКУНД (5 минут)
@@ -2391,6 +2401,12 @@ class TradingLoop:
             liquid_shares.sort(key=lambda x: x[1], reverse=True)
 
             if not liquid_shares:
+                warning("⚠️ Не удалось получить список ликвидных тикеров")
+                # ✅ Возвращаем базовые тикеры, а не пустой список
+                fallback_tickers = ["SBER", "GAZP", "LKOH", "ROSN", "TATN", "NVTK", "MGNT", "YNDX", "MOEX", "VTBR"]
+                info(f"📊 Используем базовый список тикеров: {', '.join(fallback_tickers[:limit])}")
+                return fallback_tickers[:limit]
+
                 warning("⚠️ Не удалось получить список ликвидных тикеров")
                 # Пробуем получить хотя бы какие-то тикеры из первого попавшегося списка
                 if all_shares:
@@ -3597,6 +3613,10 @@ class TradingLoop:
                 # Инициализация максимумов
                 if not hasattr(position, 'max_profit_pct'):
                     position.max_profit_pct = profit_pct
+                    position.max_profit_time = get_moscow_time()
+                    position.trailing_drawdown_pct = trailing_drawdown_pct
+                    # ✅ ПРОПУСКАЕМ ПРОВЕРКУ В ЭТОМ ЦИКЛЕ
+                    continue
                     position.max_profit_time = get_moscow_time()
                     position.trailing_drawdown_pct = trailing_drawdown_pct
     

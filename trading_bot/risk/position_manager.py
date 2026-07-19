@@ -910,16 +910,15 @@ class PositionManager:
         from trading_bot.api.tbank_client import tbank
 
         try:
-            # Получаем реальные позиции от брокера
             real_positions = tbank.get_positions()
+            # ✅ ТОЛЬКО ПОЗИЦИИ С НЕНУЛЕВЫМ КОЛИЧЕСТВОМ
             real_figis = {p['figi'] for p in real_positions if abs(p.get('quantity', 0)) > 0}
 
-            # Удаляем из менеджера всё, чего нет у брокера
             removed = 0
             for figi in list(self._positions.keys()):
                 if figi not in real_figis:
-                    ticker = tbank._get_ticker_by_figi(figi)
-                    info(f"🧹 Синхронизация: удалена мёртвая позиция {ticker} ({figi})")
+                    ticker = self._positions[figi].ticker
+                    info(f"🧹 Синхронизация: удалена позиция {ticker} (нет у брокера или нулевое кол-во)")
                     del self._positions[figi]
                     removed += 1
 
@@ -1443,7 +1442,25 @@ class PositionManager:
         try:
             ticker = position.ticker or position.figi[:8]
             figi = position.figi
-            quantity = position.quantity
+
+            # ✅ ПРОВЕРКА: позиция ещё существует?
+            broker_positions = tbank.get_positions(force_refresh=True)
+            exists = False
+            actual_qty = 0
+            for pos in broker_positions:
+                if pos.get('figi') == figi:
+                    actual_qty = abs(pos.get('quantity', 0))
+                    if actual_qty > 0:
+                        exists = True
+                    break
+
+            if not exists:
+                info(f"   ℹ️ Позиция {ticker} уже закрыта у брокера")
+                self.remove_position(figi)
+                return True
+
+            # Используем актуальное количество
+            quantity = actual_qty
 
             info(f"\n{'🔒' * 60}")
             info(f"🔒 НАЧАЛО БЕЗОПАСНОГО ЗАКРЫТИЯ SHORT ПОЗИЦИИ")
@@ -1456,7 +1473,6 @@ class PositionManager:
                 warning(f"\n🔐 {ticker} - OTC ИНСТРУМЕНТ! НЕВОЗМОЖНО ЗАКРЫТЬ АВТОМАТИЧЕСКИ!")
                 warning(f"   📱 Закройте позицию ВРУЧНУЮ в приложении Т-Банк!")
 
-                # Отправляем Telegram уведомление
                 try:
                     telegram = _get_telegram()
                     if telegram:
@@ -1469,7 +1485,6 @@ class PositionManager:
                 except Exception:
                     pass
 
-                # ✅ НЕ УДАЛЯЕМ ПОЗИЦИЮ ИЗ МЕНЕДЖЕРА!
                 return False
 
             # ========== 2. ПОЛУЧАЕМ ТЕКУЩУЮ ЦЕНУ ==========
@@ -1480,23 +1495,7 @@ class PositionManager:
 
             info(f"   ✅ Текущая цена: {current_price:.4f}₽")
 
-            # ========== 3. ПРОВЕРКА СУЩЕСТВОВАНИЯ ПОЗИЦИИ ==========
-            broker_positions = tbank.get_positions(force_refresh=True)
-            position_exists = False
-            actual_qty = 0
-
-            for pos in broker_positions:
-                if pos.get('figi') == figi:
-                    actual_qty = abs(pos.get('quantity', 0))
-                    if actual_qty > 0:
-                        position_exists = True
-                    break
-
-            if not position_exists:
-                info(f"   ℹ️ Позиция {ticker} уже закрыта у брокера")
-                return True
-
-            # ========== 4. ОТПРАВКА ЗАЯВКИ ==========
+            # ========== 3. ОТПРАВКА ЗАЯВКИ ==========
             info(f"\n📡 ОТПРАВКА ЗАЯВКИ НА ПОКУПКУ {quantity} шт {ticker}...")
 
             try:
@@ -1520,7 +1519,7 @@ class PositionManager:
                     error(f"   ❌ ОШИБКА: {e}")
                     return False
 
-            # ========== 5. ОЖИДАНИЕ ИСПОЛНЕНИЯ ==========
+            # ========== 4. ОЖИДАНИЕ ИСПОЛНЕНИЯ ==========
             for attempt in range(15):
                 time.sleep(1)
                 broker_positions = tbank.get_positions(force_refresh=True)

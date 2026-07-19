@@ -93,29 +93,41 @@ def is_trading_time() -> bool:
     """Проверка, можно ли торговать сейчас (биржевые сессии)"""
     return is_pre_market_time() or is_main_session_time() or is_evening_session_time()
 
+def _is_holiday_date(dt: datetime) -> bool:
+    """Проверка, является ли дата праздничной"""
+    holidays = {(1, 1), (1, 2), (1, 7), (2, 23), (3, 8), (5, 1), (5, 9), (6, 12), (11, 4)}
+    return (dt.month, dt.day) in holidays
 
 def is_dsvd_trading_time() -> bool:
-    """
-    Проверка ДСВД (биржевые торги в выходные/праздники)
-    ✅ ИСПРАВЛЕНО: УБРАН ВЫЗОВ is_holiday() (теперь проверяем напрямую)
-    """
+    """Проверка ДСВД (биржевые торги в выходные/праздники)"""
     now = get_moscow_time()
     current_time = now.time()
     weekday = now.weekday()
 
-    # Праздничные дни (прямая проверка, без вызова is_holiday)
-    holidays = {(1, 1), (1, 2), (1, 7), (2, 23), (3, 8), (5, 1), (5, 9), (6, 12), (11, 4)}
-    is_holiday_today = (now.month, now.day) in holidays
-
-    # В праздник торгуем по ДСВД (в часы ДСВД)
-    if is_holiday_today:
+    if _is_holiday_date(now):  # ← используем общую функцию
         return DSVD_START <= current_time <= DSVD_END
 
-    # В выходные торгуем по ДСВД (в часы ДСВД)
-    if weekday in (5, 6):  # Суббота или воскресенье
+    if weekday in (5, 6):
         return DSVD_START <= current_time <= DSVD_END
 
     return False
+
+def is_otc_trading_time() -> bool:
+    """Проверка OTC (внебиржевые торги в выходные)"""
+    now = get_moscow_time()
+    current_time = now.time()
+    weekday = now.weekday()
+
+    if weekday not in (5, 6):
+        return False
+
+    if _is_holiday_date(now):  # ← используем общую функцию
+        return False
+
+    if DSVD_START <= current_time <= DSVD_END:
+        return False
+
+    return OTC_START <= current_time <= OTC_END
 
 def is_weekend_evening_trading_time() -> bool:
     """
@@ -136,31 +148,6 @@ def is_weekend_evening_trading_time() -> bool:
     # Если Мосбиржа введёт вечерние торги в выходные, раскомментировать:
     # return WEEKEND_EVENING_START <= current_time <= WEEKEND_EVENING_END
     return False
-
-
-def is_otc_trading_time() -> bool:
-    """
-    Проверка OTC (внебиржевые торги в выходные)
-    ✅ ИСПРАВЛЕНО: УБРАН ВЫЗОВ is_holiday()
-    """
-    now = get_moscow_time()
-    current_time = now.time()
-    weekday = now.weekday()
-
-    if weekday not in (5, 6):
-        return False
-
-    # Праздничные дни (прямая проверка)
-    holidays = {(1, 1), (1, 2), (1, 7), (2, 23), (3, 8), (5, 1), (5, 9), (6, 12), (11, 4)}
-    if (now.month, now.day) in holidays:
-        return False
-
-    # Исключаем часы ДСВД (09:50-18:59) из OTC
-    if DSVD_START <= current_time <= DSVD_END:
-        return False
-
-    return OTC_START <= current_time <= OTC_END
-
 
 def is_weekend_trading_time() -> bool:
     """
@@ -458,24 +445,18 @@ def is_trading_time_for_ticker(ticker: str) -> Tuple[bool, str]:
     """
     Проверить, можно ли торговать тикером в текущее время
     ✅ ИСПРАВЛЕНО: удалена проверка на голубые фишки
-
-    Args:
-        ticker: Тикер акции
-
-    Returns:
-        (можно_торговать, причина)
     """
     now = get_moscow_time()
 
+    # ✅ ПРОВЕРКА: если тикер None или пустой
+    if not ticker:
+        return False, "пустой тикер"
+
     # Выходные
     if now.weekday() >= 5:
-        # В выходные торгуются все инструменты через OTC (лимитные заявки)
-        # Ограничений по тикеру нет, только по типу заявки
         return True, "Торговля через OTC (лимитные заявки)"
 
-    # Пятница вечер - предупреждение, но не блокировка
     if is_friday_evening():
-        # Просто предупреждаем, но разрешаем
         return True, "Пятница вечер - высокий риск зависания на выходные"
 
     return True, "ОК"

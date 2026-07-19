@@ -5,7 +5,7 @@
 2. Подтверждение создания заявки
 3. Отслеживание статуса исполнения
 """
-
+import os
 import time
 import uuid
 from decimal import Decimal

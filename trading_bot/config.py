@@ -220,11 +220,14 @@ class TradingConfig:
         """Загрузка реального капитала из API"""
         try:
             from trading_bot.api.tbank_client import tbank
+            # ✅ Проверяем, что клиент доступен
+            if tbank is None:  # ← ЭТА СТРОКА ДОЛЖНА БЫТЬ
+                return
             _, total, _ = tbank.get_available_funds()
             if total > 0:
                 self.total_capital = total
         except Exception:
-            pass  # Не логируем - это нормально при первом запуске
+            pass  # API может быть недоступен при первом запуске
 
     # ========== АВТОМАТИЧЕСКИЕ МЕТОДЫ ==========
 

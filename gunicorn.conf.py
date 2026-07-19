@@ -63,9 +63,15 @@ def post_fork(server, worker):
     # ✅ СБРОС gRPC СОСТОЯНИЯ ПОСЛЕ ФОРКА (ИСПРАВЛЯЕТ GUNICORN FALLBACK)
     try:
         import grpc
-        if hasattr(grpc._cython, 'cygrpc'):
-            grpc._cython.cygrpc._reset_grpc_context()
-            print(f"✅ gRPC context reset for worker {worker.pid}")
+        # Проверяем существование атрибутов
+        if hasattr(grpc, '_cython') and hasattr(grpc._cython, 'cygrpc'):
+            if hasattr(grpc._cython.cygrpc, '_reset_grpc_context'):
+                grpc._cython.cygrpc._reset_grpc_context()
+                print(f"✅ gRPC context reset for worker {worker.pid}")
+            else:
+                print(f"ℹ️ _reset_grpc_context not available for worker {worker.pid}")
+        else:
+            print(f"ℹ️ gRPC cython not available for worker {worker.pid}")
     except Exception as e:
         print(f"⚠️ Failed to reset gRPC context: {e}")
 

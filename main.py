@@ -58,5 +58,19 @@ def main():
         raise
 
 
+import signal
+
+
+def signal_handler(sig, frame):
+    """Обработчик сигналов для корректного завершения"""
+    print(f"\n🛑 Получен сигнал {sig}, завершаем работу...")
+    shutdown_candle_builder()
+    sys.exit(0)
+
+
 if __name__ == "__main__":
+    # Регистрируем обработчики сигналов
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
     main()

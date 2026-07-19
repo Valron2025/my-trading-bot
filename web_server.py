@@ -568,13 +568,22 @@ def background_metrics_updater():
                 except Exception:
                     pass
 
+                # ✅ ПРОВЕРКА: _trading_bot.trading_loop существует
                 if hasattr(_trading_bot, 'trading_loop') and _trading_bot.trading_loop:
-                    cycle_count = getattr(_trading_bot.trading_loop, '_cycle_count', 0)
-                    if cycle_count > 0:
-                        prometheus_metrics.set_trading_cycle_count(cycle_count)
-
-        except Exception:
-            pass
+                    loop = _trading_bot.trading_loop
+                    if hasattr(loop, '_cycle_count'):
+                        cycle_count = loop._cycle_count
+                        if cycle_count > 0:
+                            prometheus_metrics.set_trading_cycle_count(cycle_count)
+                else:
+                    # Если trading_loop ещё не инициализирован, пропускаем
+                    pass
+            else:
+                # Бот не запущен, просто ждём
+                pass
+        except Exception as e:
+            # Логируем ошибку, но не падаем
+            print(f"⚠️ Metrics updater error: {e}")
 
         time.sleep(15)
 

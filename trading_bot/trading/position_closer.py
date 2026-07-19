@@ -5,6 +5,7 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
 
 from ..logger import info, success, error, warning, debug
+from ..models import OrderSide
 
 
 def _get_tbank():
@@ -66,17 +67,17 @@ class PositionCloser:
         # ✅ ОТСЛЕЖИВАНИЕ ПОПЫТОК ЗАКРЫТИЯ
         self._close_attempts: Dict[str, int] = {}  # figi -> количество попыток
         self._close_attempt_time: Dict[str, datetime] = {}  # figi -> время последней попытки
-        
+
         self._price_cache = {}
         self._price_cache_ttl = 10  # 10 секунд
-        
+
     def _get_price_cached(self, figi: str) -> Optional[float]:
         """Получение цены с кэшированием"""
         if figi in self._price_cache:
             cached_time, price = self._price_cache[figi]
             if (time.time() - cached_time) < self._price_cache_ttl:
                 return price
-        
+
         from trading_bot.api.tbank_client import tbank
         price = tbank.get_current_price(figi)
         if price:
@@ -104,13 +105,11 @@ class PositionCloser:
                     continue
 
                 if pos['quantity'] < 0:
-                    from ..models import OrderSide
-                    position = position_manager.add_position(figi, quantity, avg_price, OrderSide.SHORT)
+                    position = position_manager.add_position(figi, quantity, avg_price, OrderSide.SHORT)  # ← теперь OrderSide доступен
                     position.lowest_price = current_price
                     info(f"📌 Обнаружена SHORT позиция: {quantity} шт по {avg_price:.2f}₽")
                 elif pos['quantity'] > 0:
-                    from ..models import OrderSide
-                    position = position_manager.add_position(figi, quantity, avg_price, OrderSide.LONG)
+                    position = position_manager.add_position(figi, quantity, avg_price, OrderSide.LONG)  # ← теперь OrderSide доступен
                     position.highest_price = current_price
                     info(f"📌 Обнаружена LONG позиция: {quantity} шт по {avg_price:.2f}₽")
             except ImportError as e:
@@ -657,8 +656,14 @@ class PositionCloser:
         return "regular"
 
     def _emergency_close_short(self, figi: str, quantity: int, ticker: str, is_critical: bool) -> bool:
-        """Экстренное закрытие SHORT позиции с КЭШИРОВАНИЕМ"""
         from trading_bot.api.tbank_client import tbank
+
+        # ✅ ПРОВЕРКА OTC (с кэшированием)
+        if self._is_otc_cached(figi):
+            warning(f"\n🔐 {ticker} - OTC ИНСТРУМЕНТ!")
+            warning(f"   НЕВОЗМОЖНО ЗАКРЫТЬ АВТОМАТИЧЕСКИ!")
+            warning(f"   📱 Закройте позицию ВРУЧНУЮ в приложении Т-Банк!")
+            return False
 
         if quantity <= 0:
             return False
@@ -709,6 +714,14 @@ class PositionCloser:
 
         error(f"❌ НЕ УДАЛОСЬ ЗАКРЫТЬ SHORT {ticker}!")
         return False
+
+    def _is_otc_cached(self, figi: str) -> bool:
+        """Проверка OTC с кэшированием"""
+        try:
+            from trading_bot.api.tbank_client import tbank
+            return tbank.is_confirmation_required(figi)
+        except Exception:
+            return False
 
     def _emergency_close_long(self, figi: str, quantity: int, ticker: str) -> bool:
         from trading_bot.api.tbank_client import tbank

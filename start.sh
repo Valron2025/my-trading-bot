@@ -30,6 +30,16 @@ export T_INVEST_API_URL="invest-public-api.tbank.ru:443"
 export GRPC_DNS_RESOLVER="native"
 export GRPC_VERBOSITY="ERROR"
 
+# Проверка наличия gunicorn
+if ! command -v gunicorn &> /dev/null; then
+    echo "❌ gunicorn не найден, устанавливаю..."
+    pip install gunicorn
+fi
+
+# Проверка наличия certifi
+python -c "import certifi" 2>/dev/null || pip install certifi
+echo "✅ certifi установлен"
+
 echo "✅ Кэш очищен, переменные установлены"
 # ============================================
 

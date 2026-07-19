@@ -43,6 +43,55 @@ class TTLCache:
         }
         info(f"🗂️ TTLCache '{name}' инициализирован: TTL={default_ttl}с, max_size={max_size}")
 
+    def save_to_disk(self, path: str) -> bool:
+        """Сохранение кэша на диск"""
+        import pickle
+        from pathlib import Path
+
+        try:
+            Path(path).parent.mkdir(exist_ok=True)
+            with self._lock:
+                data = {
+                    'cache': self._cache,
+                    'expires': self._expires,
+                    'stats': self._stats,
+                    'timestamp': time.time()
+                }
+            with open(path, 'wb') as f:
+                pickle.dump(data, f)
+            debug(f"💾 {self._name}: кэш сохранён в {path} ({len(self._cache)} записей)")
+            return True
+        except Exception as e:
+            warning(f"⚠️ {self._name}: ошибка сохранения кэша: {e}")
+            return False
+
+    def load_from_disk(self, path: str, max_age_seconds: int = 3600) -> bool:
+        """Загрузка кэша с диска"""
+        import pickle
+        from pathlib import Path
+
+        if not Path(path).exists():
+            return False
+
+        try:
+            with open(path, 'rb') as f:
+                data = pickle.load(f)
+
+            if time.time() - data.get('timestamp', 0) > max_age_seconds:
+                debug(f"⏰ {self._name}: кэш устарел (старше {max_age_seconds}с)")
+                return False
+
+            with self._lock:
+                self._cache = data.get('cache', {})
+                self._expires = data.get('expires', {})
+                self._stats = data.get('stats', self._stats)
+
+            debug(f"📦 {self._name}: кэш загружен из {path} ({len(self._cache)} записей)")
+            return True
+        except Exception as e:
+            warning(f"⚠️ {self._name}: ошибка загрузки кэша: {e}")
+            return False
+
     def _cleanup_expired(self, key: Optional[str] = None) -> int:
         now = time.time()
         removed = 0
@@ -219,28 +268,27 @@ class PositionCache:
 
 
 class ValidationCache:
-    """Кэш для валидации тикеров"""
+    """Кэш для валидации тикеров (использует TTLCache)"""
 
     def __init__(self, default_ttl_hours: int = 24):
-        self._default_ttl_hours = default_ttl_hours
-        self._cache: Dict[str, Tuple[datetime, bool, Dict]] = {}
+        self._cache = TTLCache(
+            default_ttl=default_ttl_hours * 3600,
+            max_size=1000,
+            name="validation_cache"
+        )
 
     def get(self, ticker: str) -> Tuple[Optional[bool], Optional[Dict]]:
-        if ticker not in self._cache:
+        data = self._cache.get(ticker)
+        if data is None:
             return None, None
-        timestamp, passed, stats = self._cache[ticker]
-        if datetime.now() - timestamp > timedelta(hours=self._default_ttl_hours):
-            del self._cache[ticker]
-            return None, None
-        return passed, stats
+        # data = (passed, stats)
+        return data[0], data[1]
 
     def set(self, ticker: str, passed: bool, stats: Dict):
-        self._cache[ticker] = (datetime.now(), passed, stats)
+        self._cache.set(ticker, (passed, stats))
 
     def clear(self) -> int:
-        count = len(self._cache)
-        self._cache.clear()
-        return count
+        return self._cache.clear()
 
 
 # ============================================================================
@@ -349,8 +397,8 @@ def get_all_cache_stats() -> Dict[str, Dict]:
         "instruments_cache": instruments_cache.get_stats(),
         "analysis_cache": analysis_cache.get_stats(),
         "news_cache": news_cache.get_stats(),
+        "trading_status_cache": trading_status_cache.get_stats(),  # ← добавить
     }
-
 
 def clear_all_caches() -> int:
     total = 0
@@ -362,6 +410,7 @@ def clear_all_caches() -> int:
     total += analysis_cache.clear()
     total += news_cache.clear()
     total += validation_cache.clear()
+    total += trading_status_cache.clear()  # ← добавить
     info(f"🧹 Очищено {total} записей из всех кэшей")
     return total
 

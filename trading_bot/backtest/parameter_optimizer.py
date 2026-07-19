@@ -302,6 +302,19 @@ class UnifiedParameterOptimizer:
         else:
             return "КОНСЕРВАТИВНЫЙ"
 
+    def _save_optimization_history(self):
+        """Сохранение полной истории оптимизации"""
+        from pathlib import Path
+        import pandas as pd
+
+        history_file = Path(f"optimization_results/{self.ticker}_history.csv")
+        history_file.parent.mkdir(exist_ok=True)
+
+        if self.results:
+            df = pd.DataFrame(self.results)
+            df.to_csv(history_file, index=False)
+            print(f"💾 История оптимизации: {history_file}")
+
 
 def optimize_with_validation(ticker: str, capital: float = 50000, days: int = 90):
     """Оптимизация с валидацией на out-of-sample данных"""

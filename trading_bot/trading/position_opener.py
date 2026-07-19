@@ -306,6 +306,7 @@ class PositionOpener:
     def open_short_market(self, stock: StockCandidate, quantity: int) -> bool:
         """Открытие SHORT позиции с АВТОМАТИЧЕСКИМ ВЫБОРОМ типа заявки и детальным логированием"""
         from trading_bot.api.tbank_client import tbank
+        from trading_bot.risk.position_manager import position_manager  # ← ДОБАВИТЬ ИМПОРТ
 
         ticker = stock.ticker
 
@@ -366,7 +367,6 @@ class PositionOpener:
         info(f"   ✅ Капитал достаточен")
 
         # ========== 4. ПРОВЕРКА МАРЖИ ==========
-        from trading_bot.risk.position_manager import position_manager
         required_margin = quantity * stock.price * 0.2
         can_open, reason = position_manager.can_open_new_position(required_margin)
         info(f"   Проверка маржи: required_margin={required_margin:.2f}₽, can_open={can_open}, reason={reason}")
@@ -405,7 +405,6 @@ class PositionOpener:
                 info(f"   ❌ ОТКАЗ: API торговля недоступна")
                 return False
 
-            # ✅ НОВОЕ: если нет ни рыночных, ни лимитных заявок - нельзя торговать
             if not market_available and not limit_available:
                 error(f"❌ {ticker}: нет доступных типов заявок для SHORT")
                 info(f"   ❌ ОТКАЗ: нет доступных заявок")
@@ -469,11 +468,9 @@ class PositionOpener:
         try:
             info(f"📡 ОТПРАВКА заявки: SHORT {quantity} шт {ticker}")
 
-            # ✅ НОВОЕ: если рыночные недоступны, используем АГРЕССИВНУЮ лимитную
             if not market_available:
                 info(f"   ⚠️ Рыночные заявки недоступны, используем АГРЕССИВНУЮ лимитную")
-                # Агрессивная цена: 3-4% ниже рынка для гарантированного исполнения
-                aggressive_price = stock.price * 0.96  # 4% ниже
+                aggressive_price = stock.price * 0.96
                 step = tbank._get_min_price_increment_advanced(stock.figi)
                 if step > 0:
                     aggressive_price = round(aggressive_price / step) * step
@@ -491,7 +488,6 @@ class PositionOpener:
                 success_flag = tbank.place_limit_order(stock.figi, quantity, "SELL", limit_price)
 
             if success_flag:
-                # Ожидаем исполнения
                 for attempt in range(5):
                     time.sleep(1)
                     positions = _get_tbank().get_positions()
@@ -514,11 +510,10 @@ class PositionOpener:
 
             error(f"❌ SHORT {ticker} не открыт ({order_reason})")
 
-            # Fallback: если лимитная не сработала, пробуем АГРЕССИВНУЮ лимитную (ещё ниже)
             if not use_market or not market_available:
                 warning(f"   🔄 Fallback: пробуем СУПЕР-АГРЕССИВНУЮ лимитную заявку...")
                 try:
-                    super_aggressive_price = stock.price * 0.93  # 7% ниже
+                    super_aggressive_price = stock.price * 0.93
                     step = tbank._get_min_price_increment_advanced(stock.figi)
                     if step > 0:
                         super_aggressive_price = round(super_aggressive_price / step) * step
@@ -550,8 +545,8 @@ class PositionOpener:
     def _check_funds(self, figi: str, quantity: int, price: float, ticker: str) -> bool:
         """Проверка достаточности средств для LONG с КЭШИРОВАНИЕМ"""
         from trading_bot.api.tbank_client import tbank
-        
-        cache_key = f"funds_{figi}_{quantity}_{int(price*100)}"
+
+        cache_key = f"funds_{figi}_{quantity}_{int(price * 100)}"
         if cache_key in self._check_cache:
             cached_time, result = self._check_cache[cache_key]
             if (time.time() - cached_time) < 10:  # 10 секунд
@@ -561,23 +556,28 @@ class PositionOpener:
             available, total_capital, _ = tbank.get_available_funds()
             total_cost = quantity * price
 
+            # ✅ УЧЁТ КОМИССИИ (0.05%)
+            commission = total_cost * 0.0005
+            total_with_commission = total_cost + commission
+
             MAX_POSITION_PCT = 0.7
-            if total_cost > total_capital * MAX_POSITION_PCT:
+            if total_with_commission > total_capital * MAX_POSITION_PCT:
                 self._check_cache[cache_key] = (time.time(), False)
                 return False
 
             MIN_RESERVE = 300
-            if available - total_cost < MIN_RESERVE:
+            if available - total_with_commission < MIN_RESERVE:
                 self._check_cache[cache_key] = (time.time(), False)
                 return False
 
             MIN_COVERAGE_PCT = 0.3
-            if available < total_cost * MIN_COVERAGE_PCT:
+            if available < total_with_commission * MIN_COVERAGE_PCT:
                 self._check_cache[cache_key] = (time.time(), False)
                 return False
 
             self._check_cache[cache_key] = (time.time(), True)
             return True
+
         except Exception as e:
             warning(f"   ⚠️ Не удалось проверить средства: {e}")
             return True
@@ -602,9 +602,18 @@ class PositionOpener:
                     warning(f"   Комиссия за перенос: {daily_fee:.0f}₽/день")
 
     def _add_position_to_manager(self, stock: StockCandidate, quantity: int, price: float, side: OrderSide):
-        """Добавление позиции в менеджер с динамическими TP/SL"""
         try:
             position_manager = self._get_position_manager()
+
+            # ✅ ПРОВЕРКА: позиция уже существует?
+            existing = position_manager.get_position(stock.figi)
+            if existing:
+                warning(f"⚠️ Позиция {stock.ticker} уже существует в менеджере, обновляем...")
+                existing.quantity += quantity
+                existing.avg_price = (existing.avg_price * existing.quantity + price * quantity) / (
+                            existing.quantity + quantity)
+                info(f"   ✅ Позиция обновлена: {existing.quantity} шт, ср.цена {existing.avg_price:.2f}₽")
+                return
 
             # ✅ БЕРЁМ TP/SL ИЗ АНАЛИЗА (если есть)
             take_profit_pct = None

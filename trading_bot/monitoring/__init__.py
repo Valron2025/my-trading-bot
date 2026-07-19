@@ -163,7 +163,7 @@ def shutdown_monitoring():
 
     if _watchdog:
         try:
-            _watchdog.stop_watchdog()
+            _watchdog.stop_watchdog()  # ← переименовано с stop на stop_watchdog
             logger.info("   ✅ Watchdog остановлен")
         except Exception as e:
             logger.warning(f"   ⚠️ Ошибка остановки Watchdog: {e}")

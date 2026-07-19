@@ -283,6 +283,8 @@ class Position:
 
     def current_profit_pct(self, current_price: float) -> float:
         """Текущая прибыль в процентах"""
+        if self.avg_price == 0:  # ← ЭТА СТРОКА ДОЛЖНА БЫТЬ
+            return 0.0
         if self.side == OrderSide.LONG:
             return (current_price - self.avg_price) / self.avg_price * 100
         else:

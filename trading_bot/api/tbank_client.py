@@ -2044,17 +2044,17 @@ class TBankClient:
                         return []
                     debug(f"   ❌ Ошибка получения свечей {figi[:8]}: {e}")
                     return []
+
     @api_monitor.measure("get_trading_status")
     def get_trading_status(self, figi: str) -> Dict[str, Any]:
         """Получение статуса торгов с КЭШИРОВАНИЕМ"""
         self._wait_for_rate_limit()
 
-        # ✅ ПРОВЕРКА КЭША
+        # ✅ ИСПОЛЬЗУЕМ ЕДИНЫЙ КЭШ
         cache_key = f"trading_status_{figi}"
-        if cache_key in self._trading_status_cache:
-            cached_time, cached_data = self._trading_status_cache[cache_key]
-            if (time.time() - cached_time) < self._trading_status_ttl:
-                return cached_data
+        cached_result = instruments_cache.get(cache_key)
+        if cached_result is not None:
+            return cached_result
 
         try:
             with Client(self.token, target=self.api_url) as client:
@@ -2076,8 +2076,8 @@ class TBankClient:
                 if result['limit_order_available']:
                     result['order_types'].append('LIMIT')
 
-                # ✅ СОХРАНЯЕМ В КЭШ
-                self._trading_status_cache[cache_key] = (time.time(), result)
+                # ✅ СОХРАНЯЕМ В ЕДИНЫЙ КЭШ
+                instruments_cache.set(cache_key, result, ttl=self._trading_status_ttl)
                 return result
 
         except Exception as e:
@@ -2158,114 +2158,159 @@ class TBankClient:
 
         return result
 
+    # def is_confirmation_required(self, figi: str) -> bool:
+    #     """
+    #     Проверка, требует ли инструмент подтверждения сделок (OTC)
+    #     ТОЛЬКО через API - БЕЗ ХАРДКОДА!
+    #     """
+    #     # ========== 1. ПРОВЕРКА КЭША ==========
+    #     cache_key = f"confirmation_required_{figi}"
+    #     cached_result = instruments_cache.get(cache_key)
+    #     if cached_result is not None:
+    #         return cached_result
+    #
+    #     try:
+    #         # ========== 2. ПОЛУЧАЕМ ИНФОРМАЦИЮ ОБ ИНСТРУМЕНТЕ ==========
+    #         with Client(self.token, target=self.api_url) as client:
+    #             # Пробуем получить instrument через share_by
+    #             try:
+    #                 response = client.instruments.share_by(figi=figi)
+    #                 if response and response.instrument:
+    #                     instrument = response.instrument
+    #
+    #                     # Проверяем флаг for_qual_investor_flag (требует квалификации)
+    #                     if getattr(instrument, 'for_qual_investor_flag', False):
+    #                         instruments_cache.set(cache_key, True, ttl=3600)
+    #                         return True
+    #
+    #                     # Проверяем exchange - если это внебиржевая площадка
+    #                     exchange = getattr(instrument, 'exchange', '')
+    #                     if 'DEALER' in exchange or 'OTC' in exchange:
+    #                         instruments_cache.set(cache_key, True, ttl=3600)
+    #                         return True
+    #
+    #                     # Проверяем api_trade_available_flag
+    #                     if not getattr(instrument, 'api_trade_available_flag', True):
+    #                         instruments_cache.set(cache_key, True, ttl=3600)
+    #                         return True
+    #
+    #             except Exception as e:
+    #                 debug(f"Не удалось получить share_by для {figi}: {e}")
+    #
+    #             # Пробуем получить через bond_by
+    #             try:
+    #                 response = client.instruments.bond_by(figi=figi)
+    #                 if response and response.instrument:
+    #                     instrument = response.instrument
+    #
+    #                     if getattr(instrument, 'for_qual_investor_flag', False):
+    #                         instruments_cache.set(cache_key, True, ttl=3600)
+    #                         return True
+    #
+    #                     exchange = getattr(instrument, 'exchange', '')
+    #                     if 'DEALER' in exchange or 'OTC' in exchange:
+    #                         instruments_cache.set(cache_key, True, ttl=3600)
+    #                         return True
+    #
+    #                     if not getattr(instrument, 'api_trade_available_flag', True):
+    #                         instruments_cache.set(cache_key, True, ttl=3600)
+    #                         return True
+    #
+    #             except Exception as e:
+    #                 debug(f"Не удалось получить bond_by для {figi}: {e}")
+    #
+    #             # Пробуем получить через etf_by
+    #             try:
+    #                 response = client.instruments.etf_by(figi=figi)
+    #                 if response and response.instrument:
+    #                     instrument = response.instrument
+    #
+    #                     if getattr(instrument, 'for_qual_investor_flag', False):
+    #                         instruments_cache.set(cache_key, True, ttl=3600)
+    #                         return True
+    #
+    #                     exchange = getattr(instrument, 'exchange', '')
+    #                     if 'DEALER' in exchange or 'OTC' in exchange:
+    #                         instruments_cache.set(cache_key, True, ttl=3600)
+    #                         return True
+    #
+    #                     if not getattr(instrument, 'api_trade_available_flag', True):
+    #                         instruments_cache.set(cache_key, True, ttl=3600)
+    #                         return True
+    #
+    #             except Exception as e:
+    #                 debug(f"Не удалось получить etf_by для {figi}: {e}")
+    #
+    #             # ========== 3. ПРОВЕРКА ЧЕРЕЗ ТОРГОВЫЙ СТАТУС ==========
+    #             trading_status = self.get_trading_status(figi)
+    #
+    #             # ✅ ДИАГНОСТИКА ДЛЯ ОТЛАДКИ
+    #             ticker = self._get_ticker_by_figi(figi)
+    #             if ticker == "AFKS":
+    #                 info(f"🔍 Диагностика AFKS:")
+    #                 info(f"   📊 api_trade_available: {trading_status.get('api_trade_available', False)}")
+    #                 info(f"   📊 market_order_available: {trading_status.get('market_order_available', False)}")
+    #                 info(f"   📊 limit_order_available: {trading_status.get('limit_order_available', False)}")
+    #                 info(f"   📊 trading_status: {trading_status.get('trading_status', 'unknown')}")
+    #                 info(f"   📊 description: {trading_status.get('trading_status_description', 'unknown')}")
+    #
+    #             # Если API торговля недоступна - считаем OTC
+    #             if not trading_status.get('api_trade_available', True):
+    #                 instruments_cache.set(cache_key, True, ttl=3600)
+    #                 return True
+    #
+    #             # Если нет доступных типов заявок - возможно OTC
+    #             if not trading_status.get('market_order_available', False) and \
+    #                     not trading_status.get('limit_order_available', False):
+    #                 instruments_cache.set(cache_key, True, ttl=3600)
+    #                 return True
+    #
+    #             # ========== 4. ПО УМОЛЧАНИЮ ==========
+    #             instruments_cache.set(cache_key, False, ttl=1800)
+    #             return False
+    #
+    #     except Exception as e:
+    #         debug(f"Ошибка проверки OTC для {figi}: {e}")
+    #         return False
+
     def is_confirmation_required(self, figi: str) -> bool:
-        """
-        Проверка, требует ли инструмент подтверждения сделок (OTC)
-        ТОЛЬКО через API - БЕЗ ХАРДКОДА!
-        """
-        # ========== 1. ПРОВЕРКА КЭША ==========
-        cache_key = f"confirmation_required_{figi}"
-        cached_result = instruments_cache.get(cache_key)
-        if cached_result is not None:
-            return cached_result
+        """Проверка, требует ли инструмент подтверждения сделок (OTC)"""
+        # ✅ ЕДИНЫЙ КЭШ
+        cache_key = f"confirmation_{figi}"
+        cached = instruments_cache.get(cache_key)
+        if cached is not None:
+            return cached
 
         try:
-            # ========== 2. ПОЛУЧАЕМ ИНФОРМАЦИЮ ОБ ИНСТРУМЕНТЕ ==========
             with Client(self.token, target=self.api_url) as client:
-                # Пробуем получить instrument через share_by
+                # Пробуем получить как акцию
                 try:
                     response = client.instruments.share_by(figi=figi)
                     if response and response.instrument:
                         instrument = response.instrument
-
-                        # Проверяем флаг for_qual_investor_flag (требует квалификации)
                         if getattr(instrument, 'for_qual_investor_flag', False):
                             instruments_cache.set(cache_key, True, ttl=3600)
                             return True
-
-                        # Проверяем exchange - если это внебиржевая площадка
                         exchange = getattr(instrument, 'exchange', '')
                         if 'DEALER' in exchange or 'OTC' in exchange:
                             instruments_cache.set(cache_key, True, ttl=3600)
                             return True
-
-                        # Проверяем api_trade_available_flag
                         if not getattr(instrument, 'api_trade_available_flag', True):
                             instruments_cache.set(cache_key, True, ttl=3600)
                             return True
+                except Exception:
+                    pass
 
-                except Exception as e:
-                    debug(f"Не удалось получить share_by для {figi}: {e}")
-
-                # Пробуем получить через bond_by
-                try:
-                    response = client.instruments.bond_by(figi=figi)
-                    if response and response.instrument:
-                        instrument = response.instrument
-
-                        if getattr(instrument, 'for_qual_investor_flag', False):
-                            instruments_cache.set(cache_key, True, ttl=3600)
-                            return True
-
-                        exchange = getattr(instrument, 'exchange', '')
-                        if 'DEALER' in exchange or 'OTC' in exchange:
-                            instruments_cache.set(cache_key, True, ttl=3600)
-                            return True
-
-                        if not getattr(instrument, 'api_trade_available_flag', True):
-                            instruments_cache.set(cache_key, True, ttl=3600)
-                            return True
-
-                except Exception as e:
-                    debug(f"Не удалось получить bond_by для {figi}: {e}")
-
-                # Пробуем получить через etf_by
-                try:
-                    response = client.instruments.etf_by(figi=figi)
-                    if response and response.instrument:
-                        instrument = response.instrument
-
-                        if getattr(instrument, 'for_qual_investor_flag', False):
-                            instruments_cache.set(cache_key, True, ttl=3600)
-                            return True
-
-                        exchange = getattr(instrument, 'exchange', '')
-                        if 'DEALER' in exchange or 'OTC' in exchange:
-                            instruments_cache.set(cache_key, True, ttl=3600)
-                            return True
-
-                        if not getattr(instrument, 'api_trade_available_flag', True):
-                            instruments_cache.set(cache_key, True, ttl=3600)
-                            return True
-
-                except Exception as e:
-                    debug(f"Не удалось получить etf_by для {figi}: {e}")
-
-                # ========== 3. ПРОВЕРКА ЧЕРЕЗ ТОРГОВЫЙ СТАТУС ==========
+                # Проверка через торговый статус
                 trading_status = self.get_trading_status(figi)
-
-                # ✅ ДИАГНОСТИКА ДЛЯ ОТЛАДКИ
-                ticker = self._get_ticker_by_figi(figi)
-                if ticker == "AFKS":
-                    info(f"🔍 Диагностика AFKS:")
-                    info(f"   📊 api_trade_available: {trading_status.get('api_trade_available', False)}")
-                    info(f"   📊 market_order_available: {trading_status.get('market_order_available', False)}")
-                    info(f"   📊 limit_order_available: {trading_status.get('limit_order_available', False)}")
-                    info(f"   📊 trading_status: {trading_status.get('trading_status', 'unknown')}")
-                    info(f"   📊 description: {trading_status.get('trading_status_description', 'unknown')}")
-
-                # Если API торговля недоступна - считаем OTC
                 if not trading_status.get('api_trade_available', True):
                     instruments_cache.set(cache_key, True, ttl=3600)
                     return True
-
-                # Если нет доступных типов заявок - возможно OTC
                 if not trading_status.get('market_order_available', False) and \
                         not trading_status.get('limit_order_available', False):
                     instruments_cache.set(cache_key, True, ttl=3600)
                     return True
 
-                # ========== 4. ПО УМОЛЧАНИЮ ==========
                 instruments_cache.set(cache_key, False, ttl=1800)
                 return False
 
@@ -4364,6 +4409,19 @@ class TBankClient:
         Используется в некоторых частях кода для SHORT позиций
         """
         return self.sell(figi, quantity, use_market)
+
+    def clear_all_caches(self):
+        """Очистка всех кэшей клиента"""
+        price_cache.clear()
+        positions_cache.clear()
+        candles_cache.clear()
+        margin_cache.clear()
+        instruments_cache.clear()
+        self._trading_status_cache.clear()
+        self._confirmation_cache.clear()
+        self._confirmation_cache_time.clear()
+        self._candle_locks.clear()
+        info("🧹 Все кэши TBankClient очищены")
 
 
 # Глобальная переменная для позиций (если используется в коде)

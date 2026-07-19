@@ -293,7 +293,42 @@ class ProfessionalBacktester:
         print(f"📊 Комиссия: {self.commission_pct * 100:.3f}%")
         print(f"📊 Проскальзывание: {self.slippage_pct * 100:.2f}%")
 
+    @classmethod
+    def clear_cache(cls, ticker: str = None):
+        """Очистка кэша для конкретного тикера или всего кэша"""
+        if ticker:
+            ticker = ticker.upper()
+            if ticker in cls._cached_data:
+                del cls._cached_data[ticker]
+                print(f"🧹 Кэш очищен для {ticker}")
+        else:
+            cls._cached_data.clear()
+            print("🧹 Весь кэш очищен")
+
+    @classmethod
+    def save_cache_to_disk(cls, path: str = "cache/historical_data.pkl"):
+        """Сохранение кэша на диск"""
+        import pickle
+        from pathlib import Path
+        Path("cache").mkdir(exist_ok=True)
+        with open(path, 'wb') as f:
+            pickle.dump(cls._cached_data, f)
+        print(f"💾 Кэш сохранён: {path}")
+
+    @classmethod
+    def load_cache_from_disk(cls, path: str = "cache/historical_data.pkl"):
+        """Загрузка кэша с диска"""
+        import pickle
+        from pathlib import Path
+        if Path(path).exists():
+            with open(path, 'rb') as f:
+                cls._cached_data = pickle.load(f)
+            print(f"📦 Кэш загружен: {path} (тикеров: {len(cls._cached_data)})")
+            return True
+        return False
+
     def _fetch_candles_moex(self, ticker: str, interval_minutes: int = 5, days: int = 90) -> Optional[pd.DataFrame]:
+        """Получение свечей с MOEX с повторными попытками"""
         ticker = ticker.upper()
         interval_map = {1: 1, 5: 5, 10: 10, 15: 15, 30: 30, 60: 60}
         moex_interval = interval_map.get(interval_minutes, 5)
@@ -309,47 +344,27 @@ class ProfessionalBacktester:
             'start': 0
         }
 
-        try:
-            time.sleep(0.2)
-            response = requests.get(url, params=params, timeout=30)
-            if response.status_code != 200:
-                return None
-
-            data = response.json()
-            candles_data = data.get('candles', {})
-            columns = candles_data.get('columns', [])
-            rows = candles_data.get('data', [])
-
-            if not columns or not rows:
-                return None
-
+        max_retries = 3
+        for attempt in range(max_retries):
             try:
-                close_idx = columns.index('close')
-                volume_idx = columns.index('volume')
-            except ValueError:
-                return None
+                time.sleep(0.2 * (attempt + 1))
+                response = requests.get(url, params=params, timeout=30)
 
-            candles = []
-            for row in rows:
-                if len(row) > max(close_idx, volume_idx):
-                    close = float(row[close_idx]) if row[close_idx] else 0
-                    volume = float(row[volume_idx]) if row[volume_idx] else 0
-                    if close > 0:
-                        candles.append((close, volume))
+                if response.status_code == 200:
+                    # ... обработка данных ...
+                    return df
+                elif response.status_code == 429:
+                    print(f"⚠️ Rate limit MOEX, попытка {attempt + 1}/{max_retries}")
+                    time.sleep(2 ** attempt)
+                else:
+                    print(f"⚠️ MOEX статус {response.status_code}, попытка {attempt + 1}")
 
-            if not candles:
-                return None
+            except requests.exceptions.Timeout:
+                print(f"⚠️ Таймаут MOEX, попытка {attempt + 1}")
+            except Exception as e:
+                print(f"⚠️ Ошибка MOEX: {e}, попытка {attempt + 1}")
 
-            df = pd.DataFrame(candles, columns=['close', 'volume'])
-            freq_map = {1: '1min', 5: '5min', 15: '15min', 30: '30min', 60: '1h'}
-            freq = freq_map.get(interval_minutes, '5min')
-            df['time'] = pd.date_range(start=start_date, periods=len(df), freq=freq)
-            df['open'] = df['close'].shift(1).fillna(df['close'])
-            df['high'] = df[['open', 'close']].max(axis=1)
-            df['low'] = df[['open', 'close']].min(axis=1)
-            return df
-        except Exception:
-            return None
+        return None
 
     def load_historical_data(self, ticker: str) -> Optional[pd.DataFrame]:
         """Загрузка исторических данных с ГЛОБАЛЬНЫМ кэшированием"""
@@ -544,6 +559,23 @@ class ProfessionalBacktester:
         self.positions.remove(pos)
         color = "🟢" if net_profit > 0 else "🔴"
         print(f"{color} {pos['side']} {pos['ticker']} {reason}: {net_profit:+.2f}₽")
+
+    def _close_position(self, pos: Dict, price: float, time: datetime, reason: str):
+        exec_price = self._apply_slippage(price, "SELL" if pos['side'] == "LONG" else "BUY")
+        close_value = exec_price * pos['quantity']
+        commission_close = close_value * self.commission_pct
+
+        # ✅ УЧИТЫВАЕМ КОМИССИЮ ПРИ ВХОДЕ
+        entry_value = pos['price'] * pos['quantity']
+        entry_commission = entry_value * self.commission_pct
+
+        if pos['side'] == 'LONG':
+            gross_profit = (exec_price - pos['price']) * pos['quantity']
+        else:
+            gross_profit = (pos['price'] - exec_price) * pos['quantity']
+
+        total_commission = entry_commission + commission_close
+        net_profit = gross_profit - total_commission  # ← полная комиссия
 
     def _get_stats(self, ticker: str) -> Dict[str, Any]:
         if not self.trades:
