@@ -259,11 +259,23 @@ class TBankClient:
 
     @contextmanager
     def _get_client_context(self):
-        """Контекстный менеджер для работы с клиентом - С ПРАВИЛЬНЫМ АДРЕСОМ"""
+        """Контекстный менеджер для работы с клиентом"""
         client = None
         try:
-            # ✅ ИСПОЛЬЗУЕМ АДРЕС ИЗ КОНФИГА
-            client = Client(self.token, target=self.api_url)
+            # ✅ ПРИНУДИТЕЛЬНОЕ ИСПОЛЬЗОВАНИЕ SSL
+            import certifi
+            import grpc
+            from grpc import ssl_channel_credentials
+
+            root_certificates = open(certifi.where(), 'rb').read()
+            ssl_creds = ssl_channel_credentials(root_certificates=root_certificates)
+
+            # Создаём клиент с SSL
+            client = Client(
+                self.token,
+                target=self.api_url,
+                credentials=ssl_creds
+            )
             yield client
         except Exception as e:
             debug(f"Ошибка создания клиента: {e}")

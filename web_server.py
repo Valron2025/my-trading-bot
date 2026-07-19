@@ -7,11 +7,35 @@
 import os
 import sys
 
+
 # ============================================
-# SSL НАСТРОЙКА ДЛЯ RENDER
+# ПРИНУДИТЕЛЬНАЯ SSL НАСТРОЙКА ДЛЯ RENDER
 # ============================================
-import certifi
 import ssl
+import certifi
+
+# 1. Установка переменных
+os.environ['SSL_CERT_FILE'] = certifi.where()
+os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
+os.environ['GRPC_SSL_CIPHER_SUITES'] = 'HIGH+ECDSA+HIGH'
+os.environ['GRPC_DNS_RESOLVER'] = 'native'
+os.environ['SSL_TBANK_VERIFY'] = 'True'
+
+# 2. Принудительная установка SSL контекста для gRPC
+try:
+    import grpc
+    from grpc import ssl_channel_credentials
+
+    # Создаём SSL контекст с сертификатами certifi
+    root_certificates = open(certifi.where(), 'rb').read()
+    ssl_creds = ssl_channel_credentials(root_certificates=root_certificates)
+    print(f"🔐 SSL контекст создан с certifi: {certifi.where()}")
+except Exception as e:
+    print(f"⚠️ Ошибка создания SSL контекста: {e}")
+
+print(f"🔐 SSL_CERT_FILE: {os.environ.get('SSL_CERT_FILE')}")
+print(f"🔐 REQUESTS_CA_BUNDLE: {os.environ.get('REQUESTS_CA_BUNDLE')}")
+# ============================================
 
 # Принудительное использование сертификатов
 os.environ['SSL_CERT_FILE'] = certifi.where()
