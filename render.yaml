@@ -46,6 +46,8 @@ services:
         value: "/etc/ssl/certs/ca-certificates.crt"
       - key: REQUESTS_CA_BUNDLE
         value: "/etc/ssl/certs/ca-certificates.crt"
+      - key: SSL_TBANK_VERIFY
+        value: "True"
 
       # ========== НАСТРОЙКИ БОТА ==========
       - key: ENABLE_OTC_TRADING
