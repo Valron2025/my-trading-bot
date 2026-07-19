@@ -11,6 +11,22 @@ echo "User: $(whoami)"
 echo "PWD: $(pwd)"
 echo "=========================================="
 
+# ============================================
+# 🔧 ФИКС ДЛЯ RENDER: ПРИНУДИТЕЛЬНАЯ УСТАНОВКА ПЕРЕМЕННЫХ
+# ============================================
+export TBANK_API_URL="invest-public-api.tbank.ru:443"
+export TINKOFF_API_URL="invest-public-api.tbank.ru:443"
+export INVEST_API_URL="invest-public-api.tbank.ru:443"
+export GRPC_DNS_RESOLVER="native"
+export GRPC_VERBOSITY="ERROR"
+
+# Очистка кэша DNS (если возможно)
+if command -v resolvectl &> /dev/null; then
+    resolvectl flush-caches 2>/dev/null || true
+    echo "✅ DNS кэш очищен (resolvectl)"
+fi
+# ============================================
+
 # Настройка PYTHONPATH
 export PYTHONPATH="/opt/render/project/src:$PYTHONPATH"
 echo "📁 PYTHONPATH: $PYTHONPATH"
@@ -32,6 +48,8 @@ else
     echo "✅ TELEGRAM_TOKEN is set"
 fi
 
+echo "📡 TBANK_API_URL: $TBANK_API_URL"
+
 PORT="${PORT:-10000}"
 echo "📡 PORT: $PORT"
 
@@ -40,16 +58,15 @@ echo "=========================================="
 echo "🚀 STARTING WEB SERVER (GUNICORN)"
 echo "=========================================="
 
-# Запуск Gunicorn с web_server (только один worker)
+# Запуск Gunicorn с web_server
 gunicorn web_server:app \
     --bind 0.0.0.0:$PORT \
     --workers 1 \
     --threads 1 \
-    --timeout 300 \
+    --timeout 600 \
+    --max-requests 500 \
+    --max-requests-jitter 50 \
     --access-logfile - \
     --error-logfile - \
-    --log-level info
-
-# ========== ВАЖНО: worker.py НЕ ЗАПУСКАЕТСЯ ОТДЕЛЬНО ==========
-# Бот уже запущен внутри web_server.py через блокировку
-# Telegram polling также запущен внутри web_server.py
+    --log-level info \
+    --preload

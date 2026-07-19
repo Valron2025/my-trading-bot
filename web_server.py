@@ -1,10 +1,40 @@
 #!/usr/bin/env python3
 """Web сервер для VPS - health check, статус и метрики Prometheus"""
 
+# ============================================
+# 🔧 ФИКС ДЛЯ RENDER: ПРИНУДИТЕЛЬНАЯ УСТАНОВКА АДРЕСА API
+# ============================================
 import os
+import socket
 import sys
 import time
 import logging
+
+# 1. Принудительная установка переменных окружения ДО ВСЕХ ИМПОРТОВ
+os.environ['TBANK_API_URL'] = 'invest-public-api.tbank.ru:443'
+os.environ['TINKOFF_API_URL'] = 'invest-public-api.tbank.ru:443'
+os.environ['INVEST_API_URL'] = 'invest-public-api.tbank.ru:443'
+os.environ['GRPC_DNS_RESOLVER'] = 'native'
+os.environ['GRPC_VERBOSITY'] = 'ERROR'
+
+# 2. Проверка DNS резолвинга
+try:
+    ip = socket.gethostbyname('invest-public-api.tbank.ru')
+    print(f"✅ DNS резолвинг: invest-public-api.tbank.ru → {ip}")
+except Exception as e:
+    print(f"❌ DNS ошибка: {e}")
+
+# 3. Попытка очистить DNS кэш
+try:
+    import dns.resolver
+    dns.resolver.cache.flush()
+    print("✅ DNS кэш очищен")
+except:
+    pass
+
+print("✅ Render окружение настроено для T-Bank API")
+# ============================================
+
 from flask import Flask, jsonify
 from datetime import datetime
 import threading
@@ -29,10 +59,10 @@ print("=" * 60)
 print("🔍 ENVIRONMENT VARIABLES:")
 tbank_token = os.getenv('TBANK_TOKEN')
 tbank_account_id = os.getenv('TBANK_ACCOUNT_ID')
-tbank_api_url = os.getenv('TBANK_API_URL')  # ✅ ДОБАВЬТЕ
+tbank_api_url = os.getenv('TBANK_API_URL')
 print(f"   TBANK_TOKEN: {'✅ SET' if tbank_token else '❌ NOT SET'}")
 print(f"   TBANK_ACCOUNT_ID: {'✅ SET' if tbank_account_id else '❌ NOT SET'}")
-print(f"   TBANK_API_URL: {'✅ SET' if tbank_api_url else f'❌ NOT SET (default: invest-public-api.tbank.ru:443)'}")
+print(f"   TBANK_API_URL: {'✅ SET' if tbank_api_url else '❌ NOT SET'}")
 if tbank_token:
     print(f"   TBANK_TOKEN (first 20): {tbank_token[:20]}...")
 print("=" * 60)
@@ -58,7 +88,7 @@ _trading_bot = None
 _bot_thread = None
 _bot_started = False
 _bot_error = None
-_bot_start_time = time.time()  # Для uptime
+_bot_start_time = time.time()
 
 
 def run_bot():
@@ -85,7 +115,6 @@ def run_bot():
         _bot_start_time = time.time()
         print("   ✅ TRADING BOT STARTED")
 
-        # ========== ОБНОВЛЯЕМ МЕТРИКИ ПРИ ЗАПУСКЕ ==========
         try:
             from trading_bot.monitoring.prometheus_metrics import prometheus_metrics
             prometheus_metrics.set_bot_status(1)
@@ -135,7 +164,6 @@ for i in range(60):
     if i % 5 == 0:
         print(f"   ⏳ Ожидание... {i + 1}/60")
 
-# Проверяем статус
 print("\n📊 ФИНАЛЬНЫЙ СТАТУС:")
 print(f"   Поток активен: {_bot_thread.is_alive()}")
 print(f"   Бот запущен: {_bot_started}")
@@ -145,25 +173,20 @@ print("=" * 60 + "\n")
 # ========== FLASK APP ==========
 app = Flask(__name__)
 
-# ========== КЭШ ДЛЯ СТАТУСА ==========
 _status_cache = {}
 _status_cache_time = 0
-_STATUS_CACHE_TTL = 30  # 30 секунд
+_STATUS_CACHE_TTL = 30
 
-# ========== ПЕРЕМЕННАЯ ДЛЯ БАЛАНСА (кэшируется) ==========
 _cached_capital = 0
 _cached_capital_time = 0
-_CAPITAL_CACHE_TTL = 30  # 30 секунд
+_CAPITAL_CACHE_TTL = 30
 
-# ========== КЭШ ДЛЯ ПОЗИЦИЙ ==========
 _cached_positions = 0
 _cached_positions_time = 0
 
 
 def get_cached_capital():
-    """Получение капитала с кэшированием и таймаутом"""
     global _cached_capital, _cached_capital_time
-
     now = time.time()
     if now - _cached_capital_time < _CAPITAL_CACHE_TTL:
         return _cached_capital
@@ -200,9 +223,7 @@ def get_cached_capital():
 
 
 def get_cached_positions():
-    """Получение количества позиций с кэшированием"""
     global _cached_positions, _cached_positions_time
-
     now = time.time()
     if now - _cached_positions_time < _CAPITAL_CACHE_TTL:
         return _cached_positions
@@ -228,7 +249,8 @@ def health_check():
         "telegram_polling": _telegram_thread is not None and _telegram_thread.is_alive(),
         "bot_thread": _bot_thread is not None and _bot_thread.is_alive(),
         "bot_started": _bot_started,
-        "bot_error": _bot_error
+        "bot_error": _bot_error,
+        "api_url": os.getenv('TBANK_API_URL', 'not set')
     }), 200 if _bot_started else 503
 
 
@@ -269,37 +291,29 @@ def status():
     return jsonify(response), 200
 
 
-# ========== МЕТРИКИ ДЛЯ PROMETHEUS ==========
 @app.route('/metrics')
 def metrics():
-    """Экспорт метрик для Prometheus - ПОЛНАЯ ВЕРСИЯ"""
     try:
         from trading_bot.monitoring.prometheus_metrics import prometheus_metrics
 
-        # ========== 1. СТАТУС БОТА ==========
         prometheus_metrics.set_bot_status(1 if _bot_started else 0)
 
-        # ========== 2. UPTIME ==========
         if _bot_started:
-            uptime = time.time() - _bot_start_time
-            prometheus_metrics.set_bot_uptime(uptime)
+            prometheus_metrics.set_bot_uptime(time.time() - _bot_start_time)
 
-        # ========== 3. ПОРТФЕЛЬ ==========
         try:
             capital = get_cached_capital()
             if capital > 0:
                 prometheus_metrics.set_portfolio_value(float(capital))
-                prometheus_metrics.set_portfolio_cash(float(capital * 0.5))  # Приблизительно
+                prometheus_metrics.set_portfolio_cash(float(capital * 0.5))
 
             positions = get_cached_positions()
             prometheus_metrics.set_positions_count(float(positions))
-        except Exception as e:
+        except Exception:
             pass
 
-        # ========== 4. ПОЛУЧАЕМ ДАННЫЕ ИЗ БОТА ==========
         if _trading_bot and _bot_started:
             try:
-                # Пытаемся получить P&L из позиций
                 from trading_bot.api.tbank_client import tbank
                 positions_data = tbank.get_positions()
                 total_pnl = 0.0
@@ -319,19 +333,16 @@ def metrics():
                 if total_pnl != 0:
                     prometheus_metrics.set_daily_pnl(float(total_pnl))
 
-                # Маржа
                 margin_info = tbank.get_margin_info()
                 margin_rate = margin_info.get('margin_rate', 0)
                 if margin_rate > 0:
                     prometheus_metrics.set_margin_rate(float(margin_rate))
 
-            except Exception as e:
+            except Exception:
                 pass
 
-        # ========== 5. СИСТЕМНЫЕ МЕТРИКИ ==========
         prometheus_metrics.update_system_metrics()
 
-        # ========== 6. ВОЗВРАЩАЕМ МЕТРИКИ ==========
         return prometheus_metrics.get_metrics(), 200, {
             'Content-Type': 'text/plain; version=0.0.4; charset=utf-8'
         }
@@ -344,7 +355,6 @@ def metrics():
 
 @app.route('/metrics/summary')
 def metrics_summary():
-    """Сводка по метрикам"""
     try:
         from trading_bot.monitoring.prometheus_metrics import prometheus_metrics
         return jsonify(prometheus_metrics.get_metrics_summary()), 200
@@ -352,24 +362,16 @@ def metrics_summary():
         return jsonify({"error": str(e)}), 500
 
 
-# ========== ФОНОВОЕ ОБНОВЛЕНИЕ МЕТРИК ==========
 def background_metrics_updater():
-    """Фоновый поток для обновления метрик"""
     while True:
         try:
             if _bot_started and _trading_bot:
                 from trading_bot.monitoring.prometheus_metrics import prometheus_metrics
 
-                # Обновляем статус
                 prometheus_metrics.set_bot_status(1)
-
-                # Обновляем uptime
                 prometheus_metrics.set_bot_uptime(time.time() - _bot_start_time)
-
-                # Обновляем системные метрики
                 prometheus_metrics.update_system_metrics()
 
-                # Получаем данные из бота
                 try:
                     from trading_bot.api.tbank_client import tbank
                     _, total, _ = tbank.get_available_funds()
@@ -378,22 +380,20 @@ def background_metrics_updater():
 
                     positions = tbank.get_positions()
                     prometheus_metrics.set_positions_count(float(len(positions)))
-                except Exception as e:
+                except Exception:
                     pass
 
-                # Получаем циклы из бота
                 if hasattr(_trading_bot, 'trading_loop') and _trading_bot.trading_loop:
                     cycle_count = getattr(_trading_bot.trading_loop, '_cycle_count', 0)
                     if cycle_count > 0:
                         prometheus_metrics.set_trading_cycle_count(cycle_count)
 
-        except Exception as e:
+        except Exception:
             pass
 
-        time.sleep(15)  # Обновление каждые 15 секунд
+        time.sleep(15)
 
 
-# Запускаем фоновый поток для обновления метрик
 _metrics_updater_thread = threading.Thread(target=background_metrics_updater, daemon=True)
 _metrics_updater_thread.start()
 print("✅ Фоновый поток обновления метрик запущен")
